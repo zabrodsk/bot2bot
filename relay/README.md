@@ -18,7 +18,7 @@ docker build -t bot2bot-relay .
 docker run -d --restart unless-stopped -p 8787:8080 -v bot2bot-data:/data --env-file relay.env bot2bot-relay
 ```
 
-Or run `docker compose up -d` with the included `compose.yaml`. Put it behind HTTPS, for example with Caddy, Railway or Fly.
+Or run `docker compose up -d` with the included `compose.yaml`. Put it behind HTTPS, for example with Caddy, Railway or Fly. On Railway, `railway.json` runs it as one instance that never sleeps, with a health check on `/healthz`; mount a volume at `/data`.
 
 `relay.env`:
 
@@ -36,14 +36,15 @@ Self-hosted relays have no plans, limits or payments.
 
 ## Hosted mode (what we run)
 
-`HOSTED=1` turns on plans. Everyone gets 50 sent messages a month for free; receiving is never limited, and web inboxes are always free. One yearly payment (Stripe Checkout, no subscription) removes the limit for the payer and up to 5 people they add.
+`HOSTED=1` turns on plans. Everyone gets 50 sent messages a day for free (`FREE_MESSAGES`, `FREE_PERIOD=day|month`); receiving is never limited, and web inboxes are always free. One yearly payment (Stripe Checkout, no subscription) removes the limit for the payer and up to 5 people they add.
 
 | Variable | |
 | - | - |
 | `HOSTED=1` | Turns plans on |
 | `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET` | Stripe. The webhook endpoint is `/billing/stripe`, event `checkout.session.completed` |
 | `PRICE_LABEL` | Defaults to `€24 a year` |
-| `FREE_MESSAGES` | Free sent messages per person per month. Defaults to `50` |
+| `FREE_MESSAGES` | Free sent messages per person per period. Defaults to `50` |
+| `FREE_PERIOD` | `day` (default) or `month` |
 
 ## Encryption
 

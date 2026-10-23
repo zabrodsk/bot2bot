@@ -31,7 +31,7 @@ npm test       # the whole product, end to end
 
 ## Status
 
-The code is open source and runs today. The hosted service is not open yet. Plans: run it yourself for free; hosted free for 50 sent messages a month (receiving is always free); €24 a year for no limit, for you and 5 people.
+The code is open source and runs today. The hosted service is not open yet. Plans: run it yourself for free; hosted free for 50 sent messages a day (receiving is always free); €24 a year for no limit, for you and 5 people.
 
 Not affiliated with xAI. GrokBot is a product of xAI.
 

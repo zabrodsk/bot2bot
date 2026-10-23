@@ -1,0 +1,6 @@
+.env*
+data/
+.a5c/
+.omc/
+node_modules/
+test/

@@ -85,7 +85,7 @@ const signed = (env, event) => {
 };
 
 test('hosted: free messages each month, receiving stays free, signed payment, household', async (t0) => {
-  const env = await setup(t0, { hosted: true, billing: { stripeKey: 'sk_test_x', priceId: 'price_x', webhookSecret: SECRET, freeMessages: 3 } });
+  const env = await setup(t0, { hosted: true, billing: { stripeKey: 'sk_test_x', priceId: 'price_x', webhookSecret: SECRET, freeMessages: 3, freePeriod: 'month' } });
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   const mia = await owner(env, t0, 'mia@example.com', 'mia');
   const tom = await owner(env, t0, 'tom@example.com', 'tom');
@@ -160,4 +160,19 @@ test('self-hosted: no plans, no pricing page, never held for payment', async (t0
   assert.doesNotMatch((await ben.b('/app')).text, /free messages/i);
   env.advance(400 * 86_400_000);
   assert.doesNotMatch((await ben.b('/app')).text, /free messages/i);
+});
+
+test('hosted: the free allowance can be per day (what the hosted relay runs)', async (t0) => {
+  const env = await setup(t0, { hosted: true, billing: { freeMessages: 2, freePeriod: 'day' } });
+  const ben = await owner(env, t0, 'ben@example.com', 'ben');
+  const mia = await owner(env, t0, 'mia@example.com', 'mia');
+  const link = (await ben.b('/app/invites', { method: 'POST', form: { bot: ben.botId } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  await mia.b(`/i/${link}`, { method: 'POST', form: { bot: mia.botId, alias: 'Ben' } });
+  assert.match((await ben.b('/app')).text, /2 of 2 free messages left today/);
+  await ben.cli('send', 'Mia', 'one'); await ben.cli('send', 'Mia', 'two');
+  await assert.rejects(ben.cli('send', 'Mia', 'three'), /2 free messages for today are used up. They come back at midnight UTC/);
+  assert.match(await ben.cli('whoami'), /Free plan: 2\/2 messages sent today/);
+  const d = new Date(env.now());
+  env.advance(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) + 60_000 - env.now());
+  assert.match(await ben.cli('send', 'Mia', 'a new day'), /Sent msg_/);
 });

@@ -175,8 +175,12 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   // Hosted tier: everyone gets a number of free sent messages a month; a yearly payment (which covers a
   // household) removes the limit. Receiving is never limited, and web inboxes are always free.
   // Self-hosted relays have no plans at all.
-  const B = { priceLabel: '€24 a year', freeMessages: 50, householdSize: 6, ...billing };
+  const B = { priceLabel: '€24 a year', freeMessages: 50, freePeriod: 'day', householdSize: 6, ...billing };
   if (!Number.isInteger(B.freeMessages) || B.freeMessages < 0) throw new Error('FREE_MESSAGES must be a whole number (0 or more)');
+  if (!['day', 'month'].includes(B.freePeriod)) throw new Error('FREE_PERIOD must be day or month');
+  // Words for the period, used everywhere the allowance is shown.
+  B.periodWord = B.freePeriod === 'day' ? 'today' : 'this month';
+  B.perWord = B.freePeriod === 'day' ? 'a day' : 'a month';
   function coverage(user, t = clock()) {
     if (!hosted) return { state: 'self_hosted' };
     if (user?.paid_until > t) return { state: 'paid', until: user.paid_until };
@@ -184,13 +188,14 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     if (payer) return { state: 'covered', until: payer.paid_until, payer: payer.name };
     return { state: 'free' };
   }
-  // Free messages count what a person's bots send this calendar month (UTC). Web inbox replies don't count.
+  // Free messages count what a person's bots send this UTC day (or calendar month). Web inbox replies don't count.
   function allowance(user, bot = null, t = clock()) {
     const c = coverage(user, t);
     if (c.state !== 'free') return { ...c, limited: false };
     const d = new Date(t);
-    const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-    const resets = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+    const daily = B.freePeriod === 'day';
+    const start = daily ? Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) : Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+    const resets = daily ? start + 86_400_000 : Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
     const used = user
       ? q("SELECT count(*) AS n FROM messages m JOIN bots b ON b.id = m.from_bot WHERE b.user_id = ? AND m.via = 'bot' AND m.kind != 'probe' AND m.created_at >= ?").get(user.id, start).n
       : q("SELECT count(*) AS n FROM messages WHERE from_bot = ? AND via = 'bot' AND kind != 'probe' AND created_at >= ?").get(bot?.id ?? 0, start).n;
@@ -505,7 +510,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       encryption: me.box_pub ? 'on' : 'off',
       backup_check_every_hours: me.backup_every_h ?? null,
       last_check_in: iso(me.last_claim_at),
-      plan: hosted ? (({ state, limit, used, resets }) => ({ state, free_messages: limit, used_this_month: used, resets: iso(resets) }))(allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me)) : undefined,
+      plan: hosted ? (({ state, limit, used, resets }) => ({ state, free_messages: limit, period: B.freePeriod, used_in_period: used, used_this_month: used, resets: iso(resets) }))(allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me)) : undefined,
     }),
 
     'POST /v1/invites': ({ me, body }) => {
@@ -675,8 +680,8 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       if (hosted && !viaWeb && me.vendor !== 'web') {
         const a = allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me, t);
         if (a.limited && a.left <= 0) {
-          const day = new Date(a.resets).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' });
-          throw new HttpError(402, `your ${a.limit} free messages for this month are used up. They come back on ${day}. Receiving still works. Your owner can remove the limit (${B.priceLabel}) at ${publicUrl}/app/billing`);
+          const when = B.freePeriod === 'day' ? 'at midnight UTC' : `on ${new Date(a.resets).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' })}`;
+          throw new HttpError(402, `your ${a.limit} free messages for ${B.periodWord} are used up. They come back ${when}. Receiving still works. Your owner can remove the limit (${B.priceLabel}) at ${publicUrl}/app/billing`);
         }
       }
       const id = token('msg_', 9);
@@ -932,7 +937,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     trustProxy: process.env.TRUST_PROXY === '1',
     billing: { stripeKey: process.env.STRIPE_SECRET_KEY, priceId: process.env.STRIPE_PRICE_ID, webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
       ...(process.env.PRICE_LABEL ? { priceLabel: process.env.PRICE_LABEL } : {}),
-      ...(process.env.FREE_MESSAGES ? { freeMessages: Number(process.env.FREE_MESSAGES) } : {}) },
+      ...(process.env.FREE_MESSAGES ? { freeMessages: Number(process.env.FREE_MESSAGES) } : {}),
+      ...(process.env.FREE_PERIOD ? { freePeriod: process.env.FREE_PERIOD } : {}) },
     productName: process.env.PRODUCT_NAME || 'bot2bot',
     mailer: makeMailer(),
   });

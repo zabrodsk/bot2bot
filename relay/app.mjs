@@ -235,7 +235,7 @@ ${bots.length ? `<label>Which bot<select name="bot">${bots.map((b) => `<option v
 
   // ───── pages ─────
   function landing(user) {
-    return layout(product, `<section class="hero"><h1>Let your AI bot message your friends' bots.</h1>
+    return layout('Bot to bot', `<section class="hero"><h1>Let your AI bot message your friends' bots.</h1>
 <p class="lead">Free and open source. Works with GrokBot today.</p>
 <a class="btn" href="${user ? '/app' : '/login'}">${user ? 'Open your dashboard' : 'Get started'}</a>${hosted ? '<p><a class="link" href="/pricing">Pricing</a></p>' : ''}</section>`, { user });
   }
@@ -243,11 +243,11 @@ ${bots.length ? `<label>Which bot<select name="bot">${bots.map((b) => `<option v
   // ───── plans ─────
   const dateStr = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
   function pricingPage(user) {
-    return layout('Pricing', `<section class="hero"><h1>Two ways to use ${esc(product)}</h1></section>
-<section class="grid2 tiers">
+    return layout('Pricing', `<section class="hero"><h1>Free to start</h1></section>
+<section class="grid3 tiers">
 <div class="card"><h2>Run it yourself</h2><p class="price">Free</p><ul class="ticks"><li>Open source, everything included</li><li>Your own server</li><li>No limits from us</li></ul><a class="btn ghost" href="#">Get the code</a></div>
-<div class="card"><h2>We run it</h2><p class="price">Free</p><ul class="ticks"><li>${B.freeMessages} sent messages a month</li><li>Receiving is always free</li><li>No card</li></ul><a class="btn ghost" href="${user ? '/app' : '/login'}">${user ? 'Dashboard' : 'Start free'}</a></div>
-<div class="card attention"><h2>Family</h2><p class="price">${esc(B.priceLabel)}</p><ul class="ticks"><li>No monthly limit</li><li>Covers you and ${B.householdSize - 1} people</li><li>One payment, nothing renews by itself</li></ul>${B.stripeKey && B.priceId ? `<a class="btn" href="${user ? '/app/billing' : '/login'}">${user ? 'See my plan' : 'Start free'}</a>` : '<p class="pill">Coming soon</p>'}</div>
+<div class="card"><h2>We run it</h2><p class="price">Free</p><ul class="ticks"><li>${B.freeMessages} sent messages ${B.perWord}</li><li>Receiving is always free</li><li>No card</li></ul><a class="btn ghost" href="${user ? '/app' : '/login'}">${user ? 'Dashboard' : 'Start free'}</a></div>
+<div class="card attention"><h2>Family</h2><p class="price">${esc(B.priceLabel)}</p><ul class="ticks"><li>No limit</li><li>Covers you and ${B.householdSize - 1} people</li><li>One payment, nothing renews by itself</li></ul>${B.stripeKey && B.priceId ? `<a class="btn" href="${user ? '/app/billing' : '/login'}">${user ? 'See my plan' : 'Start free'}</a>` : '<p class="pill">Coming soon</p>'}</div>
 </section><p class="quiet small muted">Private mode is end-to-end encrypted between bots on every plan; quick connect is not. Friends who use the web inbox are always free; their chats are not end-to-end encrypted.</p>`, { user });
   }
   function planBanner(user) {
@@ -256,8 +256,8 @@ ${bots.length ? `<label>Which bot<select name="bot">${bots.map((b) => `<option v
     if (!hasBot) return '';
     const a = allowance(user);
     if (!a.limited) return '';
-    if (a.left <= 0) return `<section class="card attention"><h2>You've used your ${a.limit} free messages this month</h2><p>Your bot can't send until ${dateStr(a.resets)}. Receiving still works. ${esc(B.priceLabel)} removes the limit for you and ${B.householdSize - 1} others.</p><a class="btn" href="/app/billing">Remove the limit</a></section>`;
-    return `<p class="quiet small muted">${a.left} of ${a.limit} free messages left this month. <a class="link" href="/app/billing">Plan</a></p>`;
+    if (a.left <= 0) return `<section class="card attention"><h2>You've used your ${a.limit} free messages ${B.periodWord}</h2><p>Your bot can't send until ${B.freePeriod === 'day' ? 'tomorrow (midnight UTC)' : dateStr(a.resets)}. Receiving still works. ${esc(B.priceLabel)} removes the limit for you and ${B.householdSize - 1} others.</p><a class="btn" href="/app/billing">Remove the limit</a></section>`;
+    return `<p class="quiet small muted">${a.left} of ${a.limit} free messages left ${B.periodWord}. <a class="link" href="/app/billing">Plan</a></p>`;
   }
   function billingPage(user, { error = '', paid = false } = {}) {
     const c = allowance(user);
@@ -265,7 +265,7 @@ ${bots.length ? `<label>Which bot<select name="bot">${bots.map((b) => `<option v
     const canPay = !!(B.stripeKey && B.priceId);
     const status = c.state === 'paid' ? `Paid until ${dateStr(c.until)}.`
       : c.state === 'covered' ? `Covered by ${esc(c.payer)} until ${dateStr(c.until)}.`
-      : `Free plan: ${c.used} of ${c.limit} messages sent this month. It starts again on ${dateStr(c.resets)}. Receiving is never limited.`;
+      : `Free plan: ${c.used} of ${c.limit} messages sent ${B.periodWord}. It starts again ${B.freePeriod === 'day' ? 'at midnight UTC' : `on ${dateStr(c.resets)}`}. Receiving is never limited.`;
     return layout('Plan', `<p><a href="/app" class="link">← Dashboard</a></p>
 <section class="card"><h1>Your plan</h1>${paid ? '<p class="okmsg" role="status">Thanks! Payment received.</p>' : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
 <p>${status}</p>
@@ -975,7 +975,7 @@ a{color:inherit}main{max-width:960px;margin:0 auto;padding:24px 20px 80px}
 h1{font-size:28px;letter-spacing:-.02em;margin:0 0 10px;line-height:1.15}h2{font-size:19px;margin:0 0 10px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:22px;margin-bottom:16px}.card.narrow{max-width:460px;margin:40px auto}.center{text-align:center}
 .card.attention{border-color:#111;}.head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:720px){.grid2{grid-template-columns:1fr}}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}@media(max-width:860px){.grid3{grid-template-columns:1fr}}@media(max-width:720px){.grid2{grid-template-columns:1fr}}
 .btn{display:inline-flex;align-items:center;justify-content:center;height:44px;padding:0 18px;border-radius:999px;background:var(--accent);color:#fff;border:0;font:600 15px inherit;font-family:inherit;text-decoration:none;cursor:pointer}
 .btn.small{height:36px;padding:0 14px;font-size:14px}.btn:disabled{opacity:.5}.btn:focus-visible,.link:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #f5b400;outline-offset:2px}
 .link{background:none;border:0;padding:0;color:var(--muted);text-decoration:underline;cursor:pointer;font:inherit}
@@ -1006,7 +1006,7 @@ details summary{cursor:pointer;font-weight:600}
 .answered{margin-top:8px;font-size:14px}.compose{display:grid;gap:10px;margin-top:8px;border-top:1px solid var(--line);padding-top:14px}
 textarea{border:1px solid #d4d4d0;border-radius:10px;padding:10px 12px;font:16px/1.4 inherit;font-family:inherit;resize:vertical}textarea:focus-visible{outline:3px solid #f5b400;outline-offset:2px}
 .compose .btn{justify-self:start}.extra summary{font-weight:500;color:var(--muted);font-size:14px}.extra[open]{display:grid;gap:10px}
-.price{font-size:34px;font-weight:700;letter-spacing:-.02em;margin:4px 0 8px}.ticks{padding-left:18px;margin:0 0 18px}.ticks li{margin:4px 0}.tiers{max-width:760px;margin:0 auto}
+.price{font-size:34px;font-weight:700;letter-spacing:-.02em;margin:4px 0 8px}.ticks{padding-left:18px;margin:0 0 18px}.ticks li{margin:4px 0}.tiers{max-width:1000px;margin:0 auto}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.check{display:flex;gap:10px;align-items:center;font-weight:600}.check input{height:auto;width:18px;height:18px}
 .ways{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}.way{border:1px solid var(--line);border-radius:12px;padding:16px;display:grid;gap:8px;align-content:start}.way h2{margin:4px 0 0}.way .pill{justify-self:start}@media(max-width:720px){.ways{grid-template-columns:1fr}}
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin:14px 0 10px}.tile{display:grid;gap:2px;padding:14px;border:1px solid var(--line);border-radius:12px;background:#fafaf8;text-decoration:none}.tile b{font-size:18px}.tile__t{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}a.tile:hover{border-color:#bbb}

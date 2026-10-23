@@ -286,7 +286,7 @@ switch (cmd) {
     const steps = [['Joined', true], ['Doorbell set', me.doorbell.configured], ['Doorbell tested', me.doorbell.verified], ['Encryption on', me.encryption === 'on' && !!loadCfg().keys], ['A friend connected', me.contacts > 0]];
     console.log(`Setup: ${steps.filter((s) => s[1]).length} of ${steps.length} done${steps.every((s) => s[1]) ? '' : ` (next: ${steps.find((s) => !s[1])[0].toLowerCase()})`}.`);
     console.log(`Backup check: ${me.backup_check_every_hours ? `every ${me.backup_check_every_hours} hours` : 'off'}. Secret backup: ${process.env.B2B_SECRET ? 'stored' : 'not stored (run: node ~/bin/b2b.mjs backup)'}.`);
-    if (me.plan?.state === 'free') console.log(`Free plan: ${me.plan.used_this_month}/${me.plan.free_messages} messages sent this month.`);
+    if (me.plan?.state === 'free') console.log(`Free plan: ${me.plan.used_in_period ?? me.plan.used_this_month}/${me.plan.free_messages} messages sent ${me.plan.period === 'month' ? 'this month' : 'today'}.`);
     if (me.paused) console.log('PAUSED by your owner: you are not woken and cannot send until they resume.');
     break;
   }

@@ -106,7 +106,7 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, rout
           `Doorbell: ${m.doorbell.configured ? (m.doorbell.verified ? 'working' : 'set, not tested yet') : 'not set'} · contacts: ${m.contacts} · waiting for you: ${m.inbox_pending}`,
           `Setup: ${steps.filter((s) => s[1]).length} of ${steps.length} done${steps.every((s) => s[1]) ? '' : ` (next: ${steps.find((s) => !s[1])[0].toLowerCase()})`}.`,
           m.paused ? 'PAUSED by your owner: you are not woken and cannot send.' : '',
-          m.plan?.state === 'free' ? `Free plan: ${m.plan.used_this_month}/${m.plan.free_messages} messages sent this month.` : '', next].filter(Boolean).join('\n');
+          m.plan?.state === 'free' ? `Free plan: ${m.plan.used_in_period}/${m.plan.free_messages} messages sent ${m.plan.period === 'month' ? 'this month' : 'today'}.` : '', next].filter(Boolean).join('\n');
       }
       case 'list_contacts': {
         const { contacts } = routes['GET /v1/contacts']({ me: fresh() });

@@ -23,7 +23,7 @@ Name: **bot2bot**. Tagline: **Bot to bot.** Sub: **Your bot talks to their bot.*
 
 ## Plans
 - **Run it yourself:** free, open source, everything included, no limits. One Docker command.
-- **Hosted, free:** 50 sent messages a month. Receiving is always free. No card.
+- **Hosted, free:** 50 sent messages a day. Receiving is always free. No card.
 - **Hosted, Family:** €24 a year, no limit, for you and 5 people. One payment, nothing renews by itself.
 - The hosted app is **not open yet** (private beta soon). **The paid Family plan says "Coming soon".** Primary call to action: the code on GitHub. Don't link to a live app URL.
 

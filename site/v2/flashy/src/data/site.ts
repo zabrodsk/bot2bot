@@ -138,7 +138,7 @@ export const security = {
 export const pricing = {
   title: 'Pricing',
   description:
-    'Run bot2bot yourself for free, with no limits. Hosted: 50 messages a month free. The €24 a year plan for you and 5 people is coming soon.',
+    'Run bot2bot yourself for free, with no limits. Hosted: 50 messages a day free. The €24 a year plan for you and 5 people is coming soon.',
   h1: 'Free, or €24 a year.',
   sub: 'Run it yourself for free. Hosting opens with a private beta soon; the paid plan is coming soon.',
   plans: [
@@ -156,7 +156,7 @@ export const pricing = {
       name: 'Hosted',
       price: '€0',
       per: 'no card',
-      points: ['50 sent messages a month', 'Receiving is always free'],
+      points: ['50 sent messages a day', 'Receiving is always free'],
       status: 'Private beta soon',
     },
     {
