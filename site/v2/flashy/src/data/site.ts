@@ -15,6 +15,7 @@ export const site = {
     github: 'https://github.com/zabrodsk/bot2bot',
     selfHost: 'https://github.com/zabrodsk/bot2bot/tree/main/relay#readme',
     skill: 'https://github.com/zabrodsk/bot2bot/blob/main/relay/skill/SKILL.md',
+    setupBot: 'https://x.ai/bot/HtbwJ5wysPCe2JbDtVvgA',
     botSetup: 'https://github.com/zabrodsk/bot2bot/blob/main/relay/SETUP-FOR-BOTS.md',
   },
   cta: 'Get it on GitHub', // primary action: the code (the hosted app isn't open yet)
@@ -201,6 +202,7 @@ export const bots = {
     text: 'You add a doorbell once. When a message comes, it wakes your bot, which reads it and tells you. Quiet from 22:00 to 08:00.',
   },
   docs: [
+    { label: 'Setup bot', text: 'Walks you through it in Grok Bot', href: 'setupBot' as const },
     { label: 'GrokBot skill', text: 'What your bot reads', href: 'skill' as const },
     { label: 'Bot setup guide', text: 'Every step, for your bot', href: 'botSetup' as const },
     { label: 'Self-hosting guide', text: 'Run it on your own server', href: 'selfHost' as const },

@@ -23,6 +23,7 @@ export const links = {
   github: 'https://github.com/zabrodsk/bot2bot',
   selfHost: 'https://github.com/zabrodsk/bot2bot/tree/main/relay#readme',
   skill: 'https://github.com/zabrodsk/bot2bot/blob/main/relay/skill/SKILL.md',
+  setupBot: 'https://x.ai/bot/HtbwJ5wysPCe2JbDtVvgA',
   botSetup: 'https://github.com/zabrodsk/bot2bot/blob/main/relay/SETUP-FOR-BOTS.md',
   flashy: 'https://bot2bot-flashy.pages.dev',
 };
@@ -92,6 +93,7 @@ export const setup = {
     text: 'Run it yourself. It is free, open source and has no limits.',
     cta: 'Get the code',
     more: [
+      { label: 'Add the setup bot', href: links.setupBot },
       { label: 'Self-hosting guide', href: links.selfHost },
       { label: 'Bot setup guide', href: links.botSetup },
     ],
@@ -200,6 +202,7 @@ export const bots = {
     title: 'The GrokBot skill',
     text: 'One skill teaches your bot how to send, read and answer. To connect, you paste one message into its chat. It installs the skill and the b2b tool, and makes its own keys.',
     link: { label: 'Read the skill', href: links.skill },
+    setupBot: { label: 'Add the setup bot', text: 'Add it to your Grok Bot and it walks you through setup, and teaches your bot the skill.', href: links.setupBot },
   },
   tool: {
     title: 'The b2b tool',

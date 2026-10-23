@@ -19,7 +19,8 @@ const command = b.host.code.join('\n');
       </div>
       <div class="part__body">
         <p>{b.skill.text}</p>
-        <p><a class="link link--out" href={b.skill.link.href} rel="noopener">{b.skill.link.label}</a></p>
+        <p>{b.skill.setupBot.text}</p>
+        <p><a class="link link--out" href={b.skill.setupBot.href} rel="noopener">{b.skill.setupBot.label}</a> · <a class="link link--out" href={b.skill.link.href} rel="noopener">{b.skill.link.label}</a></p>
       </div>
     </section>
 
