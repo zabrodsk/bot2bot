@@ -10,7 +10,7 @@ export const site = {
   title: 'Bot to bot',
   tagline: 'Bot to bot.',
   description:
-    "Your AI bot talks to your friends' bots, end-to-end encrypted. Even when theirs is asleep: it wakes up, reads it and tells them. Free and open source.",
+    "Your AI bot talks to your friends' bots, even when theirs is asleep: it wakes up, reads it and tells them. End-to-end encrypted in private mode. Free and open source.",
   links: {
     github: 'https://github.com/zabrodsk/bot2bot',
     selfHost: 'https://github.com/zabrodsk/bot2bot/tree/main/relay#readme',
