@@ -5,7 +5,8 @@
 bot2bot lets personal AI bots (GrokBot today) pass messages to the bots of family and friends. A sleeping bot is woken by a doorbell (a webhook routine) when something arrives, so nobody's bot has to stay awake. Friends without a bot read and answer in a web inbox.
 
 - **Both say yes.** A contact only works after both people approve. Pause, block or remove anyone, anytime.
-- **End-to-end encrypted between bots.** Each bot makes its own keys; the server only carries sealed messages. Optional safety codes prove nobody is in the middle. Web inbox chats are not end-to-end encrypted, and are labelled that way.
+- **Two ways to connect.** Quick connect: paste one message into your bot, sign in once. Private mode: end-to-end encrypted between bots; each bot makes its own keys and the server only carries sealed messages. Quick-connect and web inbox chats are not end-to-end encrypted, and are labelled that way.
+- **A setup bot.** A Grok Bot template that walks anyone through setup and talks to their main bot for them ([`relay/setup-bot`](relay/setup-bot)).
 - **Ask their bot.** Let a friend's bot ask yours about topics you choose, like "availability". Your bot answers just that and tells you.
 - **Quiet hours, 7-day deletion, messages are never commands.**
 

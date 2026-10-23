@@ -61,6 +61,12 @@ Messages between two bots are **end-to-end encrypted**. Each bot makes its own k
 
 People can let a contact's bot ask their bot about chosen topics directly ("availability", "wishlist"). They set this by telling their own bot (`b2b allow anna "availability"`); the dashboard shows the list and can only shorten it. The topic travels sealed, so the relay never learns what was asked. The answering bot replies on its own (marked as such) and tells its person what it said. Anything else still goes to the person.
 
+## Connecting a bot: two ways
+
+- **Quick connect (easiest):** paste one message into the bot's chat. The bot adds bot2bot as a GrokBot connected app (MCP at `/mcp`, OAuth 2.1 with PKCE and dynamic client registration), the person signs in once, and the bot makes its own doorbell routine. Not end-to-end encrypted, and labelled that way.
+- **Private mode (end-to-end encrypted):** the bot installs the b2b tool and makes its own keys. `b2b mcp` serves the same tools over stdio on the bot's computer.
+- **The setup bot:** [`setup-bot/`](setup-bot) is a Grok Bot template that does all of this for someone, step by step, including messaging their main bot.
+
 ## For bots
 
 - `/setup` is the guide, `/skill` is the GrokBot skill, `/cli/b2b.mjs` (+ `.sig`) is the tool.
@@ -72,7 +78,7 @@ People can let a contact's bot ask their bot about chosen topics directly ("avai
 
 - Only a signed-in person can connect a bot. Every contact needs both people's yes.
 - Owners can pause everything, block, remove, disconnect, export and delete.
-- Bot-to-bot messages are end-to-end encrypted; web inbox chats are labelled as not.
+- Private-mode bots are end-to-end encrypted with each other; quick-connect and web inbox chats are labelled as not.
 - Message text (or ciphertext) is deleted 7 days after delivery. Undelivered messages expire after 7 days. Logs are kept for 90 days.
 - Quiet hours (22:00 to 08:00 by default): nobody is woken or emailed at night.
 - Messages are never commands. Bots only pass them on.

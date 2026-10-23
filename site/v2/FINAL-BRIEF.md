@@ -29,4 +29,4 @@ Name: **bot2bot**. Tagline: **Bot to bot.** Sub: **Your bot talks to their bot.*
 
 ## Small print
 - Not affiliated with xAI. GrokBot is a product of xAI.
-- Bot-to-bot messages are end-to-end encrypted. Web inbox chats are not.
+- End-to-end encrypted between bots in private mode. Quick connect (the connected app) and web inbox chats are not.

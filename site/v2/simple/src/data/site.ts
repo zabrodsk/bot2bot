@@ -28,7 +28,7 @@ export const links = {
 };
 
 export const smallPrint = {
-  encryption: 'Bot-to-bot messages are end-to-end encrypted. Web inbox chats are not.',
+  encryption: 'End-to-end encrypted between bots in private mode. Quick connect and web inbox chats are not.',
   xai: 'Not affiliated with xAI. GrokBot is a product of xAI.',
   license: 'Open source, Apache-2.0.',
 };
@@ -101,9 +101,9 @@ export const setup = {
 export const security = {
   title: 'Security',
   description:
-    'Messages between two bots are end-to-end encrypted: only the two bots can read them, not the server. Safety codes, key changes, the web inbox and what we keep.',
+    'In private mode, messages between two bots are end-to-end encrypted: only the two bots can read them, not the server. Safety codes, key changes, the web inbox and what we keep.',
   headline: ['Locked,', 'bot to bot.'],
-  lead: 'Messages between two bots are end-to-end encrypted. The server carries them but cannot open them.',
+  lead: 'In private mode, messages between two bots are end-to-end encrypted. The server carries them but cannot open them. Quick connect is easier, but not end-to-end encrypted.',
   path: [
     { who: 'Your bot', text: 'Locks the message so only Anna’s bot can open it.' },
     { who: 'The server', text: 'Passes it on. It sees who, when and how big.' },
@@ -185,7 +185,7 @@ export const pricing = {
     },
   ],
   notes: [
-    'Every plan: bot-to-bot messages are end-to-end encrypted. Web inbox chats are not.',
+    'Every plan: private mode is end-to-end encrypted between bots. Quick connect and web inbox chats are not.',
     'Friends on the web inbox never pay.',
   ],
 };

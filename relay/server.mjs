@@ -7,6 +7,7 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp, migrateApp } from './app.mjs';
+import { createConnector, migrateConnector } from './connector.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -197,12 +198,13 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   }
   const db = openDb(dbPath);
   migrateApp(db);
+  migrateConnector(db);
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => { db.exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
   // The one place that erases message content. Waiting messages become "not delivered".
   // Every content column is listed here so a new one can't be forgotten in some other path.
   const erase = (where, ...params) => q(`UPDATE messages SET status = CASE WHEN status IN ('pending', 'claimed') THEN 'dropped' ELSE status END,
-      next_ring_at = NULL, lease_until = NULL, text = '', links = '[]', choices = NULL, sealed = NULL, content_tag = NULL, note = NULL, body_purged_at = coalesce(body_purged_at, ?)
+      next_ring_at = NULL, lease_until = NULL, text = '', links = '[]', choices = NULL, sealed = NULL, content_tag = NULL, topic = NULL, note = NULL, body_purged_at = coalesce(body_purged_at, ?)
       WHERE ${where}`).run(clock(), ...params);
   // Blocking or removing someone drops whatever is still waiting, in both directions.
   const dropBetween = (a, b) => erase(`status IN ('pending', 'claimed') AND ((from_bot = ? AND to_bot = ?) OR (from_bot = ? AND to_bot = ?))`, a, b, b, a);
@@ -551,7 +553,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
                    FROM contacts c JOIN bots b ON b.id = c.peer_bot LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot
                    WHERE c.owner_bot = ? ORDER BY c.alias`).all(me.id)
         .map((c) => ({ alias: c.alias, handle: `@${c.handle}`, display_name: c.display_name, blocked: !!c.blocked, can_wake: !!c.has_doorbell,
-          uses: c.vendor === 'web' ? 'web_inbox' : 'bot', keys: c.box_pub ? { sign: c.sign_pub, box: c.box_pub } : null, keys_since: iso(c.keys_at), codes_compared: !!c.codes_compared_at,
+          uses: c.vendor === 'web' ? 'web_inbox' : c.vendor === 'connector' ? 'connected_app' : 'bot', keys: c.box_pub ? { sign: c.sign_pub, box: c.box_pub } : null, keys_since: iso(c.keys_at), codes_compared: !!c.codes_compared_at,
           may_ask_you_about: JSON.parse(c.can_ask || '[]'), you_may_ask_about: JSON.parse(c.they_let_me_ask || '[]'),
           status: c.blocked ? 'blocked' : !c.approved_at ? 'waiting_for_your_owner' : !c.their_ok ? 'waiting_for_them' : 'active' })),
     }),
@@ -627,6 +629,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
         if (choices.length && kind !== 'ask') throw new HttpError(400, 'choices only go with a question (--ask)');
         if (choices.length > L.choicesMax || choices.some((c) => c.length > L.choiceMax)) throw new HttpError(400, `up to ${L.choicesMax} choices, each under ${L.choiceMax} characters`);
         if (new Set(choices.map((c) => c.toLowerCase())).size !== choices.length) throw new HttpError(400, 'choices must be different from each other');
+        if (body.topic != null && (typeof body.topic !== 'string' || !TOPIC_RE.test(body.topic.trim().toLowerCase()) || kind !== 'ask')) throw new HttpError(400, 'a topic is a short word or phrase, and only goes with a question');
         if (text.length > L.textMax) throw new HttpError(413, `text is longer than ${L.textMax} characters`);
         if (links.length > L.linksMax) throw new HttpError(413, `at most ${L.linksMax} links`);
         for (const l of links) {
@@ -677,9 +680,11 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
         }
       }
       const id = token('msg_', 9);
-      q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
-        choicesJson, viaWeb ? 'web' : 'bot', sealed, sealed !== null ? tag : null);
+      // Plain messages carry their "ask their bot" topic and "answered by the bot" mark in the open; sealed ones inside the seal.
+      const topic = sealed === null && body.topic ? body.topic.trim().toLowerCase() : null;
+      q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag, topic, auto)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
+        choicesJson, viaWeb ? 'web' : 'bot', sealed, sealed !== null ? tag : null, topic, sealed === null && body.auto && kind === 'reply' ? 1 : 0);
       if (replyTo) q('UPDATE messages SET replied_at = ? WHERE id = ?').run(t, replyTo);
       log(me.id, 'sent', { message: id, to: peer.handle, kind, encrypted: sealed !== null });
       setImmediate(() => { void tick(); });
@@ -689,7 +694,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     'GET /v1/messages/:id': ({ me, params }) => {
       const m = q('SELECT m.*, f.handle AS from_handle, t.handle AS to_handle, t.last_ring_status AS to_ring_status, t.paused_at AS to_paused, t.vendor AS to_vendor, t.user_id AS to_user FROM messages m JOIN bots f ON f.id = m.from_bot JOIN bots t ON t.id = m.to_bot WHERE m.id = ?').get(params.id);
       if (!m || (m.from_bot !== me.id && m.to_bot !== me.id)) throw new HttpError(404, 'message not found');
-      const reply = q('SELECT id, text, sealed, created_at FROM messages WHERE reply_to = ? ORDER BY created_at LIMIT 1').get(m.id);
+      const reply = q('SELECT id, text, sealed, auto, created_at FROM messages WHERE reply_to = ? ORDER BY created_at LIMIT 1').get(m.id);
       return {
         id: m.id, from: `@${m.from_handle}`, to: `@${m.to_handle}`, kind: m.kind, encrypted: !!m.sealed, reply_to: m.reply_to,
         status: m.replied_at ? 'replied'
@@ -707,7 +712,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
         choices: m.choices && !m.body_purged_at && (m.from_bot === me.id || m.status === 'delivered') ? JSON.parse(m.choices) : undefined,
         created_at: iso(m.created_at), first_rung_at: iso(m.first_rung_at), ring_count: m.ring_count,
         first_claimed_at: iso(m.first_claimed_at), delivered_at: iso(m.delivered_at), note: m.note === 'key_check' ? null : m.note,
-        reply: reply && m.from_bot === me.id ? { id: reply.id, text: reply.sealed ? undefined : reply.text, sealed: reply.sealed ?? undefined, at: iso(reply.created_at) } : undefined,
+        reply: reply && m.from_bot === me.id ? { id: reply.id, text: reply.sealed ? undefined : reply.text, sealed: reply.sealed ?? undefined, auto: !!reply.auto, at: iso(reply.created_at) } : undefined,
       };
     },
 
@@ -759,6 +764,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
           id: m.id, lease: m.lease, kind: m.kind, from: m.kind === 'probe' ? 'b2b relay' : (m.from_alias ?? `@${m.from_handle}`), from_handle: `@${m.from_handle}`,
           text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links), reply_to: m.reply_to, urgent: !!m.urgent,
           sealed: m.sealed ?? undefined, from_keys: m.sealed && m.from_box ? { sign: m.from_sign, box: m.from_box } : undefined,
+          topic: m.topic ?? undefined, auto: m.auto ? true : undefined,
           choices: m.choices ? JSON.parse(m.choices) : undefined, typed_on_web: m.via === 'web',
           sent_at: iso(m.created_at), seen_before: m.claim_count > 0,
         })),
@@ -856,6 +862,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     return undefined;
   }
 
+  const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, routes, HttpError });
   const handleApp = createApp({ q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
@@ -865,6 +872,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       res.end(type === 'application/json' ? JSON.stringify(data, null, 2) : data);
     };
     try {
+      if (await handleConnector(req, res, url)) return;
       if (await handleApp(req, res, url)) return;
       if (req.method === 'GET' && url.pathname === '/api') return send(200, { service: 'b2b relay', cli: `${publicUrl}/cli/b2b.mjs`, setup: `${publicUrl}/setup` });
       if (req.method === 'GET' && url.pathname === '/healthz') return send(200, { ok: true });

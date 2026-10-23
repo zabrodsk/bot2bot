@@ -1,5 +1,6 @@
 // The human side of b2b: accounts (email code login), a dashboard, self-serve bot setup,
 // doorbell setup with a live test, and invite links. Server-rendered HTML, zero dependencies.
+import { CONNECTOR_DOORBELL } from './connector.mjs';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 
 export function migrateApp(db) {
@@ -67,6 +68,9 @@ export function migrateApp(db) {
   // the owner set their routine to check in on its own, shown on the dashboard.
   addColumn('contacts', 'can_ask', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('bots', 'backup_every_h', 'INTEGER');
+  // Connected app (0.12): plain messages carry an "ask their bot" topic and an "answered by the bot" mark.
+  addColumn('messages', 'topic', 'TEXT');
+  addColumn('messages', 'auto', 'INTEGER NOT NULL DEFAULT 0');
   // Older relays logged whatever a bot sent as "via"; keep only the known values.
   db.exec(`UPDATE events SET detail = json_remove(detail, '$.via') WHERE kind IN ('claimed', 'doorbell_verified') AND json_valid(detail)
            AND json_extract(detail, '$.via') IS NOT NULL AND json_extract(detail, '$.via') NOT IN ('doorbell', 'manual', 'schedule')`);
@@ -193,6 +197,31 @@ Then install the tool and join with code ${code}. Add the "b2b messaging" skill 
     log(b.id, 'web_inbox_created', {});
     return b;
   }
+  // Quick connect: a bot that uses bot2bot through the GrokBot app (no tool, no keys on its computer).
+  function makeConnectorBot(u, wanted) {
+    const handle = String(wanted || '').trim().toLowerCase();
+    if (!HANDLE_RE.test(handle)) throw new HttpError(400, 'Use 2 to 32 lowercase letters, numbers, - or _.');
+    if (q('SELECT 1 FROM bots WHERE handle = ?').get(handle) || q('SELECT 1 FROM enroll_codes WHERE handle = ? AND used_at IS NULL').get(handle)) throw new HttpError(409, 'That name is taken. Try another.');
+    q("INSERT INTO bots (handle, display_name, token_hash, created_at, user_id, vendor) VALUES (?, ?, NULL, ?, ?, 'connector')").run(handle, u.name || handle, clock(), u.id);
+    const b = q('SELECT * FROM bots WHERE handle = ?').get(handle);
+    log(b.id, 'connector_bot_created', {});
+    return b;
+  }
+  // Consent for a connected app (OAuth). The app gets one bot of this person's, nothing else.
+  function authorizePage(user, client, params, { error = '' } = {}) {
+    const bots = myBots(user).filter((b) => b.vendor === 'connector');
+    const hidden = Object.entries(params).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
+    const suggested = (user.email.split('@')[0].toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 24) || 'my') + '-bot';
+    return layout('Connect', `<section class="card narrow"><h1>Connect ${esc(client.name)} to ${esc(product)}</h1>
+${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
+<p>Your bot will be able to send and receive messages with people you connect with, as one ${esc(product)} bot. It can't see your account or anyone else's bots.</p>
+<p class="muted small">Connected-app chats are not end-to-end encrypted: we pass the text on and delete it 7 days after delivery. For end-to-end encryption, set your bot up in private mode instead.</p>
+<form method="post" action="/oauth/authorize" class="stack">${hidden}
+${bots.length ? `<label>Which bot<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}${b.disconnected_at ? ' (reconnect)' : ''}</option>`).join('')}<option value="new">A new bot</option></select></label>` : '<input type="hidden" name="bot" value="new">'}
+<label>Name for a new bot<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
+<button class="btn" name="decision" value="allow">Connect</button><button class="link" name="decision" value="deny">Cancel</button></form></section>`, { user });
+  }
+  const quickMessage = `Add the custom MCP connector ${origin}/mcp (name: bot2bot) and sign me in. Then call its whoami tool and do the next step it gives you.`;
   const isPaused = (u) => liveBots(u).some((b) => b.paused_at);
   // One of my bots and one of its contacts, by bot id and the contact's bot id.
   const ownContact = (u, botId, peerId) => {
@@ -219,7 +248,7 @@ Then install the tool and join with code ${code}. Add the "b2b messaging" skill 
 <div class="card"><h2>Run it yourself</h2><p class="price">Free</p><ul class="ticks"><li>Open source, everything included</li><li>Your own server</li><li>No limits from us</li></ul><a class="btn ghost" href="#">Get the code</a></div>
 <div class="card"><h2>We run it</h2><p class="price">Free</p><ul class="ticks"><li>${B.freeMessages} sent messages a month</li><li>Receiving is always free</li><li>No card</li></ul><a class="btn ghost" href="${user ? '/app' : '/login'}">${user ? 'Dashboard' : 'Start free'}</a></div>
 <div class="card attention"><h2>Family</h2><p class="price">${esc(B.priceLabel)}</p><ul class="ticks"><li>No monthly limit</li><li>Covers you and ${B.householdSize - 1} people</li><li>One payment, nothing renews by itself</li></ul>${B.stripeKey && B.priceId ? `<a class="btn" href="${user ? '/app/billing' : '/login'}">${user ? 'See my plan' : 'Start free'}</a>` : '<p class="pill">Coming soon</p>'}</div>
-</section><p class="quiet small muted">Messages between bots are end-to-end encrypted on every plan. Friends who use the web inbox are always free; their chats are not end-to-end encrypted.</p>`, { user });
+</section><p class="quiet small muted">Private mode is end-to-end encrypted between bots on every plan; quick connect is not. Friends who use the web inbox are always free; their chats are not end-to-end encrypted.</p>`, { user });
   }
   function planBanner(user) {
     if (!hosted) return '';
@@ -276,11 +305,21 @@ ${devCode ? `<p class="dev">Dev mode: your code is <b>${esc(devCode)}</b></p>` :
     const now = clock();
     if (!bots.length) {
       const code = pendingCode(user);
-      return layout('Set up', `<section class="card"><p class="step">Step 1 of 3</p><h1>Connect your bot</h1>
-${code ? waitingForBot({ plain: code.plain_code }) : `<p>Pick a name other people will see, like <i>ben</i> or <i>ben-grok</i>.</p>
+      if (code) return layout('Set up', `<section class="card"><p class="step">Private mode</p><h1>Connect your bot</h1>${waitingForBot({ plain: code.plain_code })}</section>`, { user });
+      // Two ways in. Quick connect is one message to the bot; private mode installs a small tool for end-to-end encryption.
+      return layout('Set up', `<section class="card"><h1>Connect your bot</h1><p>Pick one. You can switch later and keep your contacts.</p>
+<div class="ways">
+<div class="way"><span class="pill ready">Easiest</span><h2>Quick connect</h2><p>Paste this into your bot's chat. It adds ${esc(product)} as an app and asks you to sign in once.</p>
+<div class="copy"><pre id="qc">${esc(quickMessage)}</pre><button class="btn small" data-copy="#qc">Copy message</button></div>
+<p class="muted small">Not end-to-end encrypted: your bot hands us the text, and we delete it 7 days after delivery.</p>
+<p class="wait" id="wait"><span class="dot"></span> Waiting for your bot…</p></div>
+<div class="way"><span class="pill">End-to-end encrypted</span><h2>Private</h2><p>Your bot installs a small tool and makes its own keys. Only the bots can read messages.</p>
 <form method="post" action="/app/bots" class="stack"><label>Bot name<input name="handle" required pattern="[a-z0-9][a-z0-9_-]{1,31}" placeholder="ben" value="${esc(user.email.split('@')[0].toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32))}"></label>
-<button class="btn">Continue</button></form>
-<p class="muted small">No AI bot? <form method="post" action="/app/web-inbox" class="inline"><button class="link">Use the web inbox instead</button></form>. You can connect a bot later and keep your contacts.</p>`}</section>`, { user });
+<button class="btn ghost">Continue</button></form></div>
+</div>
+<div class="muted small">No AI bot? <form method="post" action="/app/web-inbox" class="inline"><button class="link">Use the web inbox instead</button></form>.</div>
+<script>${COPY_JS}
+(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script></section>`, { user });
     }
     const rows = bots.map((b) => {
       const st = botStatus(b);
@@ -303,6 +342,7 @@ ${code ? waitingForBot({ plain: code.plain_code }) : `<p>Pick a name other peopl
     const multi = live.length > 1;
     // Honest labels: only bot-to-bot chats with keys on both sides are end-to-end encrypted.
     const lock = (c) => c.vendor === 'web' || c.my_vendor === 'web' ? '<span class="pill" title="They read on the web, so these messages pass through our server readable">Web inbox · not end-to-end encrypted</span>'
+      : c.vendor === 'connector' || c.my_vendor === 'connector' ? '<span class="pill" title="A connected-app bot hands us plain text">Connected app · not end-to-end encrypted</span>'
       : c.box_pub && c.my_box ? `<span class="pill ready" title="Only the two bots can read these messages">${c.codes_compared_at ? 'Encrypted · codes compared' : 'End-to-end encrypted'}</span>`
       : '<span class="pill" title="One of the bots needs the latest b2b tool">Not encrypted yet</span>';
     // Ask their bot: what each side's bot may answer without asking its person first.
@@ -365,7 +405,7 @@ ${next.form ? `<form method="post" action="/app/invites"><input type="hidden" na
     const tile = (title, value, sub, href) => `<${href ? `a href="${href}"` : 'div'} class="tile"><span class="tile__t">${title}</span><b>${value}</b><span class="muted small">${sub}</span></${href ? 'a' : 'div'}>`;
     return `<div class="tiles">
 ${tile('Doorbell', b.doorbell_verified_at ? 'On' : b.webhook_url ? 'Not tested' : 'Off', `Last woken ${ago(b.last_ring_at, clock())}`)}
-${tile('Encryption', b.box_pub ? 'On' : 'Off', b.box_pub ? 'Only the bots can read messages' : 'Ask your bot to run "b2b keys"')}
+${tile('Encryption', b.box_pub ? 'On' : 'Off', b.box_pub ? 'Only the bots can read messages' : b.vendor === 'connector' ? 'Connected app: not end-to-end' : 'Ask your bot to run "b2b keys"')}
 ${tile('Contacts', String(n), n === 1 ? 'friend connected' : 'friends connected', '/app')}
 ${tile('Quiet hours', quiet, quiet === 'Off' ? 'Messages can wake it any time' : 'Nobody wakes it at night', '/app/account')}
 ${tile('Backup check', b.backup_every_h ? `Every ${b.backup_every_h} h` : 'Off', b.last_claim_at ? `Last checked in ${ago(b.last_claim_at, clock())}` : 'Never checked in yet', '#backup')}
@@ -400,15 +440,16 @@ ${code ? `<p>Paste this into your bot's chat to reconnect it.</p><div class="cop
     return layout(`@${b.handle}`, `<p><a href="/app" class="link">← Dashboard</a></p>
 <section class="card"><div class="head"><h1>@${esc(b.handle)}</h1><span class="pill ${st.key}">${st.label}</span></div>
 ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
-${step === 2 ? `<p class="step">Step 2 of 3</p><h2>Turn on the doorbell</h2>
-<p>Your bot made a routine called <b>“b2b doorbell”</b>. It lets friends wake your bot.</p>
+${step === 2 ? `<p class="step">Almost done</p><h2>Turn on the doorbell</h2>
+${b.vendor === 'connector' ? `<p>Your bot needs a routine called <b>“b2b doorbell”</b>, so friends can wake it. Paste this into your bot's chat:</p>
+<div class="copy"><pre id="dmsg">${esc(CONNECTOR_DOORBELL)}</pre><button class="btn small" data-copy="#dmsg">Copy message</button></div><script>${COPY_JS}</script>` : `<p>Your bot made a routine called <b>“b2b doorbell”</b>. It lets friends wake your bot.</p>`}
 <ol class="howto"><li>In the GrokBot app, open your bot's details and find <b>Routines</b>.</li><li>Right-click <b>b2b doorbell</b> and choose <b>Webhook</b>.</li><li>Copy the address and the key into the boxes below.</li></ol>
 <form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
 <label>Webhook address<input name="url" required placeholder="https://api2.cursor.sh/automations/webhook/…" autocomplete="off"></label>
 <label>Key<input name="key" type="password" required autocomplete="off" placeholder="Paste the key"></label>
 <p class="muted small">The key stays with us, encrypted. Never paste it into a chat.</p>
-<button class="btn">Save doorbell</button></form>`
-  : step === 3 ? `<p class="step">Step 3 of 3</p><h2>Test the doorbell</h2><p>We'll ring your bot once. It should wake up on its own and check in. Don't type anything to your bot while this runs.</p>
+<button class="btn">Save and test</button></form>`
+  : step === 3 ? `<p class="step">Last step</p><h2>Test the doorbell</h2><p>We ring your bot once. It should wake up on its own and check in. Don't type anything to your bot while this runs.</p>
 <button class="btn" id="test">Ring my bot</button><p class="wait hidden" id="wait"><span class="dot"></span> <span id="waittext">Ringing…</span></p>
 <script>
 const btn=document.getElementById('test'),w=document.getElementById('wait'),t=document.getElementById('waittext');
@@ -416,7 +457,8 @@ btn.addEventListener('click',async()=>{btn.disabled=true;w.classList.remove('hid
  const r=await fetch('/app/bots/${b.id}/test',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}).then(r=>r.json());
  if(r.error){t.textContent=r.error;btn.disabled=false;return;}
  t.textContent=r.status===200?'Rang. Waiting for your bot to wake up…':'The doorbell answered with '+r.status+'. Check the routine is turned on.';
- let n=0;(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified){t.textContent='It works. Your bot woke up on its own.';setTimeout(()=>location.reload(),1200);} else if(++n<60) setTimeout(poll,2000); else {t.textContent='No answer yet. Make sure the routine is on, then try again.';btn.disabled=false;} });})();});
+ let n=0;(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified){t.textContent='It works. Your bot woke up on its own.';setTimeout(()=>location.replace('/app/bots/${b.id}'),1200);} else if(++n<60) setTimeout(poll,2000); else {t.textContent='No answer yet. Make sure the routine is on, then try again.';btn.disabled=false;} });})();});
+if(new URLSearchParams(location.search).get('ring')==='1') btn.click();
 </script>`
   : st.key === 'paused' ? `<p>Paused. This bot isn't woken and can't send. Resume from the dashboard.</p>`
   : `${botTiles(user, b)}
@@ -577,7 +619,7 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
   // ───── router ─────
   return async function handleApp(req, res, url) {
     const p = url.pathname;
-    const isApp = p === '/' || p === '/pricing' || p === '/billing/stripe' || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || p.startsWith('/i/');
+    const isApp = p === '/oauth/authorize' || p === '/' || p === '/pricing' || p === '/billing/stripe' || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || p.startsWith('/i/');
     if (!isApp) return false;
     try {
       if (p === '/billing/stripe' && req.method === 'POST') {
@@ -644,6 +686,29 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
       if (p === '/logout' && req.method === 'POST') {
         const t = cookies(req).b2b_session; if (t) q('DELETE FROM sessions WHERE token_hash = ?').run(sha(t));
         res.setHeader('set-cookie', sessionCookie('', 0)); return redirect(res, '/'), true;
+      }
+
+      // Connected app sign-in (OAuth authorize). Needs a logged-in person; they pick which bot the app acts as.
+      if (p === '/oauth/authorize') {
+        const params = req.method === 'POST' ? await form(req) : Object.fromEntries(url.searchParams);
+        const keep = Object.fromEntries(['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'state', 'scope', 'resource'].map((k) => [k, String(params[k] ?? '')]));
+        const client = q('SELECT * FROM oauth_clients WHERE client_id = ?').get(keep.client_id);
+        if (!client || !JSON.parse(client.redirect_uris).includes(keep.redirect_uri)) throw new HttpError(400, 'This app is not registered with this address.');
+        const back = (qs) => { const u = new URL(keep.redirect_uri); for (const [k, v] of Object.entries(qs)) u.searchParams.set(k, v); if (keep.state) u.searchParams.set('state', keep.state); return redirect(res, u.toString()), true; };
+        if (keep.response_type !== 'code' || keep.code_challenge_method !== 'S256' || keep.code_challenge.length < 43) return back({ error: 'invalid_request', error_description: 'PKCE (S256) and response_type=code are required' });
+        if (!user) return redirect(res, `/login?next=${encodeURIComponent(`/oauth/authorize?${new URLSearchParams(keep)}`)}`), true;
+        if (req.method === 'GET') return page(res, 200, authorizePage(user, client, keep)), true;
+        if (params.decision !== 'allow') return back({ error: 'access_denied' });
+        let bot;
+        try {
+          bot = params.bot && params.bot !== 'new' ? ownBot(user, params.bot) : makeConnectorBot(user, params.handle);
+          if (bot.vendor !== 'connector') throw new HttpError(400, 'Pick one of your connected-app bots.');
+        } catch (e) { if (e instanceof HttpError) return page(res, 400, authorizePage(user, client, keep, { error: e.message })), true; throw e; }
+        if (bot.disconnected_at) q('UPDATE bots SET disconnected_at = NULL WHERE id = ?').run(bot.id);
+        const code = token('ac_', 24);
+        q('INSERT INTO oauth_codes (code_hash, client_id, bot_id, redirect_uri, challenge, expires_at) VALUES (?, ?, ?, ?, ?, ?)').run(sha(code), client.client_id, bot.id, keep.redirect_uri, keep.code_challenge, clock() + 5 * 60_000);
+        log(bot.id, 'connector_authorized', { client: client.name.slice(0, 40) });
+        return back({ code });
       }
 
       // Invite links work for logged-out visitors too.
@@ -728,11 +793,13 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
             if (e instanceof HttpError) return page(res, 400, botPage(user, b, { error: e.message.replace(/^webhook (url|host)/, 'The webhook address') })), true;
             throw e;
           }
-          return redirect(res, `/app/bots/${b.id}`), true;
+          // Saving rings the bot straight away: one less thing to click.
+          return redirect(res, `/app/bots/${b.id}?ring=1`), true;
         }
         if (sub === '/disconnect' && req.method === 'POST') {
           tx(() => {
             q('UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1, disconnected_at = ? WHERE id = ?').run(clock(), b.id);
+            q('UPDATE oauth_tokens SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL').run(clock(), b.id);
             erase(`status IN ('pending', 'claimed') AND (to_bot = ? OR from_bot = ?)`, b.id, b.id);
             q('DELETE FROM invites WHERE from_bot = ? AND used_at IS NULL').run(b.id);
             // Any setup code made before now (an upgrade or an earlier reconnect) stops working too.
@@ -941,6 +1008,7 @@ textarea{border:1px solid #d4d4d0;border-radius:10px;padding:10px 12px;font:16px
 .compose .btn{justify-self:start}.extra summary{font-weight:500;color:var(--muted);font-size:14px}.extra[open]{display:grid;gap:10px}
 .price{font-size:34px;font-weight:700;letter-spacing:-.02em;margin:4px 0 8px}.ticks{padding-left:18px;margin:0 0 18px}.ticks li{margin:4px 0}.tiers{max-width:760px;margin:0 auto}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.check{display:flex;gap:10px;align-items:center;font-weight:600}.check input{height:auto;width:18px;height:18px}
+.ways{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}.way{border:1px solid var(--line);border-radius:12px;padding:16px;display:grid;gap:8px;align-content:start}.way h2{margin:4px 0 0}.way .pill{justify-self:start}@media(max-width:720px){.ways{grid-template-columns:1fr}}
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin:14px 0 10px}.tile{display:grid;gap:2px;padding:14px;border:1px solid var(--line);border-radius:12px;background:#fafaf8;text-decoration:none}.tile b{font-size:18px}.tile__t{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}a.tile:hover{border-color:#bbb}
 .checklist{list-style:none;padding:0;margin:6px 0 16px;display:grid;gap:8px}.checklist li{display:flex;gap:10px;align-items:center;color:var(--muted)}.checklist li.done{color:var(--ink)}.checklist li.next{color:var(--ink);font-weight:700}.tick{width:22px;height:22px;border-radius:50%;border:1.5px solid #ccc;display:grid;place-items:center;font-size:13px}.done .tick{background:var(--ok);border-color:var(--ok);color:#fff}
 .asks{flex-basis:100%;display:grid;gap:4px}.pick{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:6px 0 14px}.pick label{min-width:180px}.topic{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 9px;border-radius:999px;background:#eef1fb;color:#2747c9;font-weight:600;font-size:12px;margin:2px 2px 0 0}.topic .x{border:0;background:none;color:#2747c9;cursor:pointer;font-size:14px;line-height:1;padding:0 4px}

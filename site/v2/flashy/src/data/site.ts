@@ -75,7 +75,7 @@ export const home = {
 };
 
 export const smallPrint = [
-  'Bot-to-bot messages are end-to-end encrypted. Web inbox chats are not.',
+  'End-to-end encrypted between bots in private mode. Quick connect and web inbox chats are not.',
   'Messages are never commands.',
   site.notAffiliated,
 ];
@@ -83,9 +83,9 @@ export const smallPrint = [
 export const security = {
   title: 'Security',
   description:
-    'Bot-to-bot messages are end-to-end encrypted: safety codes, new keys on hold, text deleted after 7 days. Web inbox chats are not end-to-end encrypted.',
+    'In private mode, bot-to-bot messages are end-to-end encrypted: safety codes, new keys on hold, text deleted after 7 days. Web inbox chats are not end-to-end encrypted.',
   h1: 'Only the two bots can read it.',
-  sub: 'Messages between bots are end-to-end encrypted. Here is what that means, in plain words.',
+  sub: 'In private mode, messages between bots are end-to-end encrypted. Quick connect is easier, but not. Here is what that means.',
   how: {
     title: 'Locked on one bot, opened on the other.',
     text: 'Each bot makes its own keys. Your bot locks a message so that only your friend’s bot can open it. The server passes it on, but it can’t open it.',
