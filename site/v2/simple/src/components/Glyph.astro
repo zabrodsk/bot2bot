@@ -1,0 +1,39 @@
+---
+// Things that are not bots, drawn in the bot's own coordinate system so they line up with it:
+// the server (it carries messages) and the browser (the web inbox). Always decorative.
+import { BOT } from '../data/bot';
+interface Props { kind: 'server' | 'browser'; size?: number; class?: string }
+const { kind, size = 16, class: cls } = Astro.props;
+const pad = 1.2;
+const w = kind === 'browser' ? 21 : 16;
+const top = BOT.top - pad, height = BOT.bottom - BOT.top + pad * 2;
+const k = size / 16;
+const h = BOT.head;
+---
+<svg
+  class:list={['glyph', `glyph--${kind}`, cls]}
+  viewBox={`${-w / 2 - pad} ${top} ${w + pad * 2} ${height}`}
+  width={(w + pad * 2) * k}
+  height={height * k}
+  aria-hidden="true"
+>
+  {kind === 'server' ? (
+    <>
+      <rect x={-w / 2} y={h.y} width={w} height={h.h} rx="2" fill="#f3f5f8" stroke="#586377" stroke-width="1.2" vector-effect="non-scaling-stroke" />
+      <line x1={-w / 2} y1={h.y + h.h / 2} x2={w / 2} y2={h.y + h.h / 2} stroke="#586377" stroke-width="1.2" vector-effect="non-scaling-stroke" />
+      <circle cx="4.6" cy={h.y + h.h / 4} r="0.9" fill="#586377" />
+      <circle cx="4.6" cy={h.y + (h.h * 3) / 4} r="0.9" fill="#586377" />
+      <line x1="-4.8" y1={h.y + h.h / 4} x2="0.6" y2={h.y + h.h / 4} stroke="#c3cad5" stroke-width="1.2" vector-effect="non-scaling-stroke" stroke-linecap="round" />
+      <line x1="-4.8" y1={h.y + (h.h * 3) / 4} x2="0.6" y2={h.y + (h.h * 3) / 4} stroke="#c3cad5" stroke-width="1.2" vector-effect="non-scaling-stroke" stroke-linecap="round" />
+    </>
+  ) : (
+    <>
+      <rect x={-w / 2} y={h.y} width={w} height={h.h} rx="2" fill="#ffffff" stroke="#586377" stroke-width="1.2" vector-effect="non-scaling-stroke" />
+      <line x1={-w / 2} y1={h.y + 3} x2={w / 2} y2={h.y + 3} stroke="#586377" stroke-width="1.2" vector-effect="non-scaling-stroke" />
+      <circle cx={-w / 2 + 1.8} cy={h.y + 1.5} r="0.55" fill="#586377" />
+      <circle cx={-w / 2 + 3.4} cy={h.y + 1.5} r="0.55" fill="#586377" />
+      <line x1={-w / 2 + 3} y1={h.y + 6.2} x2={4} y2={h.y + 6.2} stroke="#c3cad5" stroke-width="1.2" vector-effect="non-scaling-stroke" stroke-linecap="round" />
+      <line x1={-w / 2 + 3} y1={h.y + 9} x2={0} y2={h.y + 9} stroke="#c3cad5" stroke-width="1.2" vector-effect="non-scaling-stroke" stroke-linecap="round" />
+    </>
+  )}
+</svg>

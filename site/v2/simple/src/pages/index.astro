@@ -1,0 +1,129 @@
+---
+import Base from '../layouts/Base.astro';
+import Field from '../components/Field.astro';
+import Figure from '../components/Figure.astro';
+import { home, links } from '../data/site';
+---
+<Base title={home.title}>
+  <section class="hero" aria-labelledby="hero-title" data-field-scope>
+    <Field class="hero__field" mode="wake" names={home.friends} you={home.you} />
+    <div class="hero__band">
+      <h1 id="hero-title" class="hero__title">{home.headline[0]} <span data-anchor>{home.headline[1]}</span></h1>
+      <div class="hero__aside">
+        <p class="hero__sub"><span class="hero__lead">{home.sub[0]}</span> <br class="br" />{home.sub[1]}</p>
+        <div class="hero__actions">
+          <a class="button" href={home.cta.href} rel="noopener" data-wake-you>
+            <span class="button__light" aria-hidden="true"></span>{home.cta.label}
+          </a>
+          <a class="link" href={home.secondary.href}>{home.secondary.label}</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="rows" aria-label="How it works">
+    {home.rows.map((row) => (
+      <article class="row">
+        <div class="row__fig"><Figure kind={row.key as 'locked' | 'ask' | 'inbox'} size={30} /></div>
+        <h2 class="row__title say">{row.title}</h2>
+        <div class="row__body">
+          <p class="muted">{row.text}</p>
+          {row.link && <p><a class="link" href={row.link.href}>{row.link.label}</a></p>}
+        </div>
+      </article>
+    ))}
+  </section>
+
+  <section class="consent" aria-labelledby="consent-title">
+    <Figure kind="consent" size={34} class="consent__pair" />
+    <h2 id="consent-title" class="consent__title">{home.consent[0]} <br />{home.consent[1]}</h2>
+    <div class="consent__foot">
+      <p class="muted">{home.consentText}</p>
+      <div class="consent__actions">
+        <a class="button" href={links.github} rel="noopener"><span class="button__light" aria-hidden="true"></span>{home.cta.label}</a>
+        <a class="button button--quiet" href="/pricing/">See pricing</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .hero {
+    height: calc(100svh - var(--header-h));
+    min-height: 600px;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    padding: clamp(8px, 2.6vh, 28px) var(--m) clamp(28px, 6.4vh, 64px);
+  }
+  .hero__band {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: var(--gap);
+    padding-top: clamp(30px, 6vh, 64px);
+  }
+  .hero__title {
+    font-family: var(--f-display);
+    font-weight: 440;
+    font-size: var(--t-hero);
+    line-height: 0.86;
+    letter-spacing: -0.05em;
+    margin-left: -0.055em; /* optical: the B's side bearing, so the stem sits on the margin */
+    white-space: nowrap;
+    text-box: trim-both cap alphabetic;
+  }
+  .hero__aside { flex: 0 0 auto; display: grid; justify-items: start; gap: 24px; padding-bottom: 2px; }
+  .hero__sub { font-size: var(--t-body); color: var(--c-muted); line-height: 1.5; max-width: 30ch; }
+  .hero__lead { color: var(--c-ink); }
+  .hero__actions { display: flex; align-items: center; gap: 24px; }
+  .hero__actions .link { font-size: 1rem; }
+
+  /* Three facts, one per row. The figure's wire says whether a chat is encrypted. */
+  .rows { margin: clamp(56px, 12vh, 128px) var(--m) 0; }
+  .row {
+    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 20px var(--gap);
+    padding: clamp(28px, 4.4vh, 44px) 0; border-top: 1px solid var(--c-line);
+    align-items: start;
+  }
+  .row:last-child { border-bottom: 1px solid var(--c-line); }
+  .row__fig { grid-column: 1 / span 3; padding-top: 2px; }
+  .row__title { grid-column: 4 / span 5; max-width: 14ch; }
+  .row__body { grid-column: 9 / span 4; display: grid; gap: 12px; max-width: 36ch; padding-top: 4px; }
+
+  /* The finale: out of the whole field, only two bots, both lit. */
+  .consent {
+    padding: clamp(112px, 20vh, 200px) var(--m) clamp(96px, 18vh, 180px);
+    display: grid; gap: clamp(30px, 4vw, 52px); justify-items: start;
+  }
+  .consent__pair { margin-left: -2px; }
+  .consent__title {
+    font-family: var(--f-display); font-weight: 440; font-size: var(--t-xl);
+    line-height: 0.96; letter-spacing: -0.05em; margin-left: -0.05em;
+    text-box: trim-both cap alphabetic;
+  }
+  .consent__foot { display: grid; gap: 24px; justify-items: start; }
+  .consent__actions { display: flex; flex-wrap: wrap; gap: 12px; }
+
+  @media (max-width: 1023px) {
+    .row__fig { grid-column: 1 / -1; }
+    .row__title { grid-column: 1 / span 6; }
+    .row__body { grid-column: 7 / span 6; }
+  }
+  @media (max-width: 899px) {
+    .hero__band { flex-direction: column; align-items: stretch; gap: 22px; }
+    .hero__aside { gap: 22px; }
+  }
+  @media (max-width: 699px) {
+    .hero { min-height: 620px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+    .hero__band { padding-top: 30px; }
+    .hero__title { font-size: min(19.4vw, 5.6rem); }
+    .hero__sub { font-size: 1.0625rem; }
+    .hero__aside, .hero__actions { justify-items: stretch; }
+    .hero__actions { flex-direction: column; align-items: stretch; gap: 14px; }
+    .hero__actions .link { align-self: center; padding: 6px 0; }
+    .row { grid-template-columns: 1fr; gap: 16px; }
+    .row__fig, .row__title, .row__body { grid-column: 1; }
+    .row__fig { padding-bottom: 6px; }
+    .consent { padding-top: 112px; padding-bottom: 104px; }
+    .consent__title { font-size: min(var(--t-xl), 11.4vw); }
+    .consent__foot, .consent__actions { width: 100%; }
+    .consent__actions { flex-direction: column; }
+  }
+</style>

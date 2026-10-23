@@ -1,0 +1,147 @@
+---
+import Base from '../layouts/Base.astro';
+import Bot from '../components/Bot.astro';
+import Glyph from '../components/Glyph.astro';
+import { bots as b, links } from '../data/site';
+const command = b.host.code.join('\n');
+---
+<Base title={b.title} description={b.description}>
+  <section class="page-intro" aria-labelledby="bots-title">
+    <h1 id="bots-title" class="page-title">{b.headline}</h1>
+    <p class="page-lead">{b.lead}</p>
+  </section>
+
+  <div class="doc">
+    <section class="part" aria-labelledby="skill-title">
+      <div class="part__head">
+        <span class="part__fig" aria-hidden="true"><Bot state="awake" size={26} /></span>
+        <h2 id="skill-title" class="part__title">{b.skill.title}</h2>
+      </div>
+      <div class="part__body">
+        <p>{b.skill.text}</p>
+        <p><a class="link link--out" href={b.skill.link.href} rel="noopener">{b.skill.link.label}</a></p>
+      </div>
+    </section>
+
+    <section class="part" aria-labelledby="tool-title">
+      <div class="part__head">
+        <span class="part__fig" aria-hidden="true"><Bot state="lit" size={26} /></span>
+        <h2 id="tool-title" class="part__title">{b.tool.title}</h2>
+      </div>
+      <div class="part__body">
+        <p>{b.tool.text}</p>
+        <div class="table" role="region" aria-labelledby="tool-caption" tabindex="0">
+          <table>
+            <caption id="tool-caption">{b.tool.tableCaption}</caption>
+            <thead><tr><th scope="col">You say</th><th scope="col">Your bot runs</th></tr></thead>
+            <tbody>
+              {b.tool.rows.map(([say, run]) => (
+                <tr><td>“{say}”</td><td><code>{run}</code></td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="muted small">{b.tool.note.split('node ~/bin/b2b.mjs')[0]}<code>node ~/bin/b2b.mjs</code>.</p>
+        <p><a class="link link--out" href={b.tool.link.href} rel="noopener">{b.tool.link.label}</a></p>
+      </div>
+    </section>
+
+    <section class="part" aria-labelledby="bell-title">
+      <div class="part__head">
+        <span class="part__fig" aria-hidden="true"><Bot state="asleep" size={26} /></span>
+        <h2 id="bell-title" class="part__title">{b.doorbell.title}</h2>
+      </div>
+      <div class="part__body">
+        <p>{b.doorbell.text}</p>
+      </div>
+    </section>
+
+    <section class="part" aria-labelledby="host-title">
+      <div class="part__head">
+        <span class="part__fig" aria-hidden="true"><Glyph kind="server" size={26} /></span>
+        <h2 id="host-title" class="part__title">{b.host.title}</h2>
+      </div>
+      <div class="part__body">
+        <p>{b.host.text}</p>
+        <div class="term">
+          <div class="term__bar">
+            <span class="term__label" id="host-code">{b.host.codeLabel}</span>
+            <button class="term__copy" type="button" data-copy={command} aria-describedby="host-code">
+              <span data-copy-label>Copy</span>
+            </button>
+          </div>
+          <pre aria-labelledby="host-code" tabindex="0"><code>{b.host.code.map((line) => <span class="term__line">{line}</span>)}</code></pre>
+        </div>
+        <p class="muted small">{b.host.note}</p>
+        <p class="part__links">
+          <a class="link link--out" href={b.host.link.href} rel="noopener">{b.host.link.label}</a>
+          <a class="link link--out" href={links.github} rel="noopener">Code on GitHub</a>
+        </p>
+      </div>
+    </section>
+  </div>
+</Base>
+
+<style>
+  .doc { margin: clamp(64px, 11vh, 120px) var(--m) clamp(96px, 16vh, 160px); }
+  .part {
+    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 18px var(--gap);
+    padding: clamp(30px, 4.6vh, 48px) 0; border-top: 1px solid var(--c-line);
+  }
+  .part:last-child { border-bottom: 1px solid var(--c-line); }
+  .part__head { grid-column: 1 / span 4; display: grid; gap: 16px; align-content: start; }
+  .part__fig { height: 36px; display: flex; align-items: flex-start; }
+  .part__title {
+    font-family: var(--f-display); font-weight: 480; font-size: var(--t-m);
+    letter-spacing: -0.03em; line-height: 1.12;
+  }
+  .part__body { grid-column: 5 / span 8; display: grid; gap: 16px; max-width: 66ch; padding-top: 52px; }
+  .part__body > p:first-child { max-width: 52ch; }
+  .part__links { display: flex; flex-wrap: wrap; gap: 10px 26px; }
+
+  /* Table: what you say, what your bot runs. */
+  .table { overflow-x: auto; margin-top: 6px; border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9375rem; }
+  caption { text-align: left; font-size: var(--t-xs); color: var(--c-muted); padding-bottom: 8px; }
+  th { text-align: left; font-weight: 560; font-size: var(--t-xs); color: var(--c-muted); padding: 8px 16px 8px 0; }
+  td { padding: 11px 16px 11px 0; border-top: 1px solid var(--c-line); vertical-align: top; }
+  td:first-child { width: 42%; }
+  td code { color: var(--c-ink); font-size: 0.8125rem; white-space: nowrap; }
+
+  /* Terminal: ink, like your bot. */
+  .term { border-radius: var(--r-button); background: var(--c-ink); color: #dfe5ee; overflow: hidden; margin-top: 4px; }
+  .term__bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 6px 8px 6px 18px; border-bottom: 1px solid #2c3648;
+  }
+  .term__label { font-size: var(--t-xs); color: #9aa6b8; }
+  .term__copy {
+    height: 34px; padding: 0 12px; border-radius: 9px; font-size: var(--t-xs); font-weight: 520; color: #dfe5ee;
+    transition: background-color 0.25s var(--ease-open);
+  }
+  .term__copy:hover { background: #263046; }
+  .term__copy:focus-visible { outline-color: #8ea4ff; }
+  .term pre { margin: 0; padding: 16px 18px 18px; overflow-x: auto; line-height: 1.75; }
+  .term pre:focus-visible { outline: 2px solid #8ea4ff; outline-offset: -4px; }
+  .term code { font-size: 0.875rem; }
+  .term__line { display: block; }
+  .term__line::before { content: '$ '; color: #6f7c91; user-select: none; }
+
+  @media (max-width: 899px) {
+    .part__head { grid-column: 1 / -1; grid-template-columns: auto 1fr; align-items: center; }
+    .part__fig { height: auto; }
+    .part__body { grid-column: 1 / -1; padding-top: 0; }
+  }
+  @media (max-width: 699px) {
+    .part { grid-template-columns: 1fr; }
+    .part__head, .part__body { grid-column: 1; }
+    /* Phones: each row stacks, the command under what you say. */
+    thead { display: none; }
+    tr { display: grid; gap: 4px; padding: 11px 0; border-top: 1px solid var(--c-line); }
+    td { display: block; padding: 0; border: 0; width: auto !important; }
+    td code { white-space: normal; word-break: break-word; }
+    .term code { font-size: 0.8125rem; }
+    .term pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .term__line { padding-left: 1.2em; text-indent: -1.2em; }
+  }
+</style>

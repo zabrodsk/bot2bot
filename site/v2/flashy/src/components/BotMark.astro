@@ -1,0 +1,16 @@
+---
+// The bot, in the same geometry the field draws: head 16 × 13, antenna, status light.
+interface Props { state?: 'asleep' | 'awake' | 'you' | 'lit' | 'ghost'; size?: number; class?: string; label?: string }
+const { state = 'asleep', size = 22, class: cls, label } = Astro.props;
+---
+<svg
+  class:list={['bot', `bot--${state}`, cls]}
+  viewBox="-11 -14 22 23" width={size} height={Math.round(size * 23 / 22)}
+  role={label ? 'img' : undefined} aria-label={label} aria-hidden={label ? undefined : 'true'} focusable="false"
+>
+  <line class="bot__ant" x1="0" y1="-6" x2="0" y2="-9" />
+  <circle class="bot__light" cx="0" cy="-10.5" r="1.8" />
+  <rect class="bot__head" x="-8" y="-6" width="16" height="13" rx="4" />
+  <rect class="bot__eye" x="-4.6" y="-1.4" width="3" height="3.4" rx="1" />
+  <rect class="bot__eye" x="1.6" y="-1.4" width="3" height="3.4" rx="1" />
+</svg>

@@ -1,0 +1,110 @@
+---
+import { site, links } from '../data/site';
+import Mark from './Mark.astro';
+const path = Astro.url.pathname.replace(/\/?$/, '/');
+const items = site.nav.map((item) => ({ ...item, current: path.startsWith(item.href) }));
+---
+<header class="top">
+  <a class="top__brand" href="/" aria-label={`${site.name}, home`} aria-current={path === '/' ? 'page' : undefined}>
+    <Mark size={20} />
+    <span class="top__name" aria-hidden="true">{site.name}</span>
+  </a>
+
+  <!-- Desktop: the whole nav in one line. -->
+  <nav class="top__nav" aria-label="Main">
+    <ul>
+      {items.map((item) => (
+        <li><a href={item.href} aria-current={item.current ? 'page' : undefined}>{item.label}</a></li>
+      ))}
+      <li><a class="top__gh" href={links.github} rel="noopener">GitHub</a></li>
+    </ul>
+  </nav>
+
+  <!-- Phone: a disclosure, works without JS. Each navigation swaps in a closed header. -->
+  <details class="menu">
+    <summary class="menu__toggle">
+      <span class="menu__label">Menu</span>
+      <span class="menu__icon" aria-hidden="true"><i></i><i></i></span>
+    </summary>
+    <nav class="menu__panel" aria-label="Main">
+      <ul>
+        {items.map((item) => (
+          <li><a href={item.href} aria-current={item.current ? 'page' : undefined}>{item.label}</a></li>
+        ))}
+        <li><a href={links.github} rel="noopener">GitHub</a></li>
+      </ul>
+    </nav>
+  </details>
+</header>
+
+<style>
+  .top {
+    position: relative; z-index: var(--z-header);
+    height: var(--header-h); padding: 0 var(--m);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .top__brand {
+    display: inline-flex; align-items: center; gap: 11px; padding: 8px 0; margin: -8px 0;
+    font-family: var(--f-display); font-weight: 600; font-size: 1.125rem; letter-spacing: -0.025em;
+  }
+  .top__brand :global(.mark) { translate: 0 -1px; }
+  .top__nav ul { display: flex; gap: clamp(18px, 2.4vw, 32px); list-style: none; padding: 0; }
+  .top__nav a {
+    position: relative; display: inline-block; padding: 10px 0;
+    font-size: var(--t-s); font-weight: 480; color: var(--c-muted);
+    transition: color 0.25s var(--ease-open);
+  }
+  .top__nav a:hover { color: var(--c-ink); }
+  .top__nav a:active { translate: 0 1px; }
+  /* The current page is "awake": its light is on. */
+  .top__nav a[aria-current='page'], .menu__panel a[aria-current='page'] { color: var(--c-ink); }
+  .top__nav a[aria-current='page']::before {
+    content: ''; position: absolute; left: -11px; top: 50%; width: 5px; height: 5px; margin-top: -2.5px;
+    border-radius: 50%; background: var(--c-signal);
+  }
+  /* GitHub leaves the site: set apart by a hairline, like a door. */
+  .top__nav li:last-child { padding-left: clamp(18px, 2.4vw, 32px); border-left: 1px solid var(--c-line); }
+
+  .menu { display: none; }
+
+  @media (max-width: 759px) {
+    .top__nav { display: none; }
+    .menu { display: block; }
+    .menu__toggle {
+      list-style: none; cursor: pointer; user-select: none;
+      display: inline-flex; align-items: center; gap: 10px;
+      height: 44px; padding: 0 2px 0 12px; margin-right: -2px;
+      font-size: var(--t-s); font-weight: 500; color: var(--c-ink);
+      border-radius: 10px;
+    }
+    .menu__toggle::-webkit-details-marker { display: none; }
+    .menu__icon { position: relative; width: 18px; height: 10px; }
+    .menu__icon i {
+      position: absolute; left: 0; right: 0; height: 1.5px; border-radius: 1px; background: var(--c-ink);
+      transition: translate 0.3s var(--ease-open), rotate 0.3s var(--ease-open);
+    }
+    .menu__icon i:first-child { top: 0; }
+    .menu__icon i:last-child { bottom: 0; }
+    .menu[open] .menu__icon i:first-child { translate: 0 4.25px; rotate: 45deg; }
+    .menu[open] .menu__icon i:last-child { translate: 0 -4.25px; rotate: -45deg; }
+
+    .menu__panel {
+      position: absolute; left: 0; right: 0; top: var(--header-h);
+      padding: 8px var(--m) 28px; background: var(--c-ground);
+      border-bottom: 1px solid var(--c-line);
+      box-shadow: 0 24px 40px -24px rgb(26 34 48 / 0.18);
+    }
+    .menu[open] .menu__panel { animation: drop 0.4s var(--ease-open); }
+    .menu__panel ul { list-style: none; padding: 0; display: grid; }
+    .menu__panel li + li { border-top: 1px solid var(--c-line); }
+    .menu__panel a {
+      display: flex; align-items: center; justify-content: space-between; padding: 14px 0;
+      font-family: var(--f-display); font-weight: 460; font-size: 1.625rem; letter-spacing: -0.035em;
+      color: var(--c-muted);
+    }
+    .menu__panel a[aria-current='page']::after {
+      content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--c-signal);
+    }
+  }
+  @keyframes drop { from { opacity: 0; translate: 0 -8px; } }
+</style>

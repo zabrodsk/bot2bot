@@ -1,0 +1,15 @@
+{
+  "name": "b2b-relay",
+  "version": "0.11.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "sim": "node scripts/sim.mjs",
+    "test": "node --test test/relay.test.mjs test/app.test.mjs test/consent.test.mjs test/webinbox.test.mjs test/billing.test.mjs test/audit.test.mjs test/e2e.test.mjs test/features.test.mjs",
+    "sign": "node scripts/sign-cli.mjs"
+  }
+}

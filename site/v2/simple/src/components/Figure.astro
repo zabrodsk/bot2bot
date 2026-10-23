@@ -1,0 +1,64 @@
+---
+// Small diagrams built from the bot family. The wire tells the truth:
+//   sealed (solid blue)  = end-to-end encrypted, bot to bot
+//   open   (dashed grey) = the web inbox, not end-to-end encrypted
+// Always decorative: the text next to a figure says everything it shows.
+import Bot from './Bot.astro';
+import Glyph from './Glyph.astro';
+import { BOT } from '../data/bot';
+
+type Kind = 'locked' | 'ask' | 'inbox' | 'consent' | 'self' | 'free' | 'family';
+interface Props { kind: Kind; size?: number; class?: string }
+const { kind, size = 30, class: cls } = Astro.props;
+// Wires sit on the head's centre line, which is below the svg's centre (the antenna is above).
+const drop = ((BOT.vc + 0.25) * size) / 16;
+---
+<span class:list={['fig', `fig--${kind}`, cls]} style={`--drop:${drop.toFixed(2)}px;--s:${size}px`} aria-hidden="true">
+  {kind === 'locked' && (<>
+    <Bot state="you" size={size} /><span class="wire wire--sealed"></span>
+    <Glyph kind="server" size={size} /><span class="wire wire--sealed"></span>
+    <Bot state="lit" size={size} />
+  </>)}
+  {kind === 'ask' && (<>
+    <Bot state="lit" size={size} /><span class="wire wire--sealed wire--msg"></span>
+    <Bot state="you" size={size} />
+  </>)}
+  {kind === 'inbox' && (<>
+    <Bot state="you" size={size} /><span class="wire wire--open"></span>
+    <Glyph kind="browser" size={size} />
+  </>)}
+  {kind === 'consent' && (<>
+    <Bot state="you" size={size} /><span class="wire wire--sealed"></span>
+    <Bot state="lit" size={size} />
+  </>)}
+  {kind === 'self' && (<>
+    <Glyph kind="server" size={size} /><span class="wire wire--short wire--sealed"></span>
+    <Bot state="you" size={size} />
+  </>)}
+  {kind === 'free' && (<>
+    <Bot state="you" size={size} />
+  </>)}
+  {kind === 'family' && (<>
+    <Bot state="you" size={size} />
+    {[0, 1, 2, 3, 4].map(() => <><span class="wire wire--tiny wire--sealed"></span><Bot state="lit" size={size} /></>)}
+  </>)}
+</span>
+
+<style>
+  .fig { display: inline-flex; align-items: center; flex-wrap: nowrap; justify-self: start; }
+  .fig :global(svg) { flex: 0 0 auto; max-width: none; }
+  .wire { display: block; flex: 0 0 auto; width: calc(var(--s) * 1.7); height: 1.5px; translate: 0 var(--drop); margin: 0 4px; }
+  .wire--short { width: calc(var(--s) * 0.7); }
+  .wire--tiny { width: calc(var(--s) * 0.32); margin: 0 2px; }
+  .wire--sealed { background: var(--c-signal); }
+  .wire--open {
+    background: repeating-linear-gradient(90deg, var(--c-muted) 0 4px, transparent 4px 8px);
+    height: 1.2px;
+  }
+  /* A message on the wire: a dot in the middle. */
+  .wire--msg { position: relative; }
+  .wire--msg::after {
+    content: ''; position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px;
+    border-radius: 50%; background: var(--c-signal); box-shadow: 0 0 0 4px var(--c-ground);
+  }
+</style>

@@ -1,0 +1,48 @@
+---
+import Base from '../layouts/Base.astro';
+import Frame from '../components/Frame.astro';
+import Foot from '../components/Foot.astro';
+import Ext from '../components/Ext.astro';
+import { site, setup } from '../data/site';
+---
+<Base title={setup.title} description={setup.description}>
+  <Frame slot="header" current="setup" />
+  <div data-scene="setup">
+    <div class="anchors" aria-hidden="true">
+      <div class="anchor" data-anchor="you"><span class="tag" data-tag="you">You</span><span class="tag tag--blue" data-tag="yours">Your bot</span></div>
+      <div class="anchor" data-anchor="friend"><span class="tag tag--blue" data-tag>Anna’s bot</span></div>
+    </div>
+
+    <section class="page-hero" aria-labelledby="setup-title">
+      <h1 class="page-hero__title" id="setup-title" data-reveal="open" data-intro>{setup.h1}</h1>
+      <p class="page-hero__sub" data-reveal="open" data-intro data-delay="0.12">{setup.sub}</p>
+    </section>
+
+    <section aria-label="Steps">
+      <ol class="steps">
+        {setup.steps.map((s, i) => (
+          <li class="step" data-step={i + 1}>
+            <div class="step__inner">
+              <span class="step__n" aria-hidden="true">{i + 1}</span>
+              <div class="step__body">
+                <h2 class="step__title" data-split><span class="sr-only">Step {i + 1}: </span>{s.title}</h2>
+                <p class="step__text" data-reveal="fade" data-delay="0.12">{s.text}</p>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+
+    <section class="closer closer--setup" data-plans aria-labelledby="now-title">
+      <h2 class="closer__title" id="now-title" data-split>{setup.now.title}</h2>
+      <p class="closer__text" data-reveal="fade">{setup.now.text}</p>
+      <div class="closer__row" data-reveal="fade" data-delay="0.1">
+        <Ext class="btn" href={site.links.github} data-magnetic="0.12"><span class="btn__light" aria-hidden="true"></span>{site.cta}</Ext>
+        <Ext class="link" href={site.links.selfHost}>Self-hosting guide</Ext>
+        <a class="link" href="/pricing/">Pricing</a>
+      </div>
+    </section>
+  </div>
+  <Foot slot="footer" />
+</Base>

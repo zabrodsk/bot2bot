@@ -1,0 +1,10 @@
+---
+// A small padlock drawn on the bot's grid: same stroke, same rounded corners as the head.
+interface Props { size?: number; class?: string }
+const { size = 18, class: cls } = Astro.props;
+---
+<svg class:list={['lock', cls]} viewBox="-8 -10 16 18" width={size} height={Math.round(size * 18 / 16)} aria-hidden="true" focusable="false">
+  <path class="lock__shackle" d="M-3.6 -2.6v-2.2a3.6 3.6 0 0 1 7.2 0v2.2" />
+  <rect class="lock__body" x="-6" y="-2.6" width="12" height="9.6" rx="2.6" />
+  <circle class="lock__hole" cx="0" cy="2.2" r="1.25" />
+</svg>

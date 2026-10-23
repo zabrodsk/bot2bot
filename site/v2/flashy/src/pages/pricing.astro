@@ -1,0 +1,50 @@
+---
+import Base from '../layouts/Base.astro';
+import Frame from '../components/Frame.astro';
+import Foot from '../components/Foot.astro';
+import Ext from '../components/Ext.astro';
+import CalmHero from '../components/CalmHero.astro';
+import { site, pricing as p } from '../data/site';
+---
+<Base title={p.title} description={p.description}>
+  <Frame slot="header" current="pricing" />
+  <div data-scene="pricing">
+    <div class="anchors" aria-hidden="true">
+      <div class="anchor" data-anchor="house"><span class="tag tag--blue" data-tag>{p.tag}</span></div>
+    </div>
+
+    <CalmHero id="pricing-title" title={p.h1} sub={p.sub}>
+      <a class="link" href="#plans">See the three plans<span class="arrow" aria-hidden="true">↓</span></a>
+    </CalmHero>
+
+    <div class="sheet">
+      <section class="plans" id="plans" aria-labelledby="plans-title">
+        <h2 class="sr-only" id="plans-title">Plans</h2>
+        <ol class="plans__list">
+          {p.plans.map((plan) => (
+            <li class:list={['plan', `plan--${plan.key}`]} data-reveal="fade">
+              <h3 class="plan__name">{plan.name}</h3>
+              <p class="plan__price"><span class="plan__num">{plan.price}</span><span class="plan__per">{plan.per}</span></p>
+              <ul class="plan__points">{plan.points.map((x) => <li>{x}</li>)}</ul>
+              <div class="plan__side">
+                <p class:list={['status-light', { 'is-on': plan.status === 'Available now' }]}><i aria-hidden="true"></i>{plan.status}</p>
+                {plan.action && <Ext class="link" href={site.links[plan.action.href]}>{plan.action.label}</Ext>}
+              </div>
+            </li>
+          ))}
+        </ol>
+        <p class="plans__note" data-reveal="fade">{p.note}</p>
+      </section>
+
+      <section class="closer" aria-labelledby="start-title">
+        <h2 class="closer__title" id="start-title" data-split>Start today, free.</h2>
+        <p class="closer__text" data-reveal="fade">{site.beta} Running it yourself works now.</p>
+        <div class="closer__row" data-reveal="fade" data-delay="0.1">
+          <Ext class="btn" href={site.links.github}><span class="btn__light" aria-hidden="true"></span>{site.cta}</Ext>
+          <a class="link" href="/setup/">How setup works</a>
+        </div>
+      </section>
+    </div>
+  </div>
+  <Foot slot="footer" />
+</Base>

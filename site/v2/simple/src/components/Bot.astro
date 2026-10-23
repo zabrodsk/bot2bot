@@ -1,0 +1,30 @@
+---
+// A static bot. `size` is the rendered head width in px. Decorative unless `label` is given.
+import { BOT, PAINT, type BotState } from '../data/bot';
+interface Props { state?: BotState; size?: number; label?: string; class?: string; ring?: boolean }
+const { state = 'asleep', size = 16, label, class: cls, ring = false } = Astro.props;
+const [face, edge, eye, ant, light] = PAINT[state];
+const h = BOT.head, l = BOT.light;
+const sw = state === 'asleep' ? 1.1 : 1.35;
+const open = state !== 'asleep';
+const pad = ring ? 6 : 1.2;
+const vb = `${h.x - pad} ${BOT.top - pad} ${h.w + pad * 2} ${BOT.bottom - BOT.top + pad * 2}`;
+const k = size / h.w;
+---
+<svg
+  class:list={['bot', `bot--${state}`, ring && 'bot--ring', cls]}
+  viewBox={vb}
+  width={(h.w + pad * 2) * k}
+  height={(BOT.bottom - BOT.top + pad * 2) * k}
+  role={label ? 'img' : undefined}
+  aria-label={label}
+  aria-hidden={label ? undefined : 'true'}
+>
+  {ring && <circle class="bot__ring" cx="0" cy={l.cy} r={l.r + 3.2} fill="none" stroke="#2747c9" stroke-width="0.6" opacity="0.35" />}
+  <line x1="0" y1={BOT.antenna.y1} x2="0" y2={BOT.antenna.y2} stroke={ant} stroke-width={sw} vector-effect="non-scaling-stroke" stroke-linecap="round" />
+  <circle class="bot__light" cx="0" cy={l.cy} r={l.r} fill={light} />
+  <rect x={h.x} y={h.y} width={h.w} height={h.h} rx={h.rx} fill={face} stroke={edge} stroke-width={sw} vector-effect="non-scaling-stroke" />
+  {BOT.eyes.map((e) => open
+    ? <rect x={e.x} y={e.y} width={e.w} height={e.h} rx={e.rx} fill={eye} />
+    : <rect x={e.x} y={BOT.eyeCy - (e.h * BOT.asleepEye) / 2} width={e.w} height={e.h * BOT.asleepEye} rx={(e.h * BOT.asleepEye) / 2} fill={eye} />)}
+</svg>

@@ -1,0 +1,130 @@
+---
+import { ClientRouter } from 'astro:transitions';
+import { site } from '../data/site';
+import Loader from '../components/Loader.astro';
+import Curtain from '../components/Curtain.astro';
+import '../styles/tokens.css';
+import '../styles/base.css';
+
+interface Props {
+  title?: string;
+  description?: string;
+  image?: string;
+  noindex?: boolean;
+  /** The first visit to the home page gets the loader; every other load skips it. */
+  loader?: boolean;
+}
+const { title, description = site.description, image = '/og.png', noindex = false, loader = false } = Astro.props;
+const fullTitle = title ? `${title} | ${site.name}` : `${site.title}. Your bot talks to their bot. | ${site.name}`;
+const base = Astro.site ?? new URL(site.url);
+const canonical = new URL(Astro.url.pathname, base).href;
+const ogImage = new URL(image, base).href;
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: site.name,
+  applicationCategory: 'CommunicationApplication',
+  operatingSystem: 'Web',
+  description: site.description,
+  url: site.url,
+  license: 'https://www.apache.org/licenses/LICENSE-2.0',
+  codeRepository: site.links.github,
+  offers: [
+    { '@type': 'Offer', name: 'Run it yourself', price: '0', priceCurrency: 'EUR' },
+    { '@type': 'Offer', name: 'Hosted', price: '0', priceCurrency: 'EUR' },
+    { '@type': 'Offer', name: 'Hosted family, you and 5 people, one year', price: '24', priceCurrency: 'EUR' },
+  ],
+};
+---
+<!doctype html>
+<html lang="en" transition:animate="none">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
+    <meta name="theme-color" content="#0b0f18" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={site.name} />
+    <meta property="og:locale" content="en" />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Bot to bot. A dark field of thousands of small sleeping bots, one of them lit." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content="Bot to bot. A dark field of thousands of small sleeping bots, one of them lit." />
+    <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+    <link rel="preload" href="/fonts/hubot-200_900-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/mona-200_900-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <script is:inline data-loader={loader ? '1' : '0'}>
+      // Before first paint: decide motion, WebGL and the loader, so the right layout paints first.
+      // WebGL is only used on a real GPU: software renderers (SwiftShader, llvmpipe), very small
+      // devices, reduced motion and Save-Data all get the drawn, static version instead.
+      (function () {
+        var h = document.documentElement, c = h.classList, ss = null, ls = null;
+        var withLoader = document.currentScript && document.currentScript.getAttribute('data-loader') === '1';
+        try { ss = sessionStorage; ls = localStorage; } catch (e) {}
+        c.add('js');
+        var calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+        var save = navigator.connection && navigator.connection.saveData;
+        if (!calm) c.add('motion');
+        var gl = false;
+        if (!calm && !save) {
+          var cached = ss && ss.getItem('b2b-gl');
+          if (cached) gl = cached === '1';
+          else {
+            try {
+              var cv = document.createElement('canvas'), o = { failIfMajorPerformanceCaveat: true };
+              var g = cv.getContext('webgl2', o) || cv.getContext('webgl', o);
+              if (g) {
+                var ext = g.getExtension('WEBGL_debug_renderer_info');
+                var r = String(ext ? g.getParameter(ext.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER));
+                var soft = /swiftshader|llvmpipe|softpipe|software|basic render|mesa offscreen/i.test(r);
+                var tiny = (navigator.hardwareConcurrency || 4) < 3 || (navigator.deviceMemory || 4) < 2;
+                gl = !soft && !tiny;
+                var lose = g.getExtension('WEBGL_lose_context');
+                if (lose) lose.loseContext();
+              }
+            } catch (e) { gl = false; }
+            if (ss) ss.setItem('b2b-gl', gl ? '1' : '0');
+          }
+        }
+        if (gl) c.add('gl-on');
+        var seen = false;
+        try { seen = ls.getItem('b2b-seen') === '1'; ls.setItem('b2b-seen', '1'); } catch (e) { seen = true; }
+        if (!withLoader || seen || calm) c.add('no-loader');
+      })();
+    </script>
+    <ClientRouter fallback="swap" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div id="gl" transition:persist="gl" aria-hidden="true"></div>
+    <Curtain />
+    {loader && <Loader />}
+    <slot name="header" />
+    <main id="main" tabindex="-1">
+      <slot />
+    </main>
+    <slot name="footer" />
+    <script>
+      import { start } from '../engine/astro';
+      import { setupMotion } from '../motion/setup';
+      start(setupMotion);
+    </script>
+  </body>
+</html>

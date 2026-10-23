@@ -1,0 +1,9 @@
+---
+// First load only: one big bot whose eyes open with real progress, then it flies to its place.
+import BotMark from './BotMark.astro';
+---
+<div id="loader" role="status" aria-label="Loading">
+  <div class="loader__ground"></div>
+  <div class="loader__bot"><BotMark state="asleep" size={120} /></div>
+  <span class="loader__count" data-loader-count aria-hidden="true">00</span>
+</div>

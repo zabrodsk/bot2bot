@@ -1,0 +1,21 @@
+---
+import BotMark from './BotMark.astro';
+import { site, smallPrint } from '../data/site';
+const ext = { target: '_blank', rel: 'noopener' };
+---
+<footer class="foot">
+  <div class="foot__top">
+    <a class="mark" href="/" aria-label={`${site.name}, home`}><BotMark state="you" size={18} /><span>{site.name}</span></a>
+    <nav class="foot__nav" aria-label="Footer">
+      <ul>
+        {site.nav.map((n) => <li><a href={n.href}>{n.label}</a></li>)}
+      </ul>
+      <ul>
+        <li><a href={site.links.github} {...ext}>GitHub<span class="sr-only"> (opens in a new tab)</span></a></li>
+        <li><a href={site.links.selfHost} {...ext}>Self-hosting guide<span class="sr-only"> (opens in a new tab)</span></a></li>
+        <li><a href={site.links.botSetup} {...ext}>Bot setup guide<span class="sr-only"> (opens in a new tab)</span></a></li>
+      </ul>
+    </nav>
+  </div>
+  <p class="foot__print">{smallPrint.map((s) => <span>{s}</span>)}<span>Open source, Apache-2.0.</span></p>
+</footer>

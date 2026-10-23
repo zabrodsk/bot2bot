@@ -1,0 +1,81 @@
+---
+import Base from '../layouts/Base.astro';
+import Figure from '../components/Figure.astro';
+import { pricing as p } from '../data/site';
+---
+<Base title={p.title} description={p.description}>
+  <section class="page-intro" aria-labelledby="price-title">
+    <h1 id="price-title" class="page-title">{p.headline}</h1>
+    <p class="page-lead">{p.lead}</p>
+  </section>
+
+  <section class="plans" aria-label="Plans">
+    {p.plans.map((plan) => (
+      <article class:list={['plan', `plan--${plan.key}`]} aria-labelledby={`plan-${plan.key}`}>
+        <div class="plan__fig"><Figure kind={plan.key as 'self' | 'free' | 'family'} size={26} /></div>
+        <h2 id={`plan-${plan.key}`} class="plan__name">{plan.name}</h2>
+        <p class="plan__price">{plan.price} <span class="plan__unit">{plan.unit}</span></p>
+        <ul class="plan__points">{plan.points.map((pt) => <li>{pt}</li>)}</ul>
+        <div class="plan__foot">
+          {plan.cta
+            ? <a class="button" href={plan.cta.href} rel="noopener"><span class="button__light" aria-hidden="true"></span>{plan.cta.label}</a>
+            : <p class="plan__status"><span class="plan__light" aria-hidden="true"></span>{plan.status}</p>}
+        </div>
+      </article>
+    ))}
+  </section>
+
+  <section class="notes" aria-label="On every plan">
+    <ul>{p.notes.map((n) => <li>{n}</li>)}</ul>
+    <p><a class="link" href="/security/">How the encryption works</a></p>
+  </section>
+</Base>
+
+<style>
+  .plans {
+    margin: clamp(64px, 11vh, 120px) var(--m) 0;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--gap);
+  }
+  .plan {
+    display: grid; grid-template-rows: auto auto auto 1fr auto; gap: 10px;
+    padding-top: 26px; border-top: 1px solid var(--c-line);
+  }
+  /* The plan you can use today carries the ink rule; the others are asleep. */
+  .plan--self { border-top: 2px solid var(--c-ink); padding-top: 25px; }
+  .plan__fig { height: 46px; display: flex; align-items: flex-start; }
+  .plan__name { font-size: var(--t-s); font-weight: 560; }
+  .plan__price {
+    font-family: var(--f-display); font-weight: 440; font-size: clamp(2.75rem, 1.9rem + 2.6vw, 4.5rem);
+    letter-spacing: -0.05em; line-height: 0.95; margin-left: -0.04em;
+  }
+  .plan__unit { font-family: var(--f-text); font-size: var(--t-s); font-weight: 450; letter-spacing: 0; color: var(--c-muted); }
+  .plan__points { list-style: none; padding: 10px 0 0; display: grid; gap: 0; align-content: start; }
+  .plan__points li { padding: 10px 0; font-size: 1rem; border-top: 1px solid var(--c-line); color: var(--c-muted); }
+  .plan__points li:last-child { border-bottom: 1px solid var(--c-line); }
+  .plan__foot { padding-top: 20px; min-height: 70px; }
+  .plan__status {
+    display: inline-flex; align-items: center; gap: 10px; height: 50px;
+    font-size: var(--t-s); font-weight: 520; color: var(--c-muted);
+  }
+  /* A grey light: asleep, not open yet. */
+  .plan__light { width: 7px; height: 7px; border-radius: 50%; background: var(--c-sleep); }
+
+  .notes {
+    margin: clamp(72px, 12vh, 128px) var(--m) clamp(96px, 16vh, 160px);
+    display: grid; gap: 18px; max-width: 64ch;
+  }
+  .notes ul { list-style: none; padding: 0; display: grid; gap: 6px; }
+  .notes li { padding-left: 18px; position: relative; color: var(--c-muted); font-size: 1rem; }
+  .notes li::before {
+    content: ''; position: absolute; left: 0; top: 0.7em; width: 6px; height: 6px; border-radius: 50%; background: var(--c-ink);
+  }
+
+  @media (max-width: 899px) {
+    .plans { grid-template-columns: 1fr; gap: 56px; }
+    .plan { grid-template-rows: none; }
+    .plan__foot { min-height: 0; }
+  }
+  @media (max-width: 699px) {
+    .plan .button { width: 100%; }
+  }
+</style>

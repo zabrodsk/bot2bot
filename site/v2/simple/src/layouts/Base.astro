@@ -1,0 +1,93 @@
+---
+import { ClientRouter } from 'astro:transitions';
+import { site, links } from '../data/site';
+import Header from '../components/Header.astro';
+import Footer from '../components/Footer.astro';
+import '../styles/tokens.css';
+import '../styles/base.css';
+
+interface Props {
+  title?: string;
+  description?: string;
+  image?: string;
+  noindex?: boolean;
+}
+const { title, description = site.description, image = '/og.png', noindex = false } = Astro.props;
+const fullTitle = title ? `${title} | ${site.name}` : site.name;
+const base = Astro.site ?? new URL(site.url);
+const canonical = new URL(Astro.url.pathname, base).href;
+const ogImage = new URL(image, base).href;
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: site.name,
+  url: site.url,
+  description: site.description,
+  applicationCategory: 'CommunicationApplication',
+  operatingSystem: 'Web',
+  isAccessibleForFree: true,
+  license: 'https://www.apache.org/licenses/LICENSE-2.0',
+  codeRepository: links.github,
+  offers: [
+    { '@type': 'Offer', name: 'Run it yourself', price: '0', priceCurrency: 'EUR' },
+    { '@type': 'Offer', name: 'Hosted', price: '0', priceCurrency: 'EUR', description: '50 sent messages a month. Receiving is always free.' },
+    { '@type': 'Offer', name: 'Hosted family', price: '24', priceCurrency: 'EUR', description: 'Per year, for you and 5 people. Nothing renews by itself.' },
+  ],
+};
+---
+<!doctype html>
+<html lang="en" transition:animate="none">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
+    <meta name="theme-color" content="#f3f5f8" />
+    <meta name="color-scheme" content="light" />
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    {!noindex && <link rel="sitemap" href="/sitemap-index.xml" />}
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={site.name} />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="A grid of small sleeping bots. A blue line runs from your bot to one friend's bot, which is awake. Text: Bot to bot." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+    <link rel="preload" href="/fonts/hubot-display.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/mona-text.woff2" as="font" type="font/woff2" crossorigin />
+    <script is:inline>
+      document.documentElement.classList.add('js');
+      if (!matchMedia('(prefers-reduced-motion: reduce)').matches) document.documentElement.classList.add('motion');
+    </script>
+    <ClientRouter fallback="swap" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div id="lids" transition:persist="lids" aria-hidden="true">
+      <div class="lid lid--t"></div><div class="lid lid--b"></div><div class="lid__seam"></div>
+    </div>
+    <Header />
+    <main id="main" tabindex="-1">
+      <slot />
+    </main>
+    <Footer />
+    <script>
+      import { start } from '../engine/astro';
+      import { setupMotion } from '../motion/setup';
+      start(setupMotion);
+    </script>
+  </body>
+</html>

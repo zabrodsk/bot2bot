@@ -1,0 +1,53 @@
+---
+// A drawn frame of the field for one beat of the story. Shown when WebGL is off (reduced
+// motion, no WebGL, Save-Data, no JS), so those visitors get the same story, designed.
+import { home } from '../data/site';
+interface Props { beat: 'send' | 'travel' | 'wake' | 'reply' }
+const { beat } = Astro.props;
+const COLS = 13, ROWS = 7, GAP = 40, OX = 20, OY = 34;
+const cx = (c: number) => OX + c * GAP, cy = (r: number) => OY + r * GAP;
+const YOU = [2, 5], ANNA = [10, 1];
+// The street, in the gutters between bots.
+const route: [number, number][] = [[cx(2), cy(5)], [cx(2), cy(4.5)], [cx(2.5), cy(4.5)], [cx(2.5), cy(2.5)], [cx(9.5), cy(2.5)], [cx(9.5), cy(1)], [cx(10), cy(1)]];
+const d = 'M' + route.map(([x, y]) => `${x} ${y}`).join(' L');
+const segDist = (px: number, py: number) => {
+  let best = 1e9;
+  for (let i = 0; i < route.length - 1; i++) {
+    const [ax, ay] = route[i], [bx, by] = route[i + 1];
+    const dx = bx - ax, dy = by - ay, l = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l));
+    best = Math.min(best, Math.hypot(px - ax - dx * t, py - ay - dy * t));
+  }
+  return best;
+};
+const bots: { x: number; y: number; k: string }[] = [];
+for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+  let k = 's';
+  const onRoute = segDist(cx(c), cy(r)) < 24;
+  const ring = Math.hypot(c - ANNA[0], r - ANNA[1]);
+  if (beat === 'travel' && onRoute && cx(c) <= cx(7)) k = 'l';
+  if (beat === 'wake') { if (ring > 1.7 && ring < 2.9) k = 'a'; else if (ring <= 1.7 || onRoute) k = 'l'; }
+  if (beat === 'reply' && onRoute) k = 'l';
+  if (c === YOU[0] && r === YOU[1]) k = 'y';
+  if (c === ANNA[0] && r === ANNA[1]) k = beat === 'wake' || beat === 'reply' ? 'a' : beat === 'travel' ? 's' : 's';
+  bots.push({ x: cx(c) - 11, y: cy(r) - 14, k });
+}
+const showRoute = beat !== 'send';
+const comet = beat === 'travel' ? [cx(7), cy(2.5)] : beat === 'reply' ? [cx(2.5), cy(4.25)] : null;
+const send = home.beats[0].bubble, reply = home.beats[3];
+---
+<div class="beat__scene">
+  <svg viewBox="0 0 520 296" role="img" aria-label={
+    beat === 'send' ? 'A field of sleeping bots. Yours is lit.' :
+    beat === 'travel' ? "A blue line runs between the bots, from yours toward Anna's." :
+    beat === 'wake' ? "Anna's bot is awake, and a ring of bots around it is waking too." :
+    "The answer runs back along the same line to your bot."
+  }>
+    {showRoute && <path d={d} pathLength="1000" fill="none" stroke="#3352e0" stroke-width={beat === 'wake' ? 1.5 : 2} stroke-opacity={beat === 'wake' ? 0.55 : 1} stroke-linecap="round" stroke-linejoin="round" stroke-dasharray={beat === 'travel' ? '600 1000' : undefined} />}
+    {bots.map((b) => <use href={`#b${b.k}`} x={b.x} y={b.y} width="22" height="23" />)}
+    {beat === 'wake' && <circle cx={cx(ANNA[0])} cy={cy(ANNA[1])} r="96" fill="none" stroke="#6f8cff" stroke-opacity="0.35" stroke-width="1" />}
+    {comet && <><circle cx={comet[0]} cy={comet[1]} r="10" fill="url(#halo)" /><circle cx={comet[0]} cy={comet[1]} r="3" fill="#dfe6ff" /></>}
+  </svg>
+  {beat === 'send' && <p class="bubble bubble--send" style="left:23%;top:54%">{send}</p>}
+  {beat === 'reply' && <p class="bubble bubble--reply" style="left:23%;top:46%"><span class="bubble__from">{reply.from}</span>{reply.bubble}</p>}
+</div>
