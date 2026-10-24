@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 246" width="960" height="246" role="img" aria-labelledby="t d">
+<title id="t">Both people say yes before their bots can talk</title>
+<desc id="d">Tom slides to say yes, then Anna slides to say yes. Only then is a line drawn between their two bots: connected.</desc>
+<style>
+  .card { fill: #111722; stroke: #232c3b; }
+  .sans { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; }
+  .mono { font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; }
+  .ink { fill: #e6e9ef; } .mute { fill: #8b94a7; } .blue { fill: #7f97ff; } .amber { fill: #f0b04a; } .ok { fill: #4cc283; }
+  .head { fill: #1b2230; stroke: #e6e9ef; stroke-width: 2.5; }
+  .eye { fill: #e6e9ef; }
+  .lid { fill: none; stroke: #e6e9ef; stroke-width: 2.5; stroke-linecap: round; }
+  .stalk { stroke: #e6e9ef; stroke-width: 2.5; stroke-linecap: round; }
+  .wire { fill: none; stroke: #3a4558; stroke-width: 2; stroke-dasharray: 2 7; stroke-linecap: round; }
+  .fill-in { transform-box: fill-box; transform-origin: center; }
+
+  .track { fill: #1b2230; stroke: #232c3b; stroke-width: 1.5; }
+  .grip { fill: #e6e9ef; }
+  .done { fill: #e6e9ef; }
+  .on-grip { fill: #1b2230; }
+  .anim { animation-duration: 8s; animation-iteration-count: infinite; animation-timing-function: cubic-bezier(.65,0,.35,1); }
+  .g1 { animation-name: g1; } .g2 { animation-name: g2; }
+  @keyframes g1 { 0%, 6% { transform: none; } 22%, 92% { transform: translateX(232px); } 100% { transform: none; } }
+  @keyframes g2 { 0%, 34% { transform: none; } 50%, 92% { transform: translateX(232px); } 100% { transform: none; } }
+  .f1 { animation-name: f1; transform-box: fill-box; transform-origin: 0 50%; } .f2 { animation-name: f2; transform-box: fill-box; transform-origin: 0 50%; }
+  @keyframes f1 { 0%, 21% { transform: scaleX(0); opacity: 0; } 24%, 92% { transform: scaleX(1); opacity: 1; } 96%, 100% { transform: scaleX(0); opacity: 0; } }
+  @keyframes f2 { 0%, 49% { transform: scaleX(0); opacity: 0; } 52%, 92% { transform: scaleX(1); opacity: 1; } 96%, 100% { transform: scaleX(0); opacity: 0; } }
+  .s1 { animation-name: s1; } .s2 { animation-name: s2; }
+  @keyframes s1 { 0%, 10% { opacity: 1; } 16%, 94% { opacity: 0; } 100% { opacity: 1; } }
+  @keyframes s2 { 0%, 38% { opacity: 1; } 44%, 94% { opacity: 0; } 100% { opacity: 1; } }
+  .link { stroke: #7f97ff; stroke-width: 3; fill: none; stroke-linecap: round; stroke-dasharray: 100; stroke-dashoffset: 100; animation-name: link; }
+  @keyframes link { 0%, 54% { stroke-dashoffset: 100; } 66%, 92% { stroke-dashoffset: 0; } 97%, 100% { stroke-dashoffset: 100; } }
+  .wait { animation-name: wait; } @keyframes wait { 0%, 54% { opacity: 1; } 58%, 94% { opacity: 0; } 100% { opacity: 1; } }
+  .conn { animation-name: conn; opacity: 0; } @keyframes conn { 0%, 62% { opacity: 0; } 68%, 92% { opacity: 1; } 96%, 100% { opacity: 0; } }
+  .tipb { fill: #3a4558; animation-name: tipb; } @keyframes tipb { 0%, 62% { fill: #3a4558; } 66%, 92% { fill: #7f97ff; } 96%, 100% { fill: #3a4558; } }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; }
+    .g1, .g2 { transform: translateX(232px); } .f1, .f2 { transform: none; opacity: 1; } .s1, .s2, .wait { opacity: 0; }
+    .link { stroke-dashoffset: 0; } .conn { opacity: 1; } .tipb { fill: #7f97ff; }
+  }
+  </style>
+<rect class="card" x="1" y="1" width="958" height="244" rx="26" stroke-width="1.5"/>
+
+  
+    <text class="sans mute" x="44" y="48" font-size="13.5">Tom</text>
+    <rect class="track" x="40" y="60" width="296" height="56" rx="28"/>
+    <text class="sans mute s1 anim" x="208" y="93" text-anchor="middle" font-size="14">Slide to say yes</text>
+    <rect class="done f1 anim" x="44" y="64" width="288" height="48" rx="24"/>
+    <text class="sans f1 anim" x="188" y="93" text-anchor="middle" font-size="14" font-weight="600" fill="#1b2230">Yes, connect</text>
+    <g class="g1 anim">
+      <rect class="grip" x="44" y="64" width="48" height="48" rx="24"/>
+      <path d="M62 88 h12 m-5 -5 l5 5 l-5 5" fill="none" stroke="#1b2230" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  
+    <text class="sans mute" x="44" y="146" font-size="13.5">Anna</text>
+    <rect class="track" x="40" y="158" width="296" height="56" rx="28"/>
+    <text class="sans mute s2 anim" x="208" y="191" text-anchor="middle" font-size="14">Slide to say yes</text>
+    <rect class="done f2 anim" x="44" y="162" width="288" height="48" rx="24"/>
+    <text class="sans f2 anim" x="188" y="191" text-anchor="middle" font-size="14" font-weight="600" fill="#1b2230">Yes, connect</text>
+    <g class="g2 anim">
+      <rect class="grip" x="44" y="162" width="48" height="48" rx="24"/>
+      <path d="M62 186 h12 m-5 -5 l5 5 l-5 5" fill="none" stroke="#1b2230" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  <path class="wire" d="M582 123 H822"/>
+  <path class="link anim" pathLength="100" d="M582 123 H822"/>
+  
+    <line class="stalk" x1="540" y1="96" x2="540" y2="84"/><circle class="tipb anim" cx="540" cy="80" r="4.5"/>
+    <rect class="head" x="506" y="96" width="68" height="54" rx="18"/>
+    <circle class="eye" cx="528" cy="122" r="4.8"/><circle class="eye" cx="552" cy="122" r="4.8"/>
+    <text class="sans ink" x="540" y="178" text-anchor="middle" font-size="14" font-weight="600">Tom’s bot</text>
+  
+    <line class="stalk" x1="864" y1="96" x2="864" y2="84"/><circle class="tipb anim" cx="864" cy="80" r="4.5"/>
+    <rect class="head" x="830" y="96" width="68" height="54" rx="18"/>
+    <circle class="eye" cx="852" cy="122" r="4.8"/><circle class="eye" cx="876" cy="122" r="4.8"/>
+    <text class="sans ink" x="864" y="178" text-anchor="middle" font-size="14" font-weight="600">Anna’s bot</text>
+  <text class="mono mute wait anim" x="702" y="206" text-anchor="middle" font-size="12.5">waiting for both of them</text>
+  <text class="mono blue conn anim" x="702" y="206" text-anchor="middle" font-size="12.5">connected: the bots can talk</text>
+  
+</svg>

@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd \\\"/Users/dusanzabrodsky/Developer/b2b comms\\\" && python3 - <<'EOF'\\nimport re\\np='README.md'; s=open(p).read()\\na=\\\"A contact only works after **each** person says yes. Inviting counts ...",
+  "error": "Exit code 1\n0\nawk: syntax error at source line 1\n context is\n\t/^```mermaid/{f=1;n++;next} /^```/{if(f){f=0}} f{print > \"/tmp/readme-shots/m\" >>>  n <<<  \".mmd\"}\nawk: illegal statement at source line 1\n(eval):10: no matches found: /tmp/readme-shots/*.mmd",
+  "timestamp": "2026-10-24T17:53:52.228Z",
+  "retry_count": 1
+}

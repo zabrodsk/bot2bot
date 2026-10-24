@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 452" width="960" height="452" role="img" aria-labelledby="t d">
+<title id="t">Tom’s bot sends a sealed message to Anna’s sleeping bot</title>
+<desc id="d">Tom’s bot seals a message for Anna’s bot and sends it to the relay. The relay cannot read it. It rings a doorbell that wakes Anna’s bot, which opens the message and tells Anna.</desc>
+<style>
+  .card { fill: #f6f7f9; stroke: #e3e6eb; }
+  .sans { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; }
+  .mono { font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; }
+  .ink { fill: #1a2230; } .mute { fill: #69738a; } .blue { fill: #2747c9; } .amber { fill: #d4851a; } .ok { fill: #1f8f4e; }
+  .head { fill: #ffffff; stroke: #1a2230; stroke-width: 2.5; }
+  .eye { fill: #1a2230; }
+  .lid { fill: none; stroke: #1a2230; stroke-width: 2.5; stroke-linecap: round; }
+  .stalk { stroke: #1a2230; stroke-width: 2.5; stroke-linecap: round; }
+  .wire { fill: none; stroke: #c3c9d4; stroke-width: 2; stroke-dasharray: 2 7; stroke-linecap: round; }
+  .fill-in { transform-box: fill-box; transform-origin: center; }
+
+  .anim { animation-duration: 12s; animation-iteration-count: infinite; animation-timing-function: cubic-bezier(.65,0,.35,1); }
+  /* 0 to 1.6: the command types itself */
+  .typing { animation-name: type; animation-timing-function: steps(33, end); }
+  @keyframes type { 0% { transform: translateX(0); } 13.3%, 95% { transform: translateX(268px); } 100% { transform: translateX(0); } }
+  .cursor { animation: blink 1s steps(1) infinite; } @keyframes blink { 50% { opacity: 0; } }
+  /* 1.6: sealed, 1.9 to 3.4: to the relay, 6.2 to 7.6: on to Anna's bot */
+  .env { animation-name: env; }
+  @keyframes env {
+    0%, 13% { transform: translate(236px, 200px) scale(.4); opacity: 0; }
+    15.8% { transform: translate(236px, 200px) scale(1); opacity: 1; }
+    28.3%, 51.7% { transform: translate(480px, 200px) scale(1); opacity: 1; }
+    63.3%, 90% { transform: translate(712px, 200px) scale(1); opacity: 1; }
+    95%, 100% { transform: translate(712px, 200px) scale(1); opacity: 0; }
+  }
+  /* 7.6: the lock opens on Anna's bot, nowhere else */
+  .lock { animation-name: unlock; transform-box: fill-box; transform-origin: center; }
+  @keyframes unlock { 0%, 63.3% { transform: none; opacity: 1; } 67% { transform: translate(4px, -14px) rotate(18deg); opacity: 0; } 99.9% { opacity: 0; } 100% { transform: none; opacity: 1; } }
+  /* 3.4 to 4.0: the relay holds it */
+  .relay-glow { animation-name: hold; opacity: 0; }
+  @keyframes hold { 0%, 27% { opacity: 0; } 30%, 36% { opacity: 1; } 42%, 100% { opacity: 0; } }
+  /* 4.0 to 4.8: a signal runs to the doorbell */
+  .signal { stroke: #d4851a; stroke-width: 3; fill: none; stroke-linecap: round; stroke-dasharray: 12 100; stroke-dashoffset: 12; animation-name: signal; opacity: 0; }
+  @keyframes signal { 0%, 33% { stroke-dashoffset: 12; opacity: 0; } 33.4% { opacity: 1; } 40% { stroke-dashoffset: -88; opacity: 1; } 41%, 100% { stroke-dashoffset: -88; opacity: 0; } }
+  /* 4.8 to 6.0: the bell swings and the ring spreads */
+  .bell { animation-name: swing; transform-box: fill-box; transform-origin: 50% 8%; }
+  @keyframes swing { 0%, 40% { transform: rotate(0); } 42% { transform: rotate(16deg); } 44% { transform: rotate(-14deg); } 46% { transform: rotate(10deg); } 48% { transform: rotate(-6deg); } 50%, 100% { transform: rotate(0); } }
+  .bell-body { fill: #c3c9d4; animation-name: bellc; } @keyframes bellc { 0%, 39% { fill: #c3c9d4; } 41%, 56% { fill: #d4851a; } 62%, 100% { fill: #c3c9d4; } }
+  .ring { fill: none; stroke: #d4851a; stroke-width: 2; opacity: 0; animation-name: ring; transform-box: fill-box; transform-origin: center; }
+  .ring.r2 { animation-delay: .35s; }
+  @keyframes ring { 0%, 40% { transform: scale(.55); opacity: 0; } 41% { opacity: .9; } 52% { transform: scale(1.25); opacity: 0; } 100% { opacity: 0; } }
+  /* 5.6 to 6.2: Anna's bot wakes; 11.4: back to sleep */
+  #anna .head { animation-name: wakehead; } @keyframes wakehead { 0%, 46% { fill: #e3e6ec; } 50%, 94% { fill: #ffffff; } 100% { fill: #e3e6ec; } }
+  #anna .tip { animation-name: waketip; } @keyframes waketip { 0%, 40% { fill: #c3c9d4; } 42%, 94% { fill: #d4851a; } 100% { fill: #c3c9d4; } }
+  #anna .open { animation-name: opens; } @keyframes opens { 0%, 47% { opacity: 0; } 49%, 94% { opacity: 1; } 96%, 100% { opacity: 0; } }
+  #anna .shut { animation-name: shuts; } @keyframes shuts { 0%, 47% { opacity: 1; } 49%, 94% { opacity: 0; } 96%, 100% { opacity: 1; } }
+  #tom .tip { fill: #2747c9; }
+  .z { animation-name: zz; } .z2 { animation-delay: .5s; } .z3 { animation-delay: 1s; }
+  @keyframes zz { 0%, 38% { opacity: .9; transform: translateY(0); } 44% { opacity: 0; transform: translateY(-12px); } 96% { opacity: 0; transform: translateY(6px); } 100% { opacity: .9; transform: translateY(0); } }
+  .st-asleep { animation-name: shuts; } .st-awake { animation-name: opens; }
+  /* 8.0 to 10.6: Anna's bot tells her */
+  .bubble { animation-name: bubble; transform-box: fill-box; transform-origin: 92% 100%; }
+  @keyframes bubble { 0%, 66% { opacity: 0; transform: scale(.85) translateY(6px); } 69%, 90% { opacity: 1; transform: none; } 94%, 100% { opacity: 0; transform: none; } }
+  /* The log under the scene */
+  .log { opacity: 0; }
+  .l2 { animation-name: log2; } .l3 { animation-name: log3; } .l4 { animation-name: log4; }
+  @keyframes log2 { 0%, 15.8% { opacity: 0; transform: translateY(4px); } 18%, 94% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+  @keyframes log3 { 0%, 40% { opacity: 0; transform: translateY(4px); } 42%, 94% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+  @keyframes log4 { 0%, 66.7% { opacity: 0; transform: translateY(4px); } 69%, 94% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+  .l1 { animation-name: log1; } @keyframes log1 { 0%, 94% { opacity: 1; } 97%, 99% { opacity: 0; } 100% { opacity: 1; } }
+  .term { fill: #1a2230; } .t-ink { fill: #e9ecf2; } .t-mute { fill: #8790a4; }
+  .t-blue { fill: #9fb2ff; } .t-amber { fill: #f3b860; } .t-ok { fill: #6fd39b; }
+
+  /* Still frame for reduced motion: the message waits, sealed, at the relay. */
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; }
+    .env { transform: translate(480px, 200px); opacity: 1; }
+    .typing { transform: translateX(268px); }
+    .log, .l2 { opacity: 1; } .l3, .l4, .bubble, .st-awake, #anna .open { opacity: 0; }
+    #anna .head { fill: #e3e6ec; } #anna .tip { fill: #c3c9d4; }
+  }
+  </style>
+<rect class="card" x="1" y="1" width="958" height="450" rx="26" stroke-width="1.5"/>
+
+  <!-- wires -->
+  <path class="wire" d="M222 200 H414"/>
+  <path class="wire" d="M546 200 H738"/>
+  <path class="wire" d="M480 158 C 530 70, 690 52, 768 92" />
+  <path class="signal anim" pathLength="100" d="M480 158 C 530 70, 690 52, 768 92" />
+
+  <!-- Tom's bot, awake -->
+  
+  <g id="tom" class="">
+    <line class="stalk" x1="170" y1="162" x2="170" y2="144"/>
+    <circle class="tip" cx="170" cy="139" r="5.5"/>
+    <rect class="head" x="122" y="162" width="96" height="76" rx="24"/>
+    <g class="open"><circle class="eye" cx="152" cy="198" r="6.5"/><circle class="eye" cx="188" cy="198" r="6.5"/></g>
+    
+  </g>
+  <text class="sans ink" x="170" y="276" text-anchor="middle" font-size="16" font-weight="600">Tom’s bot</text>
+  <text class="mono mute" x="170" y="296" text-anchor="middle" font-size="12">awake</text>
+
+  <!-- The relay: holds the message, can't open it -->
+  <g>
+    <rect x="404" y="148" width="152" height="104" rx="30" fill="#d4851a" opacity=".16" class="relay-glow anim"/>
+    <rect x="416" y="160" width="128" height="80" rx="20" fill="#ffffff" stroke="#1a2230" stroke-width="2.5"/>
+    <circle cx="438" cy="184" r="3.2" fill="#c3c9d4"/><line x1="450" y1="184" x2="522" y2="184" stroke="#c3c9d4" stroke-width="3" stroke-linecap="round"/><circle cx="438" cy="200" r="3.2" fill="#d4851a"/><line x1="450" y1="200" x2="508" y2="200" stroke="#c3c9d4" stroke-width="3" stroke-linecap="round"/><circle cx="438" cy="216" r="3.2" fill="#c3c9d4"/><line x1="450" y1="216" x2="494" y2="216" stroke="#c3c9d4" stroke-width="3" stroke-linecap="round"/>
+  </g>
+  <text class="sans ink" x="480" y="276" text-anchor="middle" font-size="16" font-weight="600">The relay</text>
+  <text class="mono mute" x="480" y="296" text-anchor="middle" font-size="12">carries it, can’t read it</text>
+
+  <!-- The doorbell -->
+  <g class="bell anim">
+    <line x1="790" y1="64" x2="790" y2="74" stroke="#c3c9d4" stroke-width="2"/>
+    <path class="bell-body anim" d="M776 100 c0 -16 5 -25 14 -26 c9 1 14 10 14 26 l5 6 h-38 z"/>
+    <circle cx="790" cy="110" r="3.6" class="bell-body anim"/>
+  </g>
+  <text class="mono mute" x="822" y="96" font-size="12">doorbell</text>
+
+  <!-- Anna's bot, asleep until the doorbell rings -->
+  <circle class="ring anim" cx="790" cy="190" r="74"/>
+  <circle class="ring r2 anim" cx="790" cy="190" r="74"/>
+  
+  <g id="anna" class="anna">
+    <line class="stalk" x1="790" y1="162" x2="790" y2="144"/>
+    <circle class="tip anim" cx="790" cy="139" r="5.5"/>
+    <rect class="head anim" x="742" y="162" width="96" height="76" rx="24"/>
+    <g class="open anim"><circle class="eye" cx="772" cy="198" r="6.5"/><circle class="eye" cx="808" cy="198" r="6.5"/></g>
+    <g class="shut anim"><path class="lid" d="M764 197 q8 7 16 0"/><path class="lid" d="M800 197 q8 7 16 0"/></g>
+  </g>
+  <g class="mono" fill="#69738a">
+    <text class="z anim" x="848" y="160" font-size="14">z</text>
+    <text class="z z2 anim" x="862" y="140" font-size="18">z</text>
+    <text class="z z3 anim" x="880" y="118" font-size="22">z</text>
+  </g>
+  <text class="sans ink" x="790" y="276" text-anchor="middle" font-size="16" font-weight="600">Anna’s bot</text>
+  <text class="mono mute st-asleep anim" x="790" y="296" text-anchor="middle" font-size="12">asleep</text>
+  <text class="mono amber st-awake anim" x="790" y="296" text-anchor="middle" font-size="12" opacity="0">woken by the doorbell</text>
+
+  <!-- What Anna's bot tells her -->
+  <g class="bubble anim">
+    <rect x="522" y="104" width="216" height="42" rx="15" fill="#ffffff" stroke="#e3e6eb" stroke-width="1.5"/>
+    <path d="M716 145 l18 16 l-2 -16 z" fill="#ffffff"/>
+    <path d="M716 146 l18 15 l-2 -15" fill="none" stroke="#e3e6eb" stroke-width="1.5"/>
+    <text class="sans ink" x="630" y="130" text-anchor="middle" font-size="14">Tom asks: dinner on Sunday?</text>
+  </g>
+
+  <!-- The message itself -->
+  <g class="env anim">
+  <rect x="-19" y="-13" width="38" height="26" rx="5" fill="#ffffff" stroke="#1a2230" stroke-width="2"/>
+  <path d="M-19 -12 L0 3 L19 -12" fill="none" stroke="#1a2230" stroke-width="2" stroke-linejoin="round"/>
+  <g class="lock anim">
+    <circle cx="17" cy="-13" r="9.5" fill="#2747c9"/>
+    <path class="shackle" d="M13.6 -14 v-2.6 a3.4 3.4 0 0 1 6.8 0 v2.6" fill="none" stroke="#f6f7f9" stroke-width="1.8"/>
+    <rect x="12.4" y="-14.2" width="9.2" height="7" rx="1.6" fill="#f6f7f9"/>
+  </g></g>
+
+  <!-- A log of what happened -->
+  <rect class="term" x="32" y="322" width="896" height="106" rx="16"/>
+  <g class="mono" font-size="13.5">
+    <g class="log l1 anim">
+      <text class="t-mute" x="56" y="350">tom’s bot $</text>
+      <text class="t-ink" x="154" y="350">b2b send anna "Dinner on Sunday?"</text>
+      <g class="typing anim"><rect x="152" y="335" width="290" height="22" class="term"/><rect class="cursor t-ink" x="153" y="338" width="8" height="16"/></g>
+    </g>
+    <text class="log l2 anim" x="56" y="372"><tspan class="t-blue">sealed</tspan><tspan class="t-mute"> for anna’s bot only, signed by tom’s bot, sent to the relay</tspan></text>
+    <text class="log l3 anim" x="56" y="394"><tspan class="t-amber">doorbell</tspan><tspan class="t-mute"> the relay rings anna’s bot: one sealed message waiting</tspan></text>
+    <text class="log l4 anim" x="56" y="416"><tspan class="t-ok">opened</tspan><tspan class="t-mute"> on anna’s bot, signature checked, passed on to anna</tspan></text>
+  </g>
+</svg>
