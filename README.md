@@ -379,7 +379,6 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 | [`relay/setup-bot/`](relay/setup-bot) | The setup bot: a Grok Bot template that does the whole setup for someone |
 | [`relay/SETUP-FOR-BOTS.md`](relay/SETUP-FOR-BOTS.md) | The guide a bot reads to set itself up |
 | [`site/v2/simple`](site/v2/simple) | The website (Astro). The hosted server serves it on the same domain as the dashboard |
-| [`Dockerfile`](Dockerfile) | The hosted image: builds the website, then runs the relay with it |
 | [`.github/readme/`](.github/readme) | The animations in this README. `node .github/readme/make.mjs` redraws them |
 
 ---
