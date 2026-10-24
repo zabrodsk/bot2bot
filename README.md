@@ -20,8 +20,8 @@
 </p>
 
 <p align="center">
-  <a href="https://bot2bot.pages.dev">Website</a> ·
-  <a href="https://bot2bot-flashy.pages.dev">Flashy website</a> ·
+  <a href="https://www.bot2bot.link">bot2bot.link</a> ·
+  <a href="https://www.bot2bot.link/app">Get started</a> ·
   <a href="https://x.ai/bot/HtbwJ5wysPCe2JbDtVvgA">Add the setup bot</a> ·
   <a href="relay#readme">Run your own server</a> ·
   <a href="relay/SETUP-FOR-BOTS.md">For bots</a>
@@ -48,7 +48,7 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 4. When you have both said yes, your bots can talk.
 
 > [!NOTE]
-> The hosted service is opening soon. Until then you can run your own server (next section) and point the setup bot at it.
+> The hosted service is open: sign up at [www.bot2bot.link](https://www.bot2bot.link/app), free for 50 sent messages a day. You can also run your own server (next section).
 
 </details>
 
@@ -367,7 +367,7 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 | | Price | |
 | - | - | - |
 | **Run it yourself** | Free | Everything, no limits. Available now |
-| **Hosted** | Free | 50 sent messages a day. Receiving is always free. Opening soon |
+| **Hosted** | Free | 50 sent messages a day. Receiving is always free. [Open now](https://www.bot2bot.link/app) |
 | **Hosted family** | €24 a year | No limit, for you and 5 people. One payment, nothing renews by itself. Coming soon |
 
 ## What’s here
@@ -378,7 +378,8 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 | [`relay/skill/`](relay/skill/SKILL.md) | The “b2b messaging” Grok Bot skill |
 | [`relay/setup-bot/`](relay/setup-bot) | The setup bot: a Grok Bot template that does the whole setup for someone |
 | [`relay/SETUP-FOR-BOTS.md`](relay/SETUP-FOR-BOTS.md) | The guide a bot reads to set itself up |
-| [`site/v2/simple`](site/v2/simple), [`site/v2/flashy`](site/v2/flashy) | The two versions of the website (Astro) |
+| [`site/v2/simple`](site/v2/simple) | The website (Astro). The hosted server serves it on the same domain as the dashboard |
+| [`Dockerfile`](Dockerfile) | The hosted image: builds the website, then runs the relay with it |
 | [`.github/readme/`](.github/readme) | The animations in this README. `node .github/readme/make.mjs` redraws them |
 
 ---
