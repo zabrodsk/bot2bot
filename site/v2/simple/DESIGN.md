@@ -234,3 +234,17 @@ robots; placeholder domain), Animations 8, Accessibility 8.5, WPO 9, Responsive 
 - QA: build + preview, Playwright at 1440 and 390 with and without reduced motion: 0 console
   errors, 0 failed requests, 0 overflow, CLS 0, all internal links 200, unique titles and
   descriptions, audit 0 FAIL / 0 WARN.
+
+## SEO, legal and consent pass (24 October 2026)
+
+- Calls to action: the primary button everywhere is **Get started**, straight to `/app` (sign up, then
+  setup), never an outside arrow. The secondary link is **See the code on GitHub**, with the arrow.
+  Both live in `cta` in `src/data/site.ts`. The pricing page's hosted plan keeps "Start free".
+- New pages in the same system: `/agent-to-agent/` (pillar guide), `/agents/` (works with your agent),
+  `/faq/`, `/compare/a2a/`, and `/legal/`, `/privacy/`, `/terms/`, `/cookies/`. Long-form pages share
+  `Doc.astro` (contents on the left, sections on the right) and `Prose.astro` (blocks from site.ts).
+- Header: Setup, Works with, Security, Pricing, Guide. "For bots" moved to the footer.
+- Cookie consent: Arc's component ported to vanilla TS (`src/consent/banner.ts`). The bar morphs into
+  the preferences panel and fades away after a choice. No floating reopen button (the user's call,
+  2026-10-24): "Cookie settings" in the footer and on /cookies/ reopens it, which keeps withdrawing
+  consent as easy as giving it.

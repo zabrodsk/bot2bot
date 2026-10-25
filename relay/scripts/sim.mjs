@@ -24,8 +24,8 @@ const CLI = join(here, '..', 'cli', 'b2b.mjs');
 const PORT = Number(process.env.SIM_PORT || 8899);
 const RELAY = `http://127.0.0.1:${PORT}`;
 const BOT_PEOPLE = (process.env.SIM_PEOPLE || 'ben,anna,tom').split(',').map((s) => s.trim()).filter(Boolean);
-// People without an AI bot: they use the web inbox (log in with "login <name>").
-const WEB_PEOPLE = (process.env.SIM_WEB ?? 'gran').split(',').map((s) => s.trim()).filter(Boolean);
+// People without an AI bot use the web inbox, which is off by default now. SIM_WEB=gran turns it on for them.
+const WEB_PEOPLE = (process.env.SIM_WEB ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const PEOPLE = [...BOT_PEOPLE, ...WEB_PEOPLE];
 
 const c = { dim: (s) => `\x1b[2m${s}\x1b[0m`, bold: (s) => `\x1b[1m${s}\x1b[0m`, yellow: (s) => `\x1b[33m${s}\x1b[0m`, green: (s) => `\x1b[32m${s}\x1b[0m`, cyan: (s) => `\x1b[36m${s}\x1b[0m` };
@@ -37,6 +37,7 @@ const relay = createRelay({
   publicUrl: RELAY,
   allowLocalWebhooks: true,
   devLogin: true,
+  webInbox: WEB_PEOPLE.length > 0,
   banner: 'Simulator: pretend people and pretend bots on this computer only.',
   mailer: async (m) => { if (!/login code/.test(m.subject)) say(`${c.yellow('email')} to ${m.to}: "${m.subject}"`); },
 });

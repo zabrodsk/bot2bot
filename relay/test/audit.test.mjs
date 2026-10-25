@@ -16,7 +16,7 @@ test('audit 1: a bot cannot undo its owner\'s block', async (t0) => {
 });
 
 test('audit 2 and 3: disconnect kills old setup codes, and a disconnected inbox gets nothing', async (t0) => {
-  const env = await setup(t0);
+  const env = await setup(t0, { webInbox: true });
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   const gran = { b: await login(env, 'gran@example.com') };
   await connect(ben, gran, 'Ben', { web: true });
@@ -123,7 +123,7 @@ test('audit 11: reusing a client id with different choices is a conflict', async
 
 test('audit 12: a failed inbox email is retried', async (t0) => {
   let fail = true; const sent = [];
-  const env = await setup(t0, { mailer: async (m) => { if (fail) { fail = false; throw new Error('provider down'); } sent.push(m); } });
+  const env = await setup(t0, { webInbox: true, mailer: async (m) => { if (fail) { fail = false; throw new Error('provider down'); } sent.push(m); } });
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   const gran = { b: await login(env, 'gran@example.com') };
   await connect(ben, gran, 'Ben', { web: true });

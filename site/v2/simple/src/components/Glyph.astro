@@ -1,6 +1,6 @@
 ---
 // Things that are not bots, drawn in the bot's own coordinate system so they line up with it:
-// the server (it carries messages) and the browser (the web inbox). Always decorative.
+// the server (it carries messages) and the browser. Always decorative.
 import { BOT } from '../data/bot';
 interface Props { kind: 'server' | 'browser'; size?: number; class?: string }
 const { kind, size = 16, class: cls } = Astro.props;

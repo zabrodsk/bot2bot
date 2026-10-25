@@ -1,0 +1,213 @@
+/* Arc UI components, ported to plain CSS for Astro (MIT, see ./LICENSE.md).
+   Arc's semantic tokens are mapped onto the site's own palette here, so every
+   component below reads only Arc names and the site keeps one colour system. */
+:root {
+  --background: var(--c-ground);
+  --surface: var(--c-white);
+  --surface-raised: var(--c-white);
+  --surface-muted: var(--c-tint);
+  --foreground: var(--c-ink);
+  --text-secondary: var(--c-muted);
+  --text-muted: #6b7588;
+  --border: var(--c-line);
+  --border-subtle: var(--c-tint);
+  --border-strong: var(--c-sleep);
+  --accent: var(--c-signal);
+  --accent-strong: #1d379f;
+  --accent-subtle: rgb(39 71 201 / 0.08);
+  --success: oklch(49% 0.19 150);
+  --warning: oklch(58% 0.18 75);
+  --danger: oklch(54% 0.21 25);
+
+  --radius-control: var(--r-button);
+  --radius-panel: 18px;
+  --radius-pill: 9999px;
+  --control-height-sm: 2.25rem;
+  --control-height-md: 2.75rem;
+  --control-height-lg: 3.125rem;
+  --space-1: 0.25rem; --space-2: 0.5rem; --space-3: 0.75rem; --space-4: 1rem; --space-5: 1.25rem;
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --shadow-resting: 0 1px 2px rgb(26 34 48 / 0.06);
+  --shadow-floating: 0 18px 40px -18px rgb(26 34 48 / 0.24), 0 2px 6px rgb(26 34 48 / 0.06);
+
+  /* Switch (Arc: switch). The "on" fill is ink, like the primary button. */
+  --control-track: var(--c-sleep);
+  --control-track-hover: #b3bbc8;
+  --control-on: var(--c-ink);
+  --control-thumb: var(--c-white);
+  --control-thumb-on: var(--c-white);
+  --control-thumb-shadow: 0 1px 2px rgb(26 34 48 / 0.18), 0 0 0 0.5px rgb(26 34 48 / 0.06);
+
+  --duration-instant: 120ms;
+  --duration-fast: 160ms;
+  --duration-standard: 240ms;
+  --duration-spring: 580ms;
+  --ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: linear(0, 0.0213, 0.0739, 0.1443, 0.2235, 0.305, 0.3849, 0.4606, 0.5305, 0.594, 0.6508, 0.7011, 0.7452, 0.7836, 0.8168, 0.8454, 0.8699, 0.8907, 0.9084, 0.9234, 0.9361, 0.9467, 0.9557, 0.9632, 0.9694, 0.9747, 0.979, 0.9826, 0.9857, 0.9882, 0.9902, 0.992, 0.9934, 0.9946, 0.9955, 0.9963, 1);
+}
+
+/* ---------- Button (Arc: button) ----------
+   Arc drives the press with Motion's whileTap; here CSS does the same push:
+   in fast on press, out on the spring curve on release. */
+.arc-button {
+  position: relative; display: inline-flex; flex: 0 0 auto;
+  min-height: var(--control-height-lg); align-items: center; justify-content: center; gap: var(--space-2);
+  border: 1px solid transparent; border-radius: var(--radius-control); padding: 0 var(--space-5);
+  font: inherit; font-size: 1rem; font-weight: 520; letter-spacing: -0.005em; line-height: 1.4;
+  white-space: nowrap; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition:
+    color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard), opacity var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard), transform var(--duration-spring) var(--ease-spring);
+}
+.arc-button:active {
+  transform: scale(0.97);
+  transition-duration: var(--duration-fast), var(--duration-fast), var(--duration-fast), var(--duration-fast), var(--duration-fast), var(--duration-instant);
+  transition-timing-function: var(--ease-standard);
+}
+/* Keyboard focus: Bencho's double ring (Generate block): a ground-coloured gap, then a tinted ring. */
+.arc-button:focus-visible, .arc-copy:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--background), 0 0 0 4px rgb(39 71 201 / 0.55);
+}
+.arc-button--wide:active { transform: scale(0.985); }
+.arc-button--primary { color: var(--c-white); background: var(--foreground); border-color: var(--foreground); }
+.arc-button--secondary { color: var(--foreground); background: var(--surface); border-color: var(--border); }
+.arc-button--ghost { color: var(--text-secondary); background: transparent; }
+@media (hover: hover) and (pointer: fine) {
+  .arc-button--primary:hover { opacity: 0.91; box-shadow: var(--shadow-resting); }
+  .arc-button--secondary:hover { background: var(--surface-muted); box-shadow: var(--shadow-resting); }
+  .arc-button--ghost:hover { color: var(--foreground); background: var(--surface-muted); }
+  .arc-button:hover .arc-button__icon { transform: translate(1px, -1px); }
+}
+.arc-button--primary:active { opacity: 0.84; }
+.arc-button--secondary:active, .arc-button--ghost:active { color: var(--foreground); background: var(--surface-muted); }
+.arc-button--md { min-height: var(--control-height-md); padding-inline: var(--space-4); font-size: var(--text-sm); }
+.arc-button--sm { min-height: var(--control-height-sm); padding-inline: 14px; border-radius: calc(var(--radius-control) - 4px); font-size: var(--text-sm); }
+/* Leaving the site: the arrow Arc's footer uses, nudged toward where it goes. */
+.arc-button__icon { flex: none; opacity: 0.72; transition: transform var(--duration-fast) var(--ease-standard); }
+@media (max-width: 699px) { .arc-button { min-height: 3.375rem; } .arc-button--sm { min-height: 2.75rem; } }
+
+/* ---------- Text link (21st: Underline Link by balick) ----------
+   The underline draws in from the left on hover and focus and leaves to the right,
+   over a resting hairline so a link still reads as a link before you touch it. */
+.link {
+  color: var(--c-ink); font-weight: 500; text-decoration: none; padding-block: 3px;
+  background-image: linear-gradient(currentColor, currentColor), linear-gradient(var(--c-sleep), var(--c-sleep));
+  background-size: 0% 1px, 100% 1px; background-position: 100% 100%, 0 100%; background-repeat: no-repeat;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+  transition: background-size 0.3s ease-out, color 0.25s var(--ease-open);
+}
+.link:hover, .link:focus-visible { color: var(--c-signal); background-size: 100% 1px, 100% 1px; background-position: 0% 100%, 0 100%; }
+.link--out::after { content: ' \2197'; font-weight: 400; display: inline-block; margin-left: 0.15em; }
+
+/* ---------- Alert (Arc: alert) ---------- */
+.arc-alert {
+  display: flex; align-items: start; gap: var(--space-3);
+  border: 1px solid var(--border); border-radius: var(--radius-control); padding: var(--space-4) var(--space-5);
+  background: var(--surface); box-shadow: var(--shadow-resting);
+}
+.arc-alert__icon { display: grid; flex: 0 0 auto; place-items: center; margin-top: 2px; color: var(--accent); }
+.arc-alert--neutral .arc-alert__icon { color: var(--text-secondary); }
+.arc-alert__copy { flex: 1; min-width: 0; display: grid; gap: var(--space-1); }
+.arc-alert__title { font-size: 1rem; font-weight: 520; color: var(--foreground); }
+.arc-alert__description { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.55; }
+.arc-alert__action { flex: 0 0 auto; align-self: center; }
+@media (max-width: 599px) {
+  .arc-alert--action { flex-wrap: wrap; }
+  .arc-alert--action .arc-alert__action { flex-basis: 100%; }
+  .arc-alert--action .arc-alert__action .arc-button { width: 100%; }
+}
+
+/* ---------- Badge (Arc: badge) ---------- */
+.arc-badge {
+  display: inline-flex; min-height: 26px; align-items: center; gap: 5px;
+  border: 1px solid var(--badge-border, var(--border)); border-radius: var(--radius-pill); padding: 0 10px;
+  color: var(--badge-foreground, var(--foreground)); background: var(--badge-background, var(--surface));
+  font-size: var(--text-xs); font-weight: 500; letter-spacing: -0.01em; line-height: 1; white-space: nowrap;
+}
+.arc-badge--neutral { --badge-foreground: var(--text-secondary); --badge-background: var(--surface-muted); --badge-border: var(--border); }
+.arc-badge--info { --badge-foreground: var(--accent-strong); --badge-background: var(--accent-subtle); --badge-border: color-mix(in oklab, var(--accent) 24%, var(--border)); }
+.arc-badge--success { --badge-foreground: var(--success); --badge-background: color-mix(in oklab, var(--success) 10%, var(--surface)); --badge-border: color-mix(in oklab, var(--success) 25%, var(--border)); }
+
+/* ---------- Code block + copy button (Arc: code-block, copy-button) ---------- */
+.arc-code { width: 100%; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
+.arc-code__header {
+  display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: var(--space-3);
+  border-bottom: 1px solid var(--border-subtle); padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+}
+.arc-code__file { display: flex; min-width: 0; align-items: baseline; gap: var(--space-2); color: var(--foreground); font-size: var(--text-sm); font-weight: 500; }
+.arc-code__file > svg { flex: none; align-self: center; color: var(--text-muted); }
+.arc-code__lang { flex: none; color: var(--text-muted); font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 0.75rem; font-weight: 400; }
+.arc-code__lang::before { content: '·'; margin-right: var(--space-2); color: var(--border-strong); }
+.arc-code__pre {
+  margin: 0; padding: var(--space-5); overflow: auto; color: var(--foreground);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 0.875rem; font-variant-ligatures: none;
+  line-height: 1.7; tab-size: 2; white-space: pre;
+}
+.arc-code__pre:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; }
+.arc-code__line { display: block; }
+.arc-code__line--cmd::before { content: '$ '; color: var(--text-muted); user-select: none; }
+
+.arc-copy {
+  display: inline-flex; width: max-content; min-height: var(--control-height-sm); align-items: center; gap: var(--space-2);
+  border: 1px solid var(--border); border-radius: calc(var(--radius-control) - 4px); padding: 0 var(--space-3);
+  background: var(--surface); color: var(--foreground); font: inherit; font-size: var(--text-xs); font-weight: 500;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), transform var(--duration-spring) var(--ease-spring);
+}
+.arc-copy:active { transform: scale(0.97); transition-duration: var(--duration-fast), var(--duration-fast), var(--duration-instant); transition-timing-function: var(--ease-standard); }
+@media (hover: hover) and (pointer: fine) { .arc-copy:hover { background: var(--surface-muted); border-color: var(--border-strong); } }
+/* Width never changes: the label cell reserves its widest state while icon and words crossfade inside it. */
+.arc-copy__icon { position: relative; display: grid; width: 16px; height: 16px; flex: none; }
+.arc-copy__icon > svg { position: absolute; inset: 0; transition: opacity var(--duration-fast) var(--ease-standard), transform var(--duration-fast) var(--ease-standard), filter var(--duration-fast) var(--ease-standard); }
+.arc-copy__icon > .is-done { color: var(--success); opacity: 0; transform: scale(0.6); filter: blur(2px); }
+.arc-copy[data-state='copied'] .arc-copy__icon > .is-idle { opacity: 0; transform: scale(0.6); filter: blur(2px); }
+.arc-copy[data-state='copied'] .arc-copy__icon > .is-done { opacity: 1; transform: none; filter: none; }
+.arc-copy__label { display: grid; text-align: left; white-space: nowrap; }
+.arc-copy__label > span { grid-area: 1 / 1; }
+.arc-copy__label > [aria-hidden] { visibility: hidden; }
+.arc-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (max-width: 420px) {
+  .arc-code__pre { padding: var(--space-4); font-size: 0.8125rem; }
+}
+
+/* ---------- Switch (Arc: switch) ----------
+   A real button with role="switch". The thumb travels on the spring curve, and stretches toward
+   the other side while pressed, keeping its far edge anchored, so it reads as moving mass. */
+.arc-switch {
+  display: inline-flex; flex: none; align-items: center; min-height: var(--control-height-md);
+  padding: 0; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.arc-switch:focus-visible { outline: none; }
+.arc-switch:focus-visible .arc-switch__track { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px rgb(39 71 201 / 0.55); }
+.arc-switch__track {
+  position: relative; box-sizing: border-box; display: flex; width: 42px; height: 24px; align-items: center; padding: 3px;
+  border-radius: var(--radius-pill); background: var(--control-track); isolation: isolate;
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+.arc-switch__track::before {
+  content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--control-on);
+  opacity: 0; transition: opacity var(--duration-standard) var(--ease-standard);
+}
+.arc-switch[aria-checked='true'] .arc-switch__track::before { opacity: 1; }
+.arc-switch__thumb {
+  width: 18px; height: 18px; flex: none; border-radius: var(--radius-pill);
+  background: var(--control-thumb); box-shadow: var(--control-thumb-shadow);
+  transition: translate 0.36s var(--ease-spring), width 0.26s var(--ease-standard);
+}
+.arc-switch[aria-checked='true'] .arc-switch__thumb { translate: 18px 0; background: var(--control-thumb-on); }
+.arc-switch:active .arc-switch__thumb { width: 23px; }
+.arc-switch[aria-checked='true']:active .arc-switch__thumb { translate: 13px 0; }
+@media (hover: hover) and (pointer: fine) {
+  .arc-switch[aria-checked='false']:hover .arc-switch__track { background: var(--control-track-hover); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arc-switch__track, .arc-switch__track::before, .arc-switch__thumb { transition: none; }
+  .arc-switch:active .arc-switch__thumb { width: 18px; }
+  .arc-switch[aria-checked='true']:active .arc-switch__thumb { translate: 18px 0; }
+  .arc-button, .arc-copy, .arc-copy__icon > svg, .arc-button__icon { transition: none; }
+  .arc-button:active, .arc-copy:active { transform: none; }
+}

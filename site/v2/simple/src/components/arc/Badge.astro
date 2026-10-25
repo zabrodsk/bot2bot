@@ -1,0 +1,10 @@
+---
+// Arc UI Badge (https://uiarc.dev/components/badge), ported to Astro. MIT, see ./LICENSE.md.
+// The label carries the meaning; the tone only supports it.
+interface Props {
+  tone?: 'neutral' | 'info' | 'success';
+  class?: string;
+}
+const { tone = 'neutral', class: className } = Astro.props;
+---
+<span class:list={['arc-badge', `arc-badge--${tone}`, className]}><slot /></span>

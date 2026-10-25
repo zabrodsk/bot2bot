@@ -85,7 +85,7 @@ const signed = (env, event) => {
 };
 
 test('hosted: free messages each month, receiving stays free, signed payment, household', async (t0) => {
-  const env = await setup(t0, { hosted: true, billing: { stripeKey: 'sk_test_x', priceId: 'price_x', webhookSecret: SECRET, freeMessages: 3, freePeriod: 'month' } });
+  const env = await setup(t0, { hosted: true, webInbox: true, billing: { stripeKey: 'sk_test_x', priceId: 'price_x', webhookSecret: SECRET, freeMessages: 3, freePeriod: 'month' } });
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   const mia = await owner(env, t0, 'mia@example.com', 'mia');
   const tom = await owner(env, t0, 'tom@example.com', 'tom');

@@ -44,14 +44,15 @@ test('ask their bot: only topics the owner allowed, answered by the bot, removab
 });
 
 test('invite by chat: the bot gets a link, the friend connects, the owner says yes', async (t0) => {
-  const env = await setup(t0);
+  const env = await setup(t0, { webInbox: true });
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   const out = await ben.cli('invite', 'Gran');
   const link = out.match(/Invite link for "Gran": (\S+)/)[1];
   assert.ok(link.startsWith(`${env.url}/i/`));
   const gran = await login(env, 'gran@example.com');
   const path = new URL(link).pathname;
-  assert.match((await gran(path)).text, /wants to connect/);
+  assert.match(out, /Add the setup bot to your Grok Bot: https:\/\/x\.ai\/bot\/[^]*Then open my invite: http/);
+  assert.match((await gran(path)).text, /wants your bots to talk[^]*Add the setup bot[^]*accept_invite tool: code/);
   await gran(path, { method: 'POST', form: { web: '1', alias: 'Ben' } });
   // Ben's bot made the invite, so Ben confirms on the dashboard; the name his bot used is kept.
   const dash = (await ben.b('/app')).text;

@@ -5,7 +5,7 @@ description: Message the bots of my family and friends, and handle what their bo
 
 # b2b messaging
 
-You pass messages between my owner and the bots of people they know, through {{RELAY}}. The tool is `node ~/bin/b2b.mjs`. If it's missing, install it: `mkdir -p ~/bin && curl -fsSL {{RELAY}}/cli/b2b.mjs -o ~/bin/b2b.mjs`. If it says "Not enrolled" and a B2B_SECRET secret exists, run it again with that secret in the environment; otherwise ask my owner to reconnect you from their dashboard.
+You pass messages between my owner and the bots of people they know, through {{RELAY}}. The tool is `node ~/bin/b2b.mjs`. If it's missing, install it: `mkdir -p ~/bin && curl -fsSL {{RELAY}}/cli/b2b.mjs -o ~/bin/b2b.mjs`. If it says "Not enrolled" and a B2B_SECRET secret exists, run it again with that secret in the environment; otherwise run `node ~/bin/b2b.mjs join {{RELAY}}`, give my owner the link it prints (they pick this bot under "Which bot" so its contacts stay), and run the same command again to finish.
 
 ## What my owner says → what you run
 
@@ -16,7 +16,7 @@ You pass messages between my owner and the bots of people they know, through {{R
 | "Ask Anna's bot when she's free" | `send anna "When are you free this week?" --topic availability` |
 | "Did Anna get it?" | `status <message-id>` |
 | "Reply to Tom: yes" | `reply tom "Yes"` |
-| "Invite Mia" | `invite mia`, then give my owner the link it prints |
+| "Invite Mia" | `invite mia`, then give my owner the message it prints, to send to Mia |
 | "Anna's bot may ask about my availability" | `allow anna "availability"` |
 | "Stop letting Anna ask about that" | `disallow anna "availability"` |
 | "What's our safety code with Anna?" | `code anna`, tell my owner the 12 digits; if Anna sees the same, `code anna --matches` |

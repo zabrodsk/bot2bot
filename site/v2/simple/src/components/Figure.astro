@@ -1,13 +1,13 @@
 ---
 // Small diagrams built from the bot family. The wire tells the truth:
 //   sealed (solid blue)  = end-to-end encrypted, bot to bot
-//   open   (dashed grey) = the web inbox, not end-to-end encrypted
+//   open   (dashed grey) = quick connect: the server sees the text, not end-to-end encrypted
 // Always decorative: the text next to a figure says everything it shows.
 import Bot from './Bot.astro';
 import Glyph from './Glyph.astro';
 import { BOT } from '../data/bot';
 
-type Kind = 'locked' | 'ask' | 'inbox' | 'consent' | 'self' | 'free' | 'family';
+type Kind = 'locked' | 'ask' | 'inbox' | 'consent' | 'self' | 'free' | 'family' | 'setup' | 'quick' | 'many';
 interface Props { kind: Kind; size?: number; class?: string }
 const { kind, size = 30, class: cls } = Astro.props;
 // Wires sit on the head's centre line, which is below the svg's centre (the antenna is above).
@@ -27,6 +27,14 @@ const drop = ((BOT.vc + 0.25) * size) / 16;
     <Bot state="you" size={size} /><span class="wire wire--open"></span>
     <Glyph kind="browser" size={size} />
   </>)}
+  {kind === 'setup' && (<>
+    <Bot state="lit" size={size} /><span class="wire wire--short wire--sealed wire--msg"></span>
+    <Bot state="awake" size={size} />
+  </>)}
+  {kind === 'quick' && (<>
+    <Bot state="you" size={size} /><span class="wire wire--open"></span>
+    <Glyph kind="server" size={size} />
+  </>)}
   {kind === 'consent' && (<>
     <Bot state="you" size={size} /><span class="wire wire--sealed"></span>
     <Bot state="lit" size={size} />
@@ -34,6 +42,11 @@ const drop = ((BOT.vc + 0.25) * size) / 16;
   {kind === 'self' && (<>
     <Glyph kind="server" size={size} /><span class="wire wire--short wire--sealed"></span>
     <Bot state="you" size={size} />
+  </>)}
+  {kind === 'many' && (<>
+    <Bot state="you" size={size} /><span class="wire wire--gap"></span>
+    <Bot state="awake" size={size} /><span class="wire wire--gap"></span>
+    <Bot state="lit" size={size} />
   </>)}
   {kind === 'free' && (<>
     <Bot state="you" size={size} />
@@ -50,6 +63,7 @@ const drop = ((BOT.vc + 0.25) * size) / 16;
   .wire { display: block; flex: 0 0 auto; width: calc(var(--s) * 1.7); height: 1.5px; translate: 0 var(--drop); margin: 0 4px; }
   .wire--short { width: calc(var(--s) * 0.7); }
   .wire--tiny { width: calc(var(--s) * 0.32); margin: 0 2px; }
+  .wire--gap { width: calc(var(--s) * 0.3); }
   .wire--sealed { background: var(--c-signal); }
   .wire--open {
     background: repeating-linear-gradient(90deg, var(--c-muted) 0 4px, transparent 4px 8px);

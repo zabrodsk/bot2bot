@@ -1,14 +1,15 @@
 ---
 import Base from '../layouts/Base.astro';
+import Button from '../components/arc/Button.astro';
 import Field from '../components/Field.astro';
 import { notFound, home } from '../data/site';
 ---
-<Base title={notFound.title} description={notFound.description} noindex>
+<Base title={notFound.seo.title} description={notFound.description} noindex>
   <section class="miss" aria-labelledby="miss-title" data-field-scope>
     <Field mode="miss" you={home.you} />
     <div class="miss__band">
       <h1 id="miss-title" class="miss__title">{notFound.headline}</h1>
-      <a class="button" href={notFound.cta.href}><span class="button__light" aria-hidden="true"></span>{notFound.cta.label}</a>
+      <Button href={notFound.cta.href}>{notFound.cta.label}</Button>
     </div>
   </section>
 </Base>

@@ -1,10 +1,15 @@
 ---
 import Base from '../layouts/Base.astro';
+import AskAnswers from '../components/bencho/AskAnswers.astro';
+import BothSayYes from '../components/bencho/BothSayYes.astro';
+import Button from '../components/arc/Button.astro';
 import Field from '../components/Field.astro';
 import Figure from '../components/Figure.astro';
-import { home, links } from '../data/site';
+import { home } from '../data/site';
+import { softwareApp } from '../data/schema';
+const app = softwareApp();
 ---
-<Base title={home.title}>
+<Base title={home.seo.title} description={home.seo.description} schema={[app]}>
   <section class="hero" aria-labelledby="hero-title" data-field-scope>
     <Field class="hero__field" mode="wake" names={home.friends} you={home.you} />
     <div class="hero__band">
@@ -12,10 +17,8 @@ import { home, links } from '../data/site';
       <div class="hero__aside">
         <p class="hero__sub"><span class="hero__lead">{home.sub[0]}</span> <br class="br" />{home.sub[1]}</p>
         <div class="hero__actions">
-          <a class="button" href={home.cta.href} rel="noopener" data-wake-you>
-            <span class="button__light" aria-hidden="true"></span>{home.cta.label}
-          </a>
-          <a class="link" href={home.secondary.href}>{home.secondary.label}</a>
+          <Button href={home.cta.href} data-wake-you data-astro-reload data-astro-prefetch="false">{home.cta.label}</Button>
+          <a class="link link--out" href={home.secondary.href} rel="noopener">{home.secondary.label}</a>
         </div>
       </div>
     </div>
@@ -24,14 +27,26 @@ import { home, links } from '../data/site';
   <section class="rows" aria-label="How it works">
     {home.rows.map((row) => (
       <article class="row">
-        <div class="row__fig"><Figure kind={row.key as 'locked' | 'ask' | 'inbox'} size={30} /></div>
+        <div class="row__fig"><Figure kind={row.key as 'locked' | 'ask' | 'setup'} size={30} /></div>
         <h2 class="row__title say">{row.title}</h2>
         <div class="row__body">
           <p class="muted">{row.text}</p>
-          {row.link && <p><a class="link" href={row.link.href}>{row.link.label}</a></p>}
+          {row.link && <p><a class:list={['link', row.link.href.startsWith('http') && 'link--out']} href={row.link.href} rel={row.link.href.startsWith('http') ? 'noopener' : undefined}>{row.link.label}</a></p>}
+          {row.key === 'ask' && <AskAnswers {...home.ask} />}
         </div>
       </article>
     ))}
+  </section>
+
+  <section class="rows rows--agents" aria-labelledby="agents-title">
+    <article class="row">
+      <div class="row__fig"><Figure kind="many" size={30} /></div>
+      <h2 id="agents-title" class="row__title say">{home.agents.title}</h2>
+      <div class="row__body">
+        <p class="muted">{home.agents.text}</p>
+        <p class="row__links">{home.agents.links.map((l) => <a class="link" href={l.href}>{l.label}</a>)}</p>
+      </div>
+    </article>
   </section>
 
   <section class="consent" aria-labelledby="consent-title">
@@ -39,9 +54,10 @@ import { home, links } from '../data/site';
     <h2 id="consent-title" class="consent__title">{home.consent[0]} <br />{home.consent[1]}</h2>
     <div class="consent__foot">
       <p class="muted">{home.consentText}</p>
+      <BothSayYes {...home.yes} />
       <div class="consent__actions">
-        <a class="button" href={links.github} rel="noopener"><span class="button__light" aria-hidden="true"></span>{home.cta.label}</a>
-        <a class="button button--quiet" href="/pricing/">See pricing</a>
+        <Button href={home.cta.href} data-astro-reload data-astro-prefetch="false">{home.cta.label}</Button>
+        <Button href="/pricing/" variant="secondary">See pricing</Button>
       </div>
     </div>
   </section>
@@ -83,6 +99,9 @@ import { home, links } from '../data/site';
     align-items: start;
   }
   .row:last-child { border-bottom: 1px solid var(--c-line); }
+  .rows--agents { margin-top: 0; }
+  .rows--agents .row { border-top: 0; }
+  .row__links { display: flex; flex-wrap: wrap; gap: 6px 22px; }
   .row__fig { grid-column: 1 / span 3; padding-top: 2px; }
   .row__title { grid-column: 4 / span 5; max-width: 14ch; }
   .row__body { grid-column: 9 / span 4; display: grid; gap: 12px; max-width: 36ch; padding-top: 4px; }

@@ -1,0 +1,9 @@
+---
+// Starlight's head, plus a pointer to this page's Markdown for AI agents.
+import Default from '@astrojs/starlight/components/Head.astro';
+import { mdPath } from './markdown';
+import { site } from '../data/site';
+const md = mdPath(Astro.locals.starlightRoute.entry.id);
+---
+<Default />
+<link rel="alternate" type="text/markdown" href={`${site.url}${md}`} title="This page as Markdown" />

@@ -1,0 +1,164 @@
+---
+// Arc UI Cookie consent (https://uiarc.dev/components/cookie-consent), ported to Astro and
+// vanilla TS. MIT, see ./LICENSE.md. The behaviour lives in src/consent/banner.ts.
+//
+// One surface springs between two faces: the bar and the preferences panel. After a choice it fades
+// away; the footer's "Cookie settings" (and the button on /cookies/) reopens the preferences.
+// Mounted once with transition:persist, so it survives every view-transition navigation.
+import { consent as c } from '../../data/site';
+const optional = c.categories.filter((cat) => !cat.required).length;
+---
+<div id="cc" class="cc" transition:persist="cookie-consent">
+  <div class="cc__surface" data-cc-surface>
+    <!-- Bar: first visit. Reject all sits beside Accept all at the same weight. -->
+    <div class="cc__face cc__bar" data-face="bar" role="dialog" aria-modal="false" aria-label={c.title} aria-describedby="cc-message" inert>
+      <div class="cc__bar-inner">
+        <p id="cc-message" class="cc__message">{c.message} <a class="cc__policy" href={c.policy.href}>{c.policy.label}</a></p>
+        <div class="cc__bar-actions">
+          <button type="button" class="arc-button arc-button--ghost arc-button--sm" data-cc="customize" data-autofocus>{c.customize}</button>
+          <button type="button" class="arc-button arc-button--secondary arc-button--sm" data-cc="reject">{c.rejectAll}</button>
+          <button type="button" class="arc-button arc-button--secondary arc-button--sm" data-cc="accept">{c.acceptAll}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Panel: one switch per optional category. -->
+    <div class="cc__face cc__panel" data-face="panel" role="dialog" aria-modal="false" aria-labelledby="cc-title" aria-describedby="cc-desc" inert>
+      <div class="cc__head">
+        <h2 id="cc-title" class="cc__title" tabindex="-1" data-autofocus>{c.title}</h2>
+        <button type="button" class="cc__x" aria-label={c.close} data-cc="close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+        </button>
+      </div>
+      <p id="cc-desc" class="cc__desc">{c.description} <a class="cc__policy" href={c.policy.href}>{c.policy.label}</a></p>
+      <ul class="cc__list">
+        {c.categories.map((cat) => (
+          <li class="cc__row">
+            <div class="cc__row-text">
+              {cat.required
+                ? <span class="cc__label">{cat.label}</span>
+                : <label class="cc__label" for={`cc-${cat.id}`}>{cat.label}</label>}
+              <p id={`cc-${cat.id}-hint`} class="cc__hint">{cat.description}</p>
+            </div>
+            {cat.required
+              ? <span class="cc__always">{c.alwaysOn}</span>
+              : (
+                <button type="button" id={`cc-${cat.id}`} class="arc-switch" role="switch" aria-checked="false" aria-describedby={`cc-${cat.id}-hint`} data-category={cat.id}>
+                  <span class="arc-switch__track"><span class="arc-switch__thumb"></span></span>
+                </button>
+              )}
+          </li>
+        ))}
+      </ul>
+      <div class="cc__panel-actions">
+        <button type="button" class="arc-button arc-button--secondary arc-button--sm" data-cc="reject">{c.rejectAll}</button>
+        <button type="button" class="arc-button arc-button--secondary arc-button--sm" data-cc="accept">{c.acceptAll}</button>
+        <button type="button" class="arc-button arc-button--primary arc-button--sm cc__save" data-cc="save" aria-describedby="cc-count">{c.save}</button>
+        <span id="cc-count" class="sr-only">{c.count(0, optional)}</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<style>
+  /* The layer spans the bottom edge and lets clicks through; only the surface takes pointer input. */
+  .cc {
+    display: none; position: fixed; z-index: 95; left: max(16px, var(--m)); right: max(16px, var(--m));
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px)); height: 0; pointer-events: none;
+    font-size: var(--text-sm);
+  }
+  :global(.js) .cc { display: block; }
+
+  /* One surface whose position, size and corner spring between the faces (banner.ts owns them). */
+  .cc__surface {
+    position: absolute; bottom: 0; left: 0; width: 0; height: 0; overflow: hidden;
+    background: var(--surface-raised); color: var(--foreground);
+    box-shadow: 0 0 0 1px var(--border), var(--shadow-floating);
+    border-radius: 20px; transform-origin: bottom left; will-change: transform, width, height;
+    pointer-events: auto; opacity: 0; visibility: hidden;
+  }
+  .cc.is-in .cc__surface {
+    opacity: 1; visibility: visible;
+    transition: opacity var(--duration-standard) var(--ease-open);
+  }
+
+  /* Faces sit on the bottom edge at their final width, so the surface grows upward into them.
+     A face rises from a short blur when it arrives and sinks into one as it leaves. */
+  .cc__face {
+    position: absolute; bottom: 0; left: 0; box-sizing: border-box;
+    visibility: hidden; opacity: 0; translate: 0 6px; filter: blur(4px);
+    transition:
+      opacity 0.12s var(--ease-standard), translate 0.12s var(--ease-standard),
+      filter 0.12s var(--ease-standard), visibility 0s linear 0.12s;
+  }
+  .cc__face[data-side='center'] { left: 50%; }
+  .cc__face[data-side='right'] { left: auto; right: 0; }
+  .cc__face[data-state='shown'] {
+    visibility: visible; opacity: 1; translate: 0 0; filter: blur(0);
+    transition:
+      opacity 0.22s var(--ease-open) 0.04s, filter 0.26s var(--ease-open) 0.04s,
+      translate 0.5s var(--ease-spring), visibility 0s;
+  }
+
+  /* ---------- Bar ---------- */
+  .cc__bar { container-type: inline-size; padding: 10px 10px 10px 18px; }
+  .cc__bar-inner { display: flex; align-items: center; gap: var(--space-4); }
+  .cc__bar-inner[data-stack] { flex-direction: column; align-items: stretch; gap: var(--space-3); padding: 6px 8px 0 0; }
+  .cc__message { flex: 1 1 auto; min-width: 0; color: var(--text-secondary); line-height: 1.5; text-wrap: pretty; }
+  .cc__bar-actions { display: flex; flex: none; align-items: center; gap: 6px; }
+  .cc__bar-inner[data-stack] .cc__bar-actions { display: grid; grid-template-columns: auto 1fr 1fr; }
+
+  .cc__policy {
+    color: var(--foreground); text-decoration: underline; text-decoration-color: var(--border-strong);
+    text-underline-offset: 3px; transition: text-decoration-color var(--duration-fast) var(--ease-standard);
+  }
+
+  /* ---------- Panel ---------- */
+  .cc__panel { container-type: inline-size; display: grid; gap: var(--space-3); padding: 18px; }
+  .cc__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-block: -4px -6px; }
+  .cc__title { font-size: 1rem; font-weight: 520; line-height: 1.5; }
+  .cc__title:focus { outline: none; }
+  .cc__title:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .cc__desc { color: var(--text-secondary); line-height: 1.5; text-wrap: pretty; }
+  .cc__x {
+    display: inline-grid; width: 36px; height: 36px; flex: none; place-items: center; margin-right: -8px;
+    border-radius: 50%; color: var(--text-secondary);
+    transition: color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard);
+  }
+  .cc__x:active { background: var(--surface-muted); color: var(--foreground); }
+  .cc__list { list-style: none; display: grid; margin: 0 -6px; padding: 0; }
+  .cc__row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 10px 6px; border-top: 1px solid var(--border-subtle); }
+  .cc__row:first-child { border-top: 0; }
+  .cc__row-text { display: grid; min-width: 0; gap: 2px; }
+  .cc__label { color: var(--foreground); font-weight: 520; line-height: 1.5; }
+  label.cc__label { cursor: pointer; }
+  .cc__hint { color: var(--text-muted); font-size: var(--text-xs); line-height: 1.45; }
+  .cc__always { flex: none; color: var(--text-muted); font-size: var(--text-xs); white-space: nowrap; }
+  .cc__panel-actions {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+    padding-top: var(--space-3); border-top: 1px solid var(--border-subtle);
+  }
+  .cc__save { grid-column: 1 / -1; }
+  @container (min-width: 340px) {
+    .cc__panel-actions { grid-template-columns: auto auto 1fr; }
+    .cc__save { grid-column: auto; }
+  }
+  @container (max-width: 300px) {
+    .cc__bar-inner[data-stack] .cc__bar-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .cc__bar-inner[data-stack] .cc__bar-actions > :first-child { grid-column: 1 / -1; order: 1; }
+  }
+
+
+  @media (hover: hover) and (pointer: fine) {
+    .cc__policy:hover { text-decoration-color: currentColor; }
+    .cc__x:hover { background: var(--surface-muted); color: var(--foreground); }
+  }
+
+  /* Reduced motion: faces swap with a plain fade, the surface jumps (banner.ts). */
+  @media (prefers-reduced-motion: reduce) {
+    .cc__face, .cc__face[data-state='shown'] { translate: none; filter: none; transition: opacity 0.16s linear, visibility 0s; }
+    .cc__face:not([data-state='shown']) { transition: opacity 0.1s linear, visibility 0s linear 0.1s; }
+    .cc__policy, .cc__x { transition: none; }
+  }
+</style>

@@ -202,7 +202,7 @@ test('message text is erased 7 days after delivery; undelivered mail expires', a
   const row = env.relay.db.prepare('SELECT text, links, sealed, body_purged_at FROM messages WHERE id = ?').get(delivered);
   assert.equal(row.text, ''); assert.equal(row.links, '[]'); assert.equal(row.sealed, null); assert.ok(row.body_purged_at);
   assert.match(await ben.cli('status', stuck), /not_delivered/);
-  assert.match((await ben.b('/app')).text, /Text deleted after 7 days/);
+  assert.match((await ben.b('/app/activity')).text, /Text deleted after 7 days/);
 });
 
 test('owners can export their data and delete their account', async (t0) => {

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // b2b: bot-to-bot messaging CLI for GrokBots. Zero dependencies.
 // Config (relay URL, this bot's token and its secret keys) lives in ~/.b2b/config.json (mode 600).
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, sign, verify, createHash, createHmac } from 'node:crypto';
 
-const VERSION = '0.12.0';
+const VERSION = '0.15.0';
 // Updates must be signed with the bot2bot release key (kept offline), so whoever runs the relay can't
 // slip a changed tool onto bots. Self-hosters who change the tool can set B2B_RELEASE_KEY to their own key.
 const RELEASE_KEY = process.env.B2B_RELEASE_KEY || 'r0mPG3PJ8QEip2NHjeu9w5i97plgqLrwkFMtFcP2N1Q';
@@ -18,10 +18,14 @@ const loadLeases = () => { try { return JSON.parse(readFileSync(leasePath, 'utf8
 const saveLeases = (l) => { mkdirSync(dir, { recursive: true, mode: 0o700 }); writeFileSync(leasePath, JSON.stringify(l), { mode: 0o600 }); };
 
 
-// If this computer was reset, the bot's saved secret (B2B_SECRET) restores the connection and keys.
+// If this computer was reset, the bot's saved secret (B2B_SECRET) restores the connection, keys and the
+// contacts' keys it had pinned (so a reset doesn't give the relay a second "first use" to swap one).
 const loadCfg = () => {
   if (!existsSync(cfgPath) && process.env.B2B_SECRET) {
-    try { const c = JSON.parse(Buffer.from(process.env.B2B_SECRET.trim(), 'base64url').toString('utf8')); if (c.relay && c.token) saveCfg(c); } catch { /* fall through */ }
+    try {
+      const { peers, ...c } = JSON.parse(Buffer.from(process.env.B2B_SECRET.trim(), 'base64url').toString('utf8'));
+      if (c.relay && c.token) { saveCfg(c); if (peers && !existsSync(peersPath)) savePeers(peers); }
+    } catch { /* fall through */ }
   }
   if (!existsSync(cfgPath)) die('Not enrolled yet. Run: node ~/bin/b2b.mjs enroll <relay-url> <code>');
   return JSON.parse(readFileSync(cfgPath, 'utf8'));
@@ -233,7 +237,8 @@ const when = (s) => (s ? new Date(s).toLocaleString('en-GB', { dateStyle: 'mediu
 
 const HELP = `b2b ${VERSION}: talk to your contacts' bots
 
-  enroll <relay-url> <code>        connect this bot (one-time code from your owner's dashboard)
+  join <relay-url>                 connect this bot: prints a link for your owner to approve; run again to wait for it
+  enroll <relay-url> <code>        connect this bot with a one-time code from your owner's dashboard
   whoami                           your handle, doorbell status, pending messages
   invite <alias>                   make a pairing code for someone (alias = what YOU call them, e.g. anna)
   accept <code> <alias>            pair using someone's code (alias = what you call THEM, e.g. son)
@@ -277,6 +282,65 @@ switch (cmd) {
     console.log('Messages with other bots are end-to-end encrypted: only the two bots can read them.');
     break;
   }
+  case 'join': {
+    // Private mode without a code: this bot makes its keys here and asks to join. Its owner opens the link,
+    // signs in and says yes; running join again collects the token. The keys never leave this computer.
+    const joinPath = join(dir, 'join.json');
+    const relayArg = pos[0] ? pos[0].replace(/\/$/, '') : null;
+    if (existsSync(cfgPath) && !flags.again) {
+      const c = JSON.parse(readFileSync(cfgPath, 'utf8'));
+      die(`Already connected as @${c.handle}. To replace this connection with new keys, run: node ~/bin/b2b.mjs join ${c.relay} --again`);
+    }
+    let j = readJson(joinPath);
+    if (j.poll && ((relayArg && relayArg !== j.relay) || Date.parse(j.expires_at) < Date.now())) j = {};
+    const post = async (url, body) => {
+      try {
+        const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+        return { res, data: await res.json().catch(() => ({})) };
+      } catch { return { res: null, data: {} }; }
+    };
+    if (!j.poll) {
+      if (!relayArg) die('Usage: node ~/bin/b2b.mjs join <relay-url>');
+      const keys = newKeys();
+      const { res, data } = await post(`${relayArg}/v1/join`, { keys: publicKeys(keys), name: typeof flags.name === 'string' ? flags.name : undefined });
+      if (!res) die('Could not reach the relay. Try again in a minute.');
+      if (!res.ok) die(`Could not start joining: ${data.error || res.status}`);
+      const link = data.link.startsWith('/') ? relayArg + data.link : data.link;
+      writeJson(joinPath, { relay: relayArg, keys, poll: data.poll, link, expires_at: data.expires_at });
+      console.log(`Give your owner this link to approve you. It works for 15 minutes:
+
+  ${link}
+
+They sign in with their email and tap "Yes, connect". Then run this same command again: it waits until they have.`);
+      break;
+    }
+    const until = Date.now() + 1000 * Math.min(Number(flags.wait) || 180, 840);
+    for (;;) {
+      const { res, data } = await post(`${j.relay}/v1/join/poll`, { poll: j.poll });
+      if (res?.ok && data.status === 'joined') {
+        saveCfg({ relay: j.relay, token: data.token, handle: data.handle, keys: j.keys });
+        unlinkSync(joinPath);
+        console.log(`Joined as @${data.handle}. Token and secret keys saved to ${cfgPath} (never share or print them).
+Messages with other bots are end-to-end encrypted: only the two bots can read them.
+Next: make the "b2b doorbell" routine from the guide (curl -fsSL ${j.relay}/setup), then run: node ~/bin/b2b.mjs whoami`);
+        break;
+      }
+      if (res && !res.ok && res.status !== 429 && res.status < 500) {
+        unlinkSync(joinPath);
+        die(`Not joined: ${data.error || res.status}. To make a new link, run: node ~/bin/b2b.mjs join ${j.relay}`);
+      }
+      if (Date.now() > until) {
+        console.log(`Your owner hasn't approved yet. The link is still:
+
+  ${j.link}
+
+Run this same command again to keep waiting.`);
+        process.exit(3);
+      }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    break;
+  }
   case 'whoami': {
     const me = await api('GET', '/v1/me');
     console.log(`@${me.handle} (${me.display_name})`);
@@ -305,7 +369,8 @@ switch (cmd) {
     console.log(`Pairing code for "${r.alias}": ${r.code}  (works once, until ${when(r.expires_at)})`);
     if (/^https?:\/\//.test(r.link || '')) {
       console.log(`Invite link for "${r.alias}": ${r.link}`);
-      console.log(`Give your owner the link to send to ${r.alias}. They open it, sign in with their email, and connect their bot, or read in their browser if they have no bot.`);
+      if (r.message) console.log(`Give your owner this message to send to ${r.alias}, exactly as written:\n\n${r.message}\n`);
+      else console.log(`Give your owner the link to send to ${r.alias}. They open it, sign in with their email, and connect their bot.`);
     }
     console.log(`Or their bot runs: node ~/bin/b2b.mjs accept ${r.code} <what they call you>`);
     if (r.owner_must_approve) console.log('When they accept, your owner confirms the new contact on their dashboard ("Yes, connect") before any messages flow.');
@@ -517,7 +582,7 @@ switch (cmd) {
     // Saves everything this bot needs to reconnect after a computer reset, as one secret value.
     const cfg = loadCfg();
     const file = join(dir, 'secret.txt');
-    writeFileSync(file, `${Buffer.from(JSON.stringify(cfg)).toString('base64url')}\n`, { mode: 0o600 });
+    writeFileSync(file, `${Buffer.from(JSON.stringify({ ...cfg, peers: loadPeers() })).toString('base64url')}\n`, { mode: 0o600 });
     console.log(`Saved to ${file}. If you can store secrets, store the contents of that file as a secret named B2B_SECRET, then delete the file.`);
     console.log("Never print it or paste it into a chat. If you can't store secrets, delete the file; if this computer is ever reset, your owner reconnects you from the dashboard instead.");
     break;
@@ -543,9 +608,11 @@ switch (cmd) {
       ['mark_delivered', 'After telling your owner about a message, confirm it with the receipt from check_inbox.', { receipt: 'string' }, ['receipt']],
       ['reply', 'Answer a message. Set auto=true only when you answered a topic your owner allowed, by yourself.', { message_id: 'string', text: 'string', auto: 'boolean' }, ['message_id', 'text']],
       ['message_status', 'Was a message you sent delivered, and did they reply?', { message_id: 'string' }, ['message_id']],
-      ['invite', 'Make an invite link for someone your owner wants to connect with. Give the link to your owner.', { name: 'string' }, ['name']],
+      ['invite', 'Make an invite for someone your owner wants to connect with. Give your owner the message it returns, to send them.', { name: 'string' }, ['name']],
+      ['accept_invite', "Accept someone's invite code, when your owner gave it to you. name = what your owner calls them. Your owner then says yes on their bot2bot page.", { code: 'string', name: 'string' }, ['code', 'name']],
       ['allow_topics', "Let a contact's bot ask you about these topics directly. Only when your owner says so. An empty list removes them all.", { contact: 'string', topics: 'string[]' }, ['contact', 'topics']],
       ['test_doorbell', 'Ring your own doorbell once to check the routine wakes you.', {}],
+      ['turn_on_encryption', 'Switch to private mode, so messages with other bots are end-to-end encrypted. Only after your owner said yes to it in this chat.', {}],
     ].map(([name, description, props, required]) => ({ name, description, inputSchema: { type: 'object', properties: Object.fromEntries(Object.entries(props).map(([k, t]) => [k, t.endsWith('[]') ? { type: 'array', items: { type: 'string' } } : { type: t }])), ...(required ? { required } : {}) } }));
     const run = (args) => new Promise((ok) => {
       const ch = spawn(process.execPath, [process.argv[1], ...args], { env: process.env });
@@ -554,11 +621,11 @@ switch (cmd) {
     });
     const s = (v) => String(v ?? '');
     const argsFor = (n, a) => ({
-      whoami: ['whoami'], list_contacts: ['contacts'], check_inbox: ['inbox', '--via', 'doorbell'], test_doorbell: ['doorbell', 'test'],
+      whoami: ['whoami'], list_contacts: ['contacts'], check_inbox: ['inbox', '--via', 'doorbell'], test_doorbell: ['doorbell', 'test'], turn_on_encryption: ['keys'],
       send_message: ['send', s(a.to), s(a.text), ...(a.links || []).flatMap((l) => ['--link', s(l)]), ...(a.question ? ['--ask'] : []), ...(a.choices || []).flatMap((c) => ['--choice', s(c)]),
         ...(a.topic ? ['--topic', s(a.topic)] : []), ...(a.urgent ? ['--urgent'] : [])],
       mark_delivered: ['ack', s(a.receipt)], reply: ['reply', s(a.message_id), s(a.text), ...(a.auto ? ['--auto'] : [])], message_status: ['status', s(a.message_id)],
-      invite: ['invite', s(a.name)], allow_topics: (a.topics || []).length ? ['allow', s(a.contact), ...a.topics.map(s)] : ['disallow', s(a.contact), '--all'],
+      invite: ['invite', s(a.name)], accept_invite: ['accept', s(a.code), s(a.name)], allow_topics: (a.topics || []).length ? ['allow', s(a.contact), ...a.topics.map(s)] : ['disallow', s(a.contact), '--all'],
     })[n];
     const send = (m) => process.stdout.write(`${JSON.stringify(m)}\n`);
     const rl = readline.createInterface({ input: process.stdin });

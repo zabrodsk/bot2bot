@@ -1,0 +1,85 @@
+---
+// Arc UI Comparison table (https://uiarc.dev/components/blocks/comparison-table), ported to Astro
+// as a static, semantic table. MIT, see ./LICENSE.md. Kept: the tinted band on your own column,
+// check and dash marks with screen reader words, hairline rows, and a stacked phone view (here
+// CSS-only: each row becomes a block with its column labels). Dropped: the differences toggle
+// and the competitor picker, which a two or three column table doesn't need.
+interface Props {
+  caption: string;
+  head: string[]; // first cell is the row header column
+  rows: string[][];
+  own?: number; // index of the highlighted column
+  class?: string;
+}
+const { caption, head, rows, own = -1, class: cls } = Astro.props;
+const mark = (v: string) => (v === 'Yes' ? 'yes' : v === 'No' ? 'no' : null);
+---
+<div class:list={['arc-cmp', cls]} role="region" aria-label={caption} tabindex="0">
+  <table>
+    <caption class="sr-only">{caption}</caption>
+    <thead>
+      <tr>{head.map((h, i) => i === 0
+        ? <td class="arc-cmp__corner"></td>
+        : <th scope="col" data-own={i === own || undefined}>{h}</th>)}</tr>
+    </thead>
+    <tbody>
+      {rows.map((r) => (
+        <tr>
+          {r.map((cell, i) => i === 0
+            ? <th scope="row">{cell}</th>
+            : (
+              <td data-own={i === own || undefined} data-label={head[i]}>
+                {mark(cell) === 'yes' && (
+                  <span class="arc-cmp__mark"><svg class="arc-cmp__check" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="10" /><path d="M6.6 11.3l3 3 5.9-6.4" /></svg><span>Yes</span></span>
+                )}
+                {mark(cell) === 'no' && (
+                  <span class="arc-cmp__mark"><svg class="arc-cmp__cross" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14" /></svg><span>No</span></span>
+                )}
+                {!mark(cell) && <span class="arc-cmp__text">{cell}</span>}
+              </td>
+            ))}
+        </tr>
+      ))}
+    </tbody>
+  </table>
+</div>
+
+<style>
+  .arc-cmp { --band: color-mix(in oklab, var(--accent) 6%, var(--surface)); width: 100%; overflow-x: auto; }
+  .arc-cmp:focus-visible { outline-offset: 4px; }
+  .arc-cmp table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: var(--text-sm); line-height: 1.45; }
+  .arc-cmp th, .arc-cmp td { padding: 14px 16px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border-subtle); }
+  .arc-cmp thead th { padding-top: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border); font-size: 1rem; font-weight: 520; color: var(--foreground); }
+  .arc-cmp thead th[data-own] { color: var(--accent-strong); border-radius: 18px 18px 0 0; }
+  .arc-cmp tbody th { padding-left: 0; font-weight: 520; color: var(--foreground); }
+  .arc-cmp td { color: var(--text-secondary); }
+  .arc-cmp [data-own] { background: var(--band); }
+  .arc-cmp td[data-own] { color: var(--foreground); }
+  .arc-cmp tbody tr:last-child td[data-own] { border-radius: 0 0 18px 18px; border-bottom-color: transparent; }
+  .arc-cmp__corner { border-bottom: 1px solid var(--border); }
+  .arc-cmp__mark { display: inline-flex; align-items: center; gap: 8px; }
+  .arc-cmp__mark > span { color: var(--foreground); }
+  .arc-cmp__check circle { fill: color-mix(in oklab, var(--foreground) 8%, transparent); }
+  .arc-cmp__check path { fill: none; stroke: var(--foreground); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  [data-own] .arc-cmp__check circle { fill: var(--c-ink); }
+  [data-own] .arc-cmp__check path { stroke: var(--c-white); }
+  .arc-cmp__cross { color: var(--text-muted); }
+  .arc-cmp__cross + span { color: var(--text-muted); }
+  @media (hover: hover) and (pointer: fine) {
+    .arc-cmp tbody tr:hover > * { background: color-mix(in oklab, var(--foreground) 2.5%, transparent); }
+    .arc-cmp tbody tr:hover > [data-own] { background: color-mix(in oklab, var(--accent) 9%, var(--surface)); }
+  }
+
+  /* Phones: each row becomes a block, each value carries its column name. */
+  @media (max-width: 699px) {
+    .arc-cmp thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .arc-cmp table, .arc-cmp tbody, .arc-cmp tr, .arc-cmp th, .arc-cmp td { display: block; }
+    .arc-cmp tr { padding: 14px 0 10px; border-top: 1px solid var(--border); }
+    .arc-cmp tbody tr:last-child { border-bottom: 1px solid var(--border); }
+    .arc-cmp th, .arc-cmp td { border: 0; padding: 0; }
+    .arc-cmp tbody th { padding-bottom: 8px; }
+    .arc-cmp td { display: grid; grid-template-columns: 7.5rem 1fr; gap: 12px; padding: 7px 10px; border-radius: 10px; }
+    .arc-cmp td::before { content: attr(data-label); font-size: var(--t-xs); font-weight: 560; color: var(--foreground); padding-top: 2px; }
+    .arc-cmp tbody tr:last-child td[data-own] { border-radius: 10px; }
+  }
+</style>

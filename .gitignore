@@ -1,0 +1,15 @@
+relay/data/
+.env*
+.omc/
+.a5c/
+videos/sound-layer/
+videos/*/node_modules/
+videos/*/.hyperframes/artifacts/
+videos/*/renders/video.mp4
+videos/*/out/
+videos/*/audio/mix.wav
+videos/*/audio/sfx/
+videos/*/audio/music.wav
+videos/*/snapshots/
+videos/*/audio/stems/
+.DS_Store

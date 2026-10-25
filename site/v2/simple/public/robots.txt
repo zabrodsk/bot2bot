@@ -1,4 +1,14 @@
+# bot2bot.link. Every crawler is welcome on the site, AI crawlers included.
+# The dashboard, sign-in, invites and the bot APIs are not pages, so they stay out of the index.
+# A plain-text summary for language models: https://www.bot2bot.link/llms.txt
 User-agent: *
 Allow: /
+Disallow: /app$
+Disallow: /app/
+Disallow: /login
+Disallow: /i/
+Disallow: /oauth/
+Disallow: /v1/
+Disallow: /mcp
 
-Sitemap: https://bot2bot.pages.dev/sitemap-index.xml
+Sitemap: https://www.bot2bot.link/sitemap-index.xml

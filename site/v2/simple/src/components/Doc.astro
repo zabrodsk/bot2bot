@@ -1,0 +1,48 @@
+---
+// Long-form layout: a contents list on the left (sticky on wide screens), sections on the right.
+// "guide" sets section titles as display statements; "legal" keeps them compact for scanning.
+import type { Section } from '../data/site';
+import Prose from './Prose.astro';
+import Toc from './Toc.astro';
+interface Props { sections: Section[]; tocLabel: string; variant?: 'guide' | 'legal' }
+const { sections, tocLabel, variant = 'guide' } = Astro.props;
+---
+<div class:list={['doc', `doc--${variant}`]}>
+  <aside class="doc__aside"><Toc label={tocLabel} items={sections} /></aside>
+  <div class="doc__body">
+    {sections.map((sec) => (
+      <section class="doc__sec" id={sec.id} aria-labelledby={`${sec.id}-h`}>
+        <h2 class:list={['doc__h', variant === 'guide' && 'say']} id={`${sec.id}-h`}>{sec.title}</h2>
+        <Prose blocks={sec.blocks} />
+      </section>
+    ))}
+    <slot />
+  </div>
+</div>
+
+<style>
+  .doc {
+    margin: clamp(64px, 11vh, 120px) var(--m) 0;
+    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 0 var(--gap); align-items: start;
+  }
+  .doc__aside { grid-column: 1 / span 3; position: sticky; top: 24px; padding-top: 6px; }
+  .doc__body { grid-column: 5 / span 8; display: grid; min-width: 0; }
+  .doc__sec { display: grid; gap: 20px; padding: clamp(28px, 4.4vh, 44px) 0; border-top: 1px solid var(--c-line); scroll-margin-top: 24px; }
+  .doc__sec:first-child { border-top: 0; padding-top: 0; }
+  .doc--guide .doc__sec :global(.prose) { max-width: 60ch; }
+  .doc--guide .doc__h { max-width: 18ch; }
+  .doc--legal .doc__h {
+    font-family: var(--f-display); font-weight: 480; font-size: var(--t-m); letter-spacing: -0.025em; line-height: 1.15;
+  }
+  .doc--legal .doc__sec { gap: 16px; }
+  .doc--legal .doc__sec :global(.prose > p), .doc--legal .doc__sec :global(.prose__list) { max-width: 68ch; }
+  @media (max-width: 1023px) {
+    .doc__aside { grid-column: 1 / span 4; }
+    .doc__body { grid-column: 5 / span 8; }
+  }
+  @media (max-width: 859px) {
+    .doc { grid-template-columns: 1fr; gap: 40px; }
+    .doc__aside, .doc__body { grid-column: 1; }
+    .doc__aside { position: static; }
+  }
+</style>

@@ -1,0 +1,26 @@
+---
+// Bencho One-time code (https://bencho.dev/blocks/one-time-code), cells only, ported to Astro. MIT, see ../arc/LICENSE.md.
+// Read-only and selectable. The cells settle in once, one after another, when they scroll into view.
+interface Props { groups: string[]; label: string; class?: string }
+const { groups, label, class: className } = Astro.props;
+---
+<figure class:list={['b-code', className]} data-b-code>
+  <p class="b-code__row" aria-label={`Example safety code: ${groups.join(', ')}`}>
+    {groups.map((g, i) => <span class="b-code__cell" style={`--i:${i}`}>{g}</span>)}
+  </p>
+  <figcaption class="b-code__label">{label}</figcaption>
+</figure>
+
+<script>
+  const start = () => {
+    document.querySelectorAll<HTMLElement>('[data-b-code]:not([data-in])').forEach((el) => {
+      const io = new IntersectionObserver(([e]) => {
+        if (!e?.isIntersecting) return;
+        el.dataset.in = '';
+        io.disconnect();
+      }, { threshold: 0.6 });
+      io.observe(el);
+    });
+  };
+  document.addEventListener('astro:page-load', start);
+</script>

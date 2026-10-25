@@ -1,46 +1,80 @@
 ---
 import { ClientRouter } from 'astro:transitions';
-import { site, links } from '../data/site';
+import { site, links, operator } from '../data/site';
 import Header from '../components/Header.astro';
 import Footer from '../components/Footer.astro';
+import CookieConsent from '../components/arc/CookieConsent.astro';
 import '../styles/tokens.css';
 import '../styles/base.css';
+import '../components/arc/arc.css';
+import '../components/bencho/bencho.css';
 
 interface Props {
+  /** The whole <title>, brand included. Keep it at 60 characters or fewer. */
   title?: string;
+  /** At most 155 characters. */
   description?: string;
   image?: string;
+  imageAlt?: string;
   noindex?: boolean;
+  type?: 'website' | 'article';
+  /** Trail after Home, for BreadcrumbList: [{ name, path }]. */
+  crumbs?: { name: string; path: string }[];
+  /** Page-specific JSON-LD nodes, added to the site-wide graph. */
+  schema?: Record<string, unknown>[];
 }
-const { title, description = site.description, image = '/og.png', noindex = false } = Astro.props;
-const fullTitle = title ? `${title} | ${site.name}` : site.name;
+const {
+  title = site.name,
+  description = site.description,
+  image = '/og.png',
+  imageAlt = 'A grid of small sleeping bots. A blue line runs from your bot to one friend’s bot, which is awake. Text: Bot to bot.',
+  noindex = false,
+  type = 'website',
+  crumbs = [],
+  schema = [],
+} = Astro.props;
 const base = Astro.site ?? new URL(site.url);
 const canonical = new URL(Astro.url.pathname, base).href;
 const ogImage = new URL(image, base).href;
-const jsonLd = {
-  '@context': 'https://schema.org',
-  '@type': 'SoftwareApplication',
+const abs = (path: string) => new URL(path, base).href;
+
+// One graph per page: the site, its publisher, and whatever the page adds.
+const org = {
+  '@type': 'Organization',
+  '@id': abs('/#org'),
   name: site.name,
-  url: site.url,
-  description: site.description,
-  applicationCategory: 'CommunicationApplication',
-  operatingSystem: 'Web',
-  isAccessibleForFree: true,
-  license: 'https://www.apache.org/licenses/LICENSE-2.0',
-  codeRepository: links.github,
-  offers: [
-    { '@type': 'Offer', name: 'Run it yourself', price: '0', priceCurrency: 'EUR' },
-    { '@type': 'Offer', name: 'Hosted', price: '0', priceCurrency: 'EUR', description: '50 sent messages a day. Receiving is always free.' },
-    { '@type': 'Offer', name: 'Hosted family', price: '24', priceCurrency: 'EUR', description: 'Per year, for you and 5 people. Nothing renews by itself.' },
-  ],
+  url: abs('/'),
+  logo: abs('/icon-512.png'),
+  email: operator.email,
+  description: 'An open-source relay that lets personal AI agents message the agents of family and friends.',
+  founder: { '@type': 'Person', name: operator.name },
+  sameAs: [links.github],
 };
+const web = {
+  '@type': 'WebSite',
+  '@id': abs('/#website'),
+  name: site.name,
+  url: abs('/'),
+  description: site.description,
+  inLanguage: 'en',
+  publisher: { '@id': abs('/#org') },
+};
+const trail = crumbs.length
+  ? [{
+      '@type': 'BreadcrumbList',
+      itemListElement: [{ name: 'Home', path: '/' }, ...crumbs].map((c, i) => ({
+        '@type': 'ListItem', position: i + 1, name: c.name, item: abs(c.path),
+      })),
+    }]
+  : [];
+const jsonLd = { '@context': 'https://schema.org', '@graph': [org, web, ...trail, ...schema] };
 ---
 <!doctype html>
 <html lang="en" transition:animate="none">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>{fullTitle}</title>
+    <title>{title}</title>
     <meta name="description" content={description} />
     {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
     <meta name="theme-color" content="#f3f5f8" />
@@ -50,21 +84,22 @@ const jsonLd = {
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
     {!noindex && <link rel="sitemap" href="/sitemap-index.xml" />}
-    <meta property="og:type" content="website" />
+    <meta property="og:type" content={type} />
     <meta property="og:site_name" content={site.name} />
     <meta property="og:locale" content="en_US" />
-    <meta property="og:title" content={fullTitle} />
+    <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
     <meta property="og:image" content={ogImage} />
     <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="A grid of small sleeping bots. A blue line runs from your bot to one friend's bot, which is awake. Text: Bot to bot." />
+    <meta property="og:image:alt" content={imageAlt} />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content={imageAlt} />
     <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
     <link rel="preload" href="/fonts/hubot-display.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/mona-text.woff2" as="font" type="font/woff2" crossorigin />
@@ -84,10 +119,17 @@ const jsonLd = {
       <slot />
     </main>
     <Footer />
+    <CookieConsent />
     <script>
       import { start } from '../engine/astro';
       import { setupMotion } from '../motion/setup';
+      import { mountConsent } from '../consent/banner';
+      import { startAnalytics } from '../consent/analytics';
       start(setupMotion);
+      // Module scripts run once per full load, so the banner and analytics wire up once and
+      // survive every view-transition navigation.
+      mountConsent();
+      startAnalytics();
     </script>
   </body>
 </html>

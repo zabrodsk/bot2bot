@@ -1,0 +1,10 @@
+**/node_modules
+**/dist
+**/.astro
+**/.DS_Store
+relay/data
+/videos
+/docs
+/report
+/pngout.png
+.env*

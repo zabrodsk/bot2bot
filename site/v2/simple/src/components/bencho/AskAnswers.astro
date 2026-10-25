@@ -1,0 +1,38 @@
+---
+// Bencho Emoji reactions (https://bencho.dev/blocks/emoji-reactions), ported to Astro as an ask with answer buttons,
+// which is what bot2bot actually has. MIT, see ../arc/LICENSE.md. The message, the chips, the "mine" ring and the
+// little emoji moves are Bencho's; the picker, flight and counts are left out because an answer is one choice.
+export interface Answer { e: string; label: string; k: 'nod' | 'tick' | 'droop'; reply: string }
+interface Props { from: string; meta: string; question: string; answers: Answer[] }
+const { from, meta, question, answers } = Astro.props;
+---
+<div class="b-ask" data-b-ask>
+  <p class="b-ask__who"><b>{from}</b><span>{meta}</span></p>
+  <p class="b-ask__msg">{question}</p>
+  <div class="b-ask__row" role="group" aria-label={`Answers to: ${question}`}>
+    {answers.map((a) => (
+      <button type="button" class="b-ask__chip" aria-pressed="false" data-reply={a.reply}>
+        <i class="b-ask__e" data-k={a.k} aria-hidden="true">{a.e}</i>{a.label}
+      </button>
+    ))}
+  </div>
+  <p class="b-ask__reply" aria-live="polite" data-reply-line></p>
+</div>
+
+<script>
+  const setup = (root: HTMLElement) => {
+    if (root.dataset.ready) return;
+    root.dataset.ready = '';
+    const line = root.querySelector<HTMLElement>('[data-reply-line]')!;
+    const chips = [...root.querySelectorAll<HTMLButtonElement>('.b-ask__chip')];
+    chips.forEach((chip) => chip.addEventListener('click', () => {
+      const on = chip.getAttribute('aria-pressed') !== 'true';
+      chips.forEach((c) => c.setAttribute('aria-pressed', 'false'));
+      chip.setAttribute('aria-pressed', String(on));
+      line.textContent = on ? chip.dataset.reply! : '';
+      chip.removeAttribute('data-play');
+      if (on) { chip.getBoundingClientRect(); chip.dataset.play = ''; }
+    }));
+  };
+  document.addEventListener('astro:page-load', () => document.querySelectorAll<HTMLElement>('[data-b-ask]').forEach(setup));
+</script>

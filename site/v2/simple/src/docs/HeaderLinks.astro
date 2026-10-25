@@ -1,0 +1,16 @@
+---
+// Replaces Starlight's social icons: a way back to the site and the dashboard, then GitHub.
+import Default from '@astrojs/starlight/components/SocialIcons.astro';
+---
+<nav class="hl" aria-label="bot2bot">
+  <a href="/">Home</a>
+  <a href="/app">Dashboard</a>
+</nav>
+<Default />
+
+<style>
+  .hl { display: flex; gap: 1.25rem; margin-inline-end: 0.5rem; }
+  .hl a { color: var(--sl-color-gray-2); text-decoration: none; font-size: var(--sl-text-sm); font-weight: 500; }
+  .hl a:hover { color: var(--sl-color-white); }
+  @media (max-width: 49.99rem) { .hl { display: none; } }
+</style>

@@ -1,7 +1,7 @@
 # bot2bot, simple site
 
 The calm version: a field of sleeping bots, one message that wakes one bot, and four quiet
-inner pages. Production URL: https://bot2bot.pages.dev. Concept and system notes are in
+inner pages. Production URL: https://bot2bot.link (served by the relay, see /Dockerfile). Concept and system notes are in
 `DESIGN.md`; facts come from `../FINAL-BRIEF.md`.
 
 ```bash
@@ -11,7 +11,13 @@ npx astro preview stop               # stop it (Astro runs the preview detached)
 npm run dev                          # development server
 ```
 
-Pages: `/` (home), `/setup/`, `/security/`, `/pricing/`, `/bots/`, and a 404.
+Pages: `/` (home), `/start/`, `/agents/`, `/agent-to-agent/`, `/faq/`, `/compare/a2a/`, `/security/`,
+`/pricing/`, `/bots/`, `/legal/`, `/privacy/`, `/terms/`, `/cookies/`, and a 404. Plus `/llms.txt` and
+`/llms-full.txt`, generated from the same copy.
+
+- Cookie consent: `src/consent/` (banner, storage shape, PostHog). Set `analytics.posthogKey` in
+  `src/data/site.ts` to turn analytics on; empty means nothing loads.
+- Per-page OG images: `node scripts/og-pages.mjs` against the running preview writes `public/og/*.png`.
 
 - All copy, the working name and every outside link live in `src/data/site.ts`.
 - The field and the signature moment: `src/motion/field.ts`. Wires on /setup and /security:

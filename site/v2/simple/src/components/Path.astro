@@ -1,0 +1,44 @@
+---
+// The path of one message, three stops joined by a solid blue wire (sealed the whole way).
+// Same drawing as on /security; the wires draw in order (motion/steps.ts, [data-rail]).
+import Bot from './Bot.astro';
+import Glyph from './Glyph.astro';
+interface Props { stops: { who: string; text: string }[]; label: string; class?: string }
+const { stops, label, class: cls } = Astro.props;
+---
+<section class:list={['mpath', cls]} aria-label={label}>
+  <ol class="mpath__list">
+    {stops.map((stop, i) => (
+      <li class="mpath__stop">
+        {i < stops.length - 1 && <span class="mpath__wire" aria-hidden="true"><span class="mpath__signal" data-rail></span></span>}
+        <div class="mpath__fig" aria-hidden="true">
+          {i === 0 && <Bot state="you" size={44} />}
+          {i === 1 && <Glyph kind="server" size={44} />}
+          {i === 2 && <Bot state="lit" size={44} />}
+        </div>
+        <p class="mpath__who">{stop.who}</p>
+        <p class="mpath__text">{stop.text}</p>
+      </li>
+    ))}
+  </ol>
+</section>
+
+<style>
+  .mpath { padding: clamp(64px, 11vh, 120px) var(--m) 0; }
+  .mpath__list { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 var(--gap); }
+  .mpath__stop { position: relative; display: grid; align-content: start; gap: 10px; }
+  .mpath__wire { position: absolute; top: 37px; left: 64px; right: calc(-1 * var(--gap) + 12px); height: 1.5px; background: var(--c-line); }
+  .mpath__signal { position: absolute; inset: 0; background: var(--c-signal); }
+  :global(.motion) .mpath__signal { clip-path: inset(0% 100% 0% 0%); }
+  .mpath__fig { height: 78px; display: flex; align-items: flex-start; }
+  .mpath__who { font-weight: 560; font-size: var(--t-s); }
+  .mpath__text { color: var(--c-muted); max-width: 28ch; }
+  @media (max-width: 699px) {
+    .mpath__list { grid-template-columns: 1fr; gap: 0; }
+    .mpath__stop { grid-template-columns: 56px 1fr; column-gap: 16px; row-gap: 4px; padding: 0 0 34px; }
+    .mpath__fig { grid-row: span 2; height: auto; }
+    .mpath__fig :global(svg) { width: 40px; height: auto; }
+    .mpath__wire { top: 48px; bottom: -4px; left: 20px; right: auto; width: 1.5px; height: auto; }
+    :global(.motion) .mpath__signal { clip-path: inset(0% 0% 100% 0%); }
+  }
+</style>

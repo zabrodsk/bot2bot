@@ -1,11 +1,12 @@
 ---
 import { site, links, smallPrint } from '../data/site';
 import Mark from './Mark.astro';
+const f = site.footer;
 const code = [
   { label: 'Code on GitHub', href: links.github },
   { label: 'Self-hosting guide', href: links.selfHost },
   { label: 'Add the setup bot', href: links.setupBot },
-  { label: 'GrokBot skill', href: links.skill },
+  { label: 'Grok Bot skill', href: links.skill },
   { label: 'Bot setup guide', href: links.botSetup },
 ];
 ---
@@ -16,43 +17,83 @@ const code = [
     </a>
     <p class="foot__tag">Bot to bot.</p>
   </div>
-  <nav class="foot__nav" aria-label="Site">
-    <ul>{site.nav.map((i) => <li><a href={i.href}>{i.label}</a></li>)}</ul>
+  <!-- Link groups follow Arc's site footer (MIT, see ./arc/LICENSE.md): a small heading, quiet links, an arrow that leans out on hover. -->
+  <nav class="foot__nav" aria-labelledby="foot-site">
+    <h2 class="foot__head" id="foot-site">{f.heads.site}</h2>
+    <ul>{f.site.map((i) => <li><a class="foot__link" href={i.href}>{i.label}</a></li>)}</ul>
   </nav>
-  <nav class="foot__nav" aria-label="Code">
-    <ul>{code.map((i) => <li><a href={i.href} rel="noopener">{i.label}</a></li>)}</ul>
+  <nav class="foot__nav" aria-labelledby="foot-learn">
+    <h2 class="foot__head" id="foot-learn">{f.heads.learn}</h2>
+    <ul>{f.learn.map((i) => <li><a class="foot__link" href={i.href} data-astro-reload={i.href.startsWith('/docs') || undefined}>{i.label}</a></li>)}</ul>
   </nav>
-  <div class="foot__print">
-    <p>{smallPrint.encryption}</p>
-    <p>{smallPrint.xai}</p>
-    <p>{smallPrint.license}</p>
+  <nav class="foot__nav" aria-labelledby="foot-code">
+    <h2 class="foot__head" id="foot-code">{f.heads.code}</h2>
+    <ul>{code.map((i) => (
+      <li><a class="foot__link" href={i.href} rel="noopener">{i.label}<svg class="foot__out" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7" /><path d="M7 7h10v10" /></svg></a></li>
+    ))}</ul>
+  </nav>
+  <div class="foot__base">
+    <nav class="foot__legal" aria-label={f.heads.legal}>
+      <ul>
+        {f.legal.map((i) => <li><a class="foot__link" href={i.href}>{i.label}</a></li>)}
+        <li><button type="button" class="foot__link foot__cookies" data-cookie-settings aria-haspopup="dialog">{f.cookieSettings}</button></li>
+      </ul>
+    </nav>
+    <div class="foot__print">
+      <p>{smallPrint.encryption}</p>
+      <p>{smallPrint.xai}</p>
+      <p>{smallPrint.license}</p>
+    </div>
   </div>
 </footer>
 
 <style>
   .foot {
-    margin: 0 var(--m); padding: 30px 0 clamp(28px, 5vh, 48px); border-top: 1px solid var(--c-line);
+    margin: 0 var(--m); padding: 30px 0 clamp(72px, 9vh, 88px); border-top: 1px solid var(--c-line);
     display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 36px var(--gap);
     font-size: var(--t-s);
   }
-  .foot__brand { grid-column: 1 / span 6; display: grid; align-content: start; gap: 6px; }
+  .foot__brand { grid-column: 1 / span 3; display: grid; align-content: start; gap: 6px; }
   .foot__home {
     justify-self: start; display: inline-flex; align-items: center; gap: 10px; padding: 6px 0; margin: -6px 0;
     font-family: var(--f-display); font-weight: 600; font-size: 1.0625rem; letter-spacing: -0.025em;
   }
   .foot__tag { color: var(--c-muted); }
   .foot__nav { grid-column: span 3; }
+  .foot__head { margin: 0 0 6px; font-size: var(--t-s); font-weight: 560; color: var(--c-ink); }
   .foot__nav ul { list-style: none; padding: 0; display: grid; gap: 2px; }
-  .foot__nav a { display: inline-block; padding: 5px 0; color: var(--c-muted); transition: color 0.25s var(--ease-open); }
-  .foot__nav a:hover { color: var(--c-ink); }
+  .foot__link {
+    display: inline-flex; align-items: center; gap: 4px; padding: 5px 0;
+    color: var(--text-secondary); transition: color var(--duration-fast) var(--ease-standard);
+  }
+  .foot__link:focus-visible { color: var(--foreground); }
+  .foot__out { color: var(--text-muted); transition: transform var(--duration-fast) var(--ease-standard); }
+  @media (hover: hover) and (pointer: fine) {
+    .foot__link:hover { color: var(--foreground); }
+    .foot__link:hover .foot__out { transform: translate(1px, -1px); }
+  }
+  @media (prefers-reduced-motion: reduce) { .foot__out { transition: none; } }
+  /* Legal links and the small print share the last row. The bottom padding keeps it clear of
+     the cookie button in the corner. */
+  .foot__base {
+    grid-column: 1 / -1; display: grid; gap: 10px; padding-top: 18px; border-top: 1px solid var(--c-line);
+  }
+  .foot__legal ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0 22px; }
+  .foot__legal .foot__link { font-size: var(--t-xs); }
+  .foot__cookies { padding: 5px 0; font: inherit; font-size: var(--t-xs); cursor: pointer; }
   .foot__print {
-    grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px 28px;
+    display: flex; flex-wrap: wrap; gap: 6px 28px;
     font-size: var(--t-xs); color: var(--c-muted);
   }
+  @media (max-width: 899px) {
+    .foot__brand { grid-column: 1 / -1; }
+    .foot__nav { grid-column: span 4; }
+  }
   @media (max-width: 759px) {
-    .foot { grid-template-columns: 1fr 1fr; gap: 28px 20px; }
-    .foot__brand, .foot__print { grid-column: 1 / -1; }
+    .foot { grid-template-columns: 1fr 1fr; gap: 28px 20px; padding-bottom: 84px; }
+    .foot__brand, .foot__base { grid-column: 1 / -1; }
     .foot__nav { grid-column: span 1; }
+    .foot__nav:last-of-type { grid-column: 1 / -1; }
     .foot__print { flex-direction: column; }
   }
 </style>

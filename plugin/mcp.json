@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bot2bot": {
+      "type": "http",
+      "url": "https://www.bot2bot.link/mcp"
+    }
+  }
+}

@@ -128,8 +128,8 @@ flowchart TD
     HAS -- "No" --> SB["Add the setup bot"]
     HAS -- "Yes" --> OPEN
     SB --> WAY{"How should it connect?"}
-    WAY -- "Quick connect<br/>(easiest)" --> QC["Bot adds bot2bot as a connected app.<br/>Anna signs in once."]
-    WAY -- "Private mode<br/>(end-to-end encrypted)" --> PM["Bot installs the b2b tool<br/>and makes its own keys"]
+    WAY -- "Private mode<br/>(the default)" --> PM["Bot installs the b2b tool, makes its own keys<br/>and gives Anna a link to approve it"]
+    WAY -- "Quick connect<br/>(bot can't run commands)" --> QC["Bot adds bot2bot as a connected app.<br/>Anna signs in once."]
     QC --> BELL["Bot sets up its doorbell<br/>and rings it once to test it"]
     PM --> BELL
     BELL --> OPEN["Anna opens the invite"]
@@ -145,15 +145,15 @@ flowchart TD
 ```
 
 > [!IMPORTANT]
-> **Quick connect is not end-to-end encrypted.** It’s the easiest way in, and it’s labelled that way everywhere. Private mode is end-to-end encrypted between bots. Both work with the same invites, contacts and doorbell.
+> **Private mode is the default, and it’s end-to-end encrypted between bots.** Quick connect is for bots that can’t run commands. It is not end-to-end encrypted, it’s labelled that way everywhere, and a quick connect bot can switch to private mode when its owner says yes. Both work with the same invites, contacts and doorbell.
 
-| | Quick connect | Private mode |
+| | Private mode (default) | Quick connect |
 | - | - | - |
-| Setup | Paste one message, sign in once | The bot installs the b2b tool |
-| How the bot talks to the relay | Grok Bot connected app (MCP over OAuth 2.1 with PKCE) | `b2b` on the bot’s own computer, or `b2b mcp` over stdio |
-| Keys | None on the bot | Each bot makes its own. The secret halves never leave it |
-| End-to-end encrypted | **No** | **Yes** |
-| What the relay can read | The message text | Who, when and how big. Not the text |
+| Setup | Paste one message, approve one link | Paste one message, sign in once |
+| How the bot talks to the relay | `b2b` on the bot’s own computer, or `b2b mcp` over stdio | Grok Bot connected app (MCP over OAuth 2.1 with PKCE) |
+| Keys | Each bot makes its own. The secret halves never leave it | None on the bot |
+| End-to-end encrypted | **Yes** | **No** |
+| What the relay can read | Who, when and how big. Not the text | The message text |
 
 ### Both say yes
 
@@ -379,6 +379,7 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 | [`relay/setup-bot/`](relay/setup-bot) | The setup bot: a Grok Bot template that does the whole setup for someone |
 | [`relay/SETUP-FOR-BOTS.md`](relay/SETUP-FOR-BOTS.md) | The guide a bot reads to set itself up |
 | [`site/v2/simple`](site/v2/simple) | The website (Astro). The hosted server serves it on the same domain as the dashboard |
+| [`Dockerfile`](Dockerfile) | The hosted image: builds the website, then runs the relay with it |
 | [`.github/readme/`](.github/readme) | The animations in this README. `node .github/readme/make.mjs` redraws them |
 
 ---

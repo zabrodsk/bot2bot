@@ -1,0 +1,73 @@
+---
+// Renders content blocks from site.ts: paragraphs, lists, tables and notes.
+import type { Block } from '../data/site';
+import Rich from './Rich.astro';
+interface Props { blocks: Block[]; class?: string }
+const { blocks, class: cls } = Astro.props;
+---
+<div class:list={['prose', cls]}>
+  {blocks.map((b) => {
+    if (typeof b === 'string') return <p><Rich text={b} /></p>;
+    if ('list' in b) {
+      const Tag = b.ordered ? 'ol' : 'ul';
+      return <Tag class:list={['prose__list', b.ordered && 'prose__list--ol']}>{b.list.map((li) => <li><Rich text={li} /></li>)}</Tag>;
+    }
+    if ('table' in b) return (
+      <div class="prose__table" role="region" aria-label={b.table.caption} tabindex="0">
+        <table>
+          <caption class="sr-only">{b.table.caption}</caption>
+          <thead><tr>{b.table.head.map((h) => <th scope="col">{h}</th>)}</tr></thead>
+          <tbody>{b.table.rows.map((r) => (
+            <tr>{r.map((cell, i) => i === 0
+              ? <th scope="row" data-label={b.table.head[0]}><Rich text={cell} /></th>
+              : <td data-label={b.table.head[i]}><Rich text={cell} /></td>)}</tr>
+          ))}</tbody>
+        </table>
+      </div>
+    );
+    return <p class="prose__note"><Rich text={b.note} /></p>;
+  })}
+</div>
+
+<style>
+  .prose { display: grid; gap: 16px; align-content: start; }
+  .prose p { color: var(--c-muted); }
+  .prose :global(.link) { color: var(--c-ink); }
+  .prose__list { list-style: none; padding: 0; display: grid; gap: 0; color: var(--c-muted); }
+  .prose__list li { position: relative; padding: 11px 0 11px 22px; border-top: 1px solid var(--c-line); }
+  .prose__list li:last-child { border-bottom: 1px solid var(--c-line); }
+  .prose__list li::before {
+    content: ''; position: absolute; left: 0; top: calc(11px + 0.7em); width: 6px; height: 6px; margin-top: -3px;
+    border-radius: 50%; background: var(--c-ink);
+  }
+  /* Ordered lists are real sequences: the numbers carry the order. */
+  .prose__list--ol { counter-reset: step; }
+  .prose__list--ol li { counter-increment: step; padding-left: 34px; }
+  .prose__list--ol li::before {
+    content: counter(step); width: auto; height: auto; margin: 0; top: 11px; background: none; border-radius: 0;
+    font-family: var(--f-text); font-variant-numeric: tabular-nums; font-size: var(--t-s); font-weight: 560; color: var(--c-ink);
+    line-height: inherit;
+  }
+  .prose__note { padding: 14px 18px; border-radius: var(--r-button); background: var(--c-tint); }
+
+  /* Tables: hairline rows; on phones each row becomes a small labelled block. */
+  .prose__table { margin: 4px 0; overflow-x: auto; }
+  .prose__table:focus-visible { outline-offset: 2px; }
+  .prose__table table { width: 100%; border-collapse: collapse; font-size: 0.9375rem; line-height: 1.45; }
+  .prose__table th, .prose__table td { text-align: left; vertical-align: top; padding: 11px 14px 11px 0; border-top: 1px solid var(--c-line); }
+  .prose__table thead th { padding-top: 0; border-top: 0; font-size: var(--t-xs); font-weight: 560; color: var(--c-ink); }
+  .prose__table tbody th { font-weight: 520; color: var(--c-ink); }
+  .prose__table td { color: var(--c-muted); }
+  .prose__table tbody tr:last-child > * { border-bottom: 1px solid var(--c-line); }
+  @media (max-width: 699px) {
+    .prose__table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .prose__table table, .prose__table tbody, .prose__table tr, .prose__table th, .prose__table td { display: block; }
+    .prose__table tr { padding: 12px 0; border-top: 1px solid var(--c-line); }
+    .prose__table tbody tr:last-child { border-bottom: 1px solid var(--c-line); }
+    .prose__table tbody tr:last-child > * { border-bottom: 0; }
+    .prose__table th, .prose__table td { border: 0; padding: 2px 0; }
+    .prose__table td { display: grid; grid-template-columns: 7.5rem 1fr; gap: 12px; }
+    .prose__table td::before { content: attr(data-label); font-size: var(--t-xs); font-weight: 560; color: var(--c-ink); padding-top: 2px; }
+    .prose__table tbody th { padding-bottom: 6px; }
+  }
+</style>

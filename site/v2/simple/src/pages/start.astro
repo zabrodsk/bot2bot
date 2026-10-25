@@ -1,0 +1,124 @@
+---
+import Base from '../layouts/Base.astro';
+import Button from '../components/arc/Button.astro';
+import Alert from '../components/arc/Alert.astro';
+import Bot from '../components/Bot.astro';
+import Figure from '../components/Figure.astro';
+import { setup, cta } from '../data/site';
+// Each step shows the bot one state further along: asleep, connected, can be woken, paired.
+const states = ['asleep', 'awake', 'lit'] as const;
+---
+<Base title={setup.seo.title} description={setup.seo.description} crumbs={[{ name: 'Setup', path: '/start/' }]}>
+  <section class="page-intro" aria-labelledby="setup-title">
+    <h1 id="setup-title" class="page-title">{setup.headline}</h1>
+    <p class="page-lead">{setup.lead[0]} <br />{setup.lead[1]}</p>
+    <Alert class="setupbot" title={setup.bot.title}>
+      <Bot slot="icon" state="awake" size={20} />
+      {setup.bot.text}
+      <Button slot="action" href={setup.bot.href} external>{setup.bot.cta}</Button>
+    </Alert>
+  </section>
+
+  <section class="steps" aria-label="Steps">
+    <ol class="steps__list">
+      {setup.steps.map((step, i) => (
+        <li class="step">
+          {i < 3 && <span class="step__wire" aria-hidden="true"><span class="step__signal" data-rail></span></span>}
+          <div class="step__figure" aria-hidden="true">
+            {i < 3
+              ? <Bot state={states[i]} size={30} ring={i === 2} />
+              : <span class="step__pair"><Bot state="you" size={30} /><span class="step__link"></span><Bot state="lit" size={30} /></span>}
+          </div>
+          <h2 class="step__title"><span class="step__n">{i + 1}</span>{step.title}</h2>
+          <p class="step__text">{step.text}</p>
+        </li>
+      ))}
+    </ol>
+    <Alert class="nobot" tone="neutral">
+      <Figure slot="icon" kind="setup" size={24} />
+      {setup.noBot}
+    </Alert>
+  </section>
+
+  <section class="now" aria-labelledby="now-title">
+    <div class="now__head">
+      <h2 id="now-title" class="say">{setup.now.title}</h2>
+      <p class="muted">{setup.now.text}</p>
+    </div>
+    <div class="now__actions">
+      <Button href={cta.primary.href} data-astro-reload data-astro-prefetch="false">{setup.now.cta}</Button>
+      <ul class="now__more">
+        {setup.now.more.map((m) => <li><a class="link link--out" href={m.href} rel="noopener">{m.label}</a></li>)}
+        <li><a class="link" href="/pricing/">Pricing</a></li>
+      </ul>
+    </div>
+  </section>
+</Base>
+
+<style>
+  /* The shortcut: the setup bot does all four steps with you. */
+  .page-intro :global(.setupbot) { margin-top: clamp(32px, 5vh, 48px); max-width: 900px; gap: 16px 28px; padding: 22px 22px 22px 24px; }
+  .page-intro :global(.setupbot .arc-alert__title) { font-family: var(--f-display); font-weight: 500; font-size: var(--t-m); line-height: 1.12; letter-spacing: -0.03em; }
+
+  .steps { position: relative; padding: clamp(64px, 11vh, 120px) var(--m) 0; }
+  .steps__list {
+    list-style: none; padding: 0;
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 var(--gap);
+  }
+  .step { position: relative; display: grid; align-content: start; gap: 14px; }
+  /* A wire runs antenna to antenna, from each step's bot to the next one. */
+  .step__wire {
+    position: absolute; top: 5px; left: 46px; right: calc(-1 * var(--gap) + 10px);
+    height: 1px; background: var(--c-line);
+  }
+  .step__signal { position: absolute; inset: 0; background: var(--c-signal); }
+  .motion .step__signal { clip-path: inset(0% 100% 0% 0%); }
+  .step__figure { height: 56px; display: flex; align-items: flex-start; }
+  .step__figure :global(.bot--ring) { margin: -9px -9px 0; }
+  .step__pair { display: flex; align-items: center; }
+  .step__link { width: 26px; height: 1.5px; background: var(--c-signal); translate: 0 5px; margin: 0 3px; }
+  .step__title {
+    font-family: var(--f-display); font-weight: 500; font-size: var(--t-m);
+    line-height: 1.12; letter-spacing: -0.03em; max-width: 13ch;
+  }
+  .step__n {
+    display: block; margin-bottom: 10px;
+    font-family: var(--f-text); font-size: var(--t-xs); font-weight: 520; letter-spacing: 0;
+    color: var(--c-muted); font-variant-numeric: tabular-nums;
+  }
+  .step__text { color: var(--c-muted); font-size: 1rem; line-height: 1.55; max-width: 30ch; }
+
+  /* The honest footnote to step 4 (an Arc alert), with its own figure: a dashed wire to a browser. */
+  .steps :global(.nobot) { margin-top: clamp(40px, 7vh, 64px); max-width: 760px; align-items: center; }
+
+  .now {
+    margin: clamp(80px, 14vh, 140px) var(--m) clamp(80px, 14vh, 140px); padding-top: 34px;
+    border-top: 1px solid var(--c-line);
+    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 28px var(--gap);
+  }
+  .now__head { grid-column: 1 / span 6; display: grid; gap: 14px; align-content: start; }
+  .now__actions { grid-column: 8 / span 5; display: grid; gap: 22px; justify-items: start; align-content: start; padding-top: 6px; }
+  .now__more { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: var(--t-s); }
+
+  @media (max-width: 899px) {
+    .steps__list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 56px var(--gap); }
+    .step__wire { display: none; }
+    .now__head, .now__actions { grid-column: 1 / -1; }
+  }
+  @media (max-width: 599px) {
+    .steps__list { grid-template-columns: 1fr; gap: 0; }
+    .step {
+      grid-template-columns: 64px 1fr; column-gap: 14px; row-gap: 6px;
+      padding: 22px 0; border-top: 1px solid var(--c-line);
+    }
+    .step:last-child { border-bottom: 1px solid var(--c-line); }
+    .step__figure { grid-row: span 2; height: auto; padding: 4px 0 0; margin: 0; background: none; }
+    .step__pair :global(.bot) { width: 22px; height: auto; }
+    .step__link { width: 10px; margin: 0 2px; }
+    .step__n { display: inline; margin: 0 8px 0 0; }
+    .steps :global(.nobot) { flex-direction: column; align-items: flex-start; gap: 14px; }
+    .now :global(.arc-button) { width: 100%; }
+    .now__actions { justify-items: stretch; }
+    .now__more { flex-direction: column; }
+  }
+</style>

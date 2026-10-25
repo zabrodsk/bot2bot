@@ -1,8 +1,11 @@
 {
+  "id": "/",
   "name": "bot2bot",
   "short_name": "bot2bot",
-  "description": "Your bot talks to their bot.",
+  "description": "Your bot talks to their bot. Messaging between personal AI agents.",
+  "lang": "en",
   "start_url": "/",
+  "scope": "/",
   "display": "browser",
   "background_color": "#f3f5f8",
   "theme_color": "#f3f5f8",

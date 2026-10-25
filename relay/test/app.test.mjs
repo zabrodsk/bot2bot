@@ -69,7 +69,7 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   assert.equal(evil.status, 403);
 
   const ben = await signup(env, 'ben.k@example.com');
-  assert.match((await ben('/app')).text, /Connect your bot/);
+  assert.match((await ben('/app')).text, /Connect your Grok Bot[^]*Add the setup bot/);
   const benBot = await connectBot(env, ben, 'ben');
 
   // Doorbell: a fake GrokBot routine that runs the inbox when rung
@@ -99,7 +99,8 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   const link = inv.text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   const anon = browser(env.url);
   const landing = await anon(`/i/${link}`);
-  assert.match(landing.text, /Ben K wants to connect/);
+  assert.match(landing.text, /Ben K wants your bots to talk/);
+  assert.match(landing.text, /Add the setup bot[^]*accept_invite tool: code/);
   assert.match(landing.text, /Email verified/);
 
   // Anna signs up, connects her bot, accepts the link
@@ -108,14 +109,15 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   assert.match((await anna(`/i/${link}`)).text, />Connect<\/button>/);
   const accepted = await anna(`/i/${link}`, { method: 'POST', form: { bot: (await anna('/app')).text.match(/\/app\/bots\/(\d+)/)[1], alias: 'Ben' } });
   assert.match(accepted.text, /You're connected/);
-  assert.match((await ben('/app')).text, /<b>Anna<\/b>/);   // inviter sees the friend's real name, not "friend-xxxx"
-  assert.equal((await anna(`/i/${link}`)).status, 404);    // one-time
+  assert.match((await ben('/app')).text, /item__title">Anna</);   // inviter sees the friend's real name, not "friend-xxxx"
+  assert.equal((await anna(`/i/${link}`)).location, '/app');    // one-time: used, so it goes home
+  assert.equal((await browser(env.url)(`/i/${link}`)).status, 404);
 
   // Anna's bot messages Ben's: Ben's bot sees who it really is
   await annaBot.cli('send', 'Ben', 'Recipe for tonight', '--link', 'https://example.com/pasta');
-  for (let i = 0; i < 50 && !/passed on/.test((await ben('/app')).text); i++) await new Promise((r) => setTimeout(r, 100));
+  for (let i = 0; i < 50 && !/Received/.test((await ben('/app/activity')).text); i++) await new Promise((r) => setTimeout(r, 100));
   // Bot to bot is end-to-end encrypted: the relay (and so the dashboard) never has the text.
-  const dash = (await ben('/app')).text;
+  const dash = (await ben('/app/activity')).text;
   assert.doesNotMatch(dash, /Recipe for tonight/);
   assert.match(dash, /End-to-end encrypted. Only the bots can read it./);
   const seen = env.relay.db.prepare("SELECT status, text, links, sealed FROM messages WHERE kind = 'note'").get();
@@ -143,5 +145,31 @@ test('login codes: wrong code, attempts limit, rate limit, magic link', async (t
   assert.match((await c(linkPath)).text, /Continue to/);                 // GET only shows a button
   assert.match((await browser(env2.url)(linkPath)).text, /same browser/);  // another browser can't use it
   assert.equal((await c('/login/link', { method: 'POST', form: { t: linkPath.split('t=')[1] } })).status, 303);
-  assert.match((await c('/app')).text, /Connect your bot/);
+  assert.match((await c('/app')).text, /Connect your Grok Bot/);
+});
+
+test('adding a second private-mode bot shows its setup code, and a bad name says why', async (t0) => {
+  const env = await setup(t0);
+  const ben = await signup(env, 'ben.second@example.com');
+  await connectBot(env, ben, 'ben');
+
+  const add = await ben('/app/bots/new', { method: 'POST' });
+  assert.equal(add.location, '/app/bots/new-form');
+  const bad = await ben('/app/bots', { method: 'POST', form: { handle: 'b2b test' } });
+  assert.equal(bad.status, 400);
+  assert.match(bad.text, /Add another bot[^]*No spaces/);
+  assert.match(bad.text, /value="b2b test"/);
+
+  await ben('/app/bots', { method: 'POST', form: { handle: 'ben' } });
+  assert.match((await ben('/app/bots', { method: 'POST', form: { handle: 'ben' } })).text, /That name is taken/);
+
+  await ben('/app/bots', { method: 'POST', form: { handle: 'b2b-test' } });
+  const dash = (await ben('/app')).text;
+  assert.match(dash, /Connect @b2b-test/);
+  assert.match(dash, /d\.bots>1/); // waits for the second bot, not the first
+  const home = mkdtempSync(join(tmpdir(), 'b2b-app-second-'));
+  await run(process.execPath, [CLI, 'enroll', env.url, dash.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]], { env: { ...process.env, B2B_HOME: home } });
+  const after = (await ben('/app')).text;
+  assert.match(after, /@b2b-test/);
+  assert.doesNotMatch(after, /Connect @b2b-test/);
 });

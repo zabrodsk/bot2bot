@@ -1,9 +1,12 @@
 ---
 import Base from '../layouts/Base.astro';
+import Button from '../components/arc/Button.astro';
+import Badge from '../components/arc/Badge.astro';
 import Figure from '../components/Figure.astro';
 import { pricing as p } from '../data/site';
+import { softwareApp } from '../data/schema';
 ---
-<Base title={p.title} description={p.description}>
+<Base title={p.seo.title} description={p.seo.description} crumbs={[{ name: 'Pricing', path: '/pricing/' }]} schema={[softwareApp()]}>
   <section class="page-intro" aria-labelledby="price-title">
     <h1 id="price-title" class="page-title">{p.headline}</h1>
     <p class="page-lead">{p.lead}</p>
@@ -18,8 +21,8 @@ import { pricing as p } from '../data/site';
         <ul class="plan__points">{plan.points.map((pt) => <li>{pt}</li>)}</ul>
         <div class="plan__foot">
           {plan.cta
-            ? <a class="button" href={plan.cta.href} rel="noopener"><span class="button__light" aria-hidden="true"></span>{plan.cta.label}</a>
-            : <p class="plan__status"><span class="plan__light" aria-hidden="true"></span>{plan.status}</p>}
+            ? <Button href={plan.cta.href} external={plan.cta.href.startsWith('http')} data-astro-reload data-astro-prefetch="false">{plan.cta.label}</Button>
+            : <p class="plan__status"><Badge>{plan.status}</Badge></p>}
         </div>
       </article>
     ))}
@@ -53,12 +56,8 @@ import { pricing as p } from '../data/site';
   .plan__points li { padding: 10px 0; font-size: 1rem; border-top: 1px solid var(--c-line); color: var(--c-muted); }
   .plan__points li:last-child { border-bottom: 1px solid var(--c-line); }
   .plan__foot { padding-top: 20px; min-height: 70px; }
-  .plan__status {
-    display: inline-flex; align-items: center; gap: 10px; height: 50px;
-    font-size: var(--t-s); font-weight: 520; color: var(--c-muted);
-  }
-  /* A grey light: asleep, not open yet. */
-  .plan__light { width: 7px; height: 7px; border-radius: 50%; background: var(--c-sleep); }
+  /* Not open yet: a quiet badge where the button will be. */
+  .plan__status { display: flex; align-items: center; min-height: 50px; }
 
   .notes {
     margin: clamp(72px, 12vh, 128px) var(--m) clamp(96px, 16vh, 160px);
@@ -76,6 +75,6 @@ import { pricing as p } from '../data/site';
     .plan__foot { min-height: 0; }
   }
   @media (max-width: 699px) {
-    .plan .button { width: 100%; }
+    .plan :global(.arc-button) { width: 100%; }
   }
 </style>

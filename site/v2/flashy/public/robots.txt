@@ -1,4 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://bot2bot-flashy.pages.dev/sitemap-index.xml

@@ -1,0 +1,114 @@
+---
+// Bencho Slide to confirm (https://bencho.dev/blocks/slide-confirm), one slider per person, ported to Astro.
+// MIT, see ../arc/LICENSE.md. Drag to the end (or press Enter on the handle) to say yes. Each yes stays;
+// when both are in, the status says so and you can start over.
+interface Props { you: string; friend: string; waiting: string; both: string; reset: string }
+const { you, friend, waiting, both, reset } = Astro.props;
+const people = [you, friend];
+---
+<div class="b-yes" data-b-yes data-waiting={waiting} data-both-text={both}>
+  {people.map((who) => (
+    <div class="b-yes__row">
+      <span class="b-yes__who" aria-hidden="true">{who}</span>
+      <div class="b-slide" data-who={who} data-name={who === you ? who.toLowerCase() : who}>
+        <i class="b-slide__wash" aria-hidden="true"></i>
+        <span class="b-slide__say" aria-hidden="true">Slide to say yes</span>
+        <button type="button" class="b-slide__grip" aria-label={`${who}: say yes`}>
+          <span class="b-slide__arrow" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
+          <span class="b-slide__done" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>{who}: yes</span>
+        </button>
+      </div>
+    </div>
+  ))}
+  <p class="b-yes__status"><span role="status" aria-live="polite" data-status></span><button type="button" class="b-yes__reset" data-reset hidden>{reset}</button></p>
+</div>
+
+<script>
+  const GRIP = 48, PAD = 4;
+
+  const setup = (root: HTMLElement) => {
+    if (root.dataset.ready) return;
+    root.dataset.ready = '';
+    const status = root.querySelector<HTMLElement>('[data-status]')!;
+    const resetBtn = root.querySelector<HTMLButtonElement>('[data-reset]')!;
+    const slides = [...root.querySelectorAll<HTMLElement>('.b-slide')];
+
+    const report = () => {
+      const left = slides.filter((s) => !s.hasAttribute('data-done')).map((s) => s.dataset.name);
+      const done = left.length === 0;
+      root.toggleAttribute('data-both', done);
+      resetBtn.hidden = left.length === slides.length;
+      status.textContent = done ? root.dataset.bothText! : `${root.dataset.waiting} ${left.join(' and ')}.`;
+    };
+
+    slides.forEach((track) => {
+      const grip = track.querySelector<HTMLButtonElement>('.b-slide__grip')!;
+      const who = track.dataset.who!;
+      let x = 0, grab: number | null = null, id = -1;
+      const travel = () => track.clientWidth - PAD * 2 - GRIP;
+      const paint = () => {
+        track.style.setProperty('--x', `${x}px`);
+        track.style.setProperty('--p', String(Math.min(1, x / Math.max(1, travel()))));
+      };
+      const commit = () => {
+        track.removeAttribute('data-settle');
+        track.dataset.done = '';
+        track.dataset.pulse = '';
+        setTimeout(() => track.removeAttribute('data-pulse'), 600);
+        grip.setAttribute('aria-label', `${who} said yes`);
+        x = 0; paint();
+        report();
+      };
+      const onMove = (e: PointerEvent) => {
+        if (e.pointerId !== id) return;
+        const at = e.clientX - track.getBoundingClientRect().left;
+        // The first move only takes the grab offset, so the handle never jumps.
+        if (grab === null) { grab = at - x; return; }
+        x = Math.min(travel(), Math.max(0, at - grab));
+        paint();
+      };
+      const onUp = (e: PointerEvent) => {
+        if (e.pointerId !== id) return;
+        id = -1;
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        track.removeAttribute('data-held');
+        // Only the very end counts: a yes you can knock by accident is not a yes.
+        if (x >= travel() - 0.5) commit();
+        else { track.dataset.settle = ''; x = 0; paint(); }
+      };
+      grip.addEventListener('pointerdown', (e) => {
+        if (track.hasAttribute('data-done')) return;
+        e.preventDefault();
+        id = e.pointerId; grab = null;
+        track.removeAttribute('data-settle');
+        track.dataset.held = '';
+        // Listened for on the window, so letting go anywhere ends the drag.
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+      });
+      // Keyboard: the handle is a button, so Enter or Space says yes.
+      grip.addEventListener('click', (e) => {
+        if (e.detail !== 0 || track.hasAttribute('data-done')) return;
+        commit();
+      });
+      track.addEventListener('reset', () => {
+        track.removeAttribute('data-done');
+        track.dataset.settle = '';
+        grip.setAttribute('aria-label', `${who}: say yes`);
+        x = 0; paint();
+      });
+      paint();
+    });
+
+    resetBtn.addEventListener('click', () => {
+      slides.forEach((s) => s.dispatchEvent(new Event('reset')));
+      report();
+      slides[0]?.querySelector<HTMLElement>('.b-slide__grip')?.focus();
+    });
+    report();
+  };
+  document.addEventListener('astro:page-load', () => document.querySelectorAll<HTMLElement>('[data-b-yes]').forEach(setup));
+</script>

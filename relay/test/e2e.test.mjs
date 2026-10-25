@@ -120,7 +120,7 @@ test('safety codes match on both sides, and comparing shows on the dashboard', a
 });
 
 test('the web inbox is labelled not end-to-end encrypted everywhere', async (t0) => {
-  const env = await setup(t0);
+  const env = await setup(t0, { webInbox: true });
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   const gran = { b: await login(env, 'gran@example.com') };
   await connect(ben, gran, 'Ben', { web: true });

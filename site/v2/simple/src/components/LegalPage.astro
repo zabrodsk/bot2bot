@@ -1,0 +1,36 @@
+---
+// One layout for the legal pages: title, lead, the "Last updated" line, contents and sections.
+import Base from '../layouts/Base.astro';
+import Crumbs from './Crumbs.astro';
+import Doc from './Doc.astro';
+import { legalUi, updated, type Section } from '../data/site';
+import { webPage } from '../data/schema';
+interface Props {
+  path: string;
+  page: { seo: { title: string; description: string }; crumb: string; headline: string; lead: string; sections: Section[] };
+}
+const { path, page } = Astro.props;
+const crumbs = [{ name: page.crumb, path }];
+---
+<Base title={page.seo.title} description={page.seo.description} crumbs={crumbs}
+  schema={[webPage({ path, name: page.seo.title, description: page.seo.description })]}>
+  <section class="page-intro" aria-labelledby="legal-title">
+    <Crumbs trail={crumbs} />
+    <h1 id="legal-title" class="page-title legal__title">{page.headline}</h1>
+    <p class="page-lead">{page.lead}</p>
+    <p class="legal__updated">{legalUi.updated}: <time datetime={updated.iso}>{updated.label}</time></p>
+    <slot name="intro" />
+  </section>
+  <Doc sections={page.sections} tocLabel={legalUi.toc} variant="legal">
+    <slot />
+  </Doc>
+  <div class="legal__end"></div>
+</Base>
+
+<style>
+  .page-intro :global(.crumbs) { margin-bottom: 6px; }
+  .legal__title { font-size: var(--t-l); line-height: 1; }
+  .page-lead { max-width: 54ch; }
+  .legal__updated { font-size: var(--t-xs); color: var(--c-muted); font-variant-numeric: tabular-nums; }
+  .legal__end { height: clamp(96px, 16vh, 160px); }
+</style>

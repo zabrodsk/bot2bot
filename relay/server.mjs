@@ -3,11 +3,12 @@
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, timingSafeEqual, createCipheriv, createDecipheriv, createPublicKey } from 'node:crypto';
-import { readFileSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
+import { dirname, join, resolve, sep, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp, migrateApp } from './app.mjs';
 import { createConnector, migrateConnector } from './connector.mjs';
+import { messageEmail } from './email.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -22,6 +23,8 @@ export const LIMITS = {
   urgentFloorMs: 5_000,
   backoffMs: [0, 30_000, 120_000, 300_000, 900_000, 3_600_000, 3_600_000, 3_600_000],
   codeTtlMs: 24 * 3_600_000,
+  joinTtlMs: 15 * 60_000,        // a bot's "approve me" link (private mode setup without a code)
+  joinsOpenMax: 500,             // open join links across the whole relay
   inviteTtlMs: 7 * 24 * 3_600_000,
   probeTtlMs: 10 * 60_000,
   wakesPerDay: 60,             // per recipient bot; protects the owner's GrokBot usage
@@ -35,6 +38,8 @@ export const LIMITS = {
   pausedRecheckMs: 60_000,
   loginEmailsPerHour: 200,        // across the whole relay
   loginEmailsPerIpPerHour: 10,
+  oauthRegisterPerIpPerHour: 20,
+  oauthRegisterPerHour: 500,
   choicesMax: 6,
   choiceMax: 40,
   webNotifyEveryMs: 15 * 60_000, // at most one "you have a message" email per person per 15 min
@@ -139,6 +144,12 @@ export function openDb(path) {
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, bot INTEGER, kind TEXT NOT NULL, detail TEXT
     );
+    -- Private mode setup without a code (0.14): the bot makes its keys and asks to join; its owner opens
+    -- the link, signs in and says yes; the bot collects its token once. No token is stored here.
+    CREATE TABLE IF NOT EXISTS join_requests (
+      code_hash TEXT PRIMARY KEY, poll_hash TEXT UNIQUE NOT NULL, sign_pub TEXT NOT NULL, box_pub TEXT NOT NULL, name TEXT,
+      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, approved_bot INTEGER, approved_at INTEGER, denied_at INTEGER, collected_at INTEGER
+    );
   `);
   // Additive migrations for databases created by older versions.
   const addColumn = (table, col, def) => {
@@ -153,9 +164,13 @@ export function openDb(path) {
   return db;
 }
 
-export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', keySecret, limits = {}, dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
+export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/HtbwJ5wysPCe2JbDtVvgA', webInbox = false, siteDir = '', redirectHosts = [], keySecret, limits = {}, dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
   if (!adminToken || adminToken.length < 16) throw new Error('ADMIN_TOKEN (16+ chars) is required');
   const L = { ...LIMITS, ...limits };
+  // What an owner sends a friend: get a bot first (the setup bot does it all), then open the invite.
+  const inviteMessage = (link) => `Let's connect our AI bots on ${productName}, so they can message each other for us.
+1. Add the setup bot to your Grok Bot: ${setupBotUrl} (it walks you through it in a few minutes).
+2. Then open my invite: ${link}`;
   // Webhook keys are encrypted at rest when a separate secret is configured.
   const encKey = keySecret ? createHash('sha256').update(keySecret).digest() : null;
   const sealKey = (plain) => {
@@ -377,8 +392,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
     inflight.add(bot.id);
     try {
-      await mailer({ to: owner.email, subject: `${who} sent you a message`,
-        text: `${who} sent you a message on ${productName}.\n\nRead it and answer here: ${publicUrl}/app/inbox\n\nYou get this because you accepted their invitation. You can pause or block anyone from your inbox.` });
+      await mailer({ to: owner.email, ...messageEmail({ product: productName, who, inboxUrl: `${publicUrl}/app/inbox`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '' }) });
       q('UPDATE users SET last_notified_at = ? WHERE id = ?').run(t, owner.id);
       q("UPDATE messages SET next_ring_at = NULL, first_rung_at = coalesce(first_rung_at, ?), ring_count = ring_count + 1 WHERE to_bot = ? AND status = 'pending' AND next_ring_at <= ?").run(t, bot.id, t);
       log(bot.id, 'web_notified', { messages: due.length });
@@ -404,6 +418,8 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     q('DELETE FROM events WHERE ts < ?').run(t - L.metadataRetentionMs);
     q('DELETE FROM sessions WHERE expires_at < ?').run(t);
     q('DELETE FROM login_codes WHERE expires_at < ?').run(t - 86_400_000);
+    q('DELETE FROM join_requests WHERE expires_at < ?').run(t - 86_400_000);
+    q('DELETE FROM oauth_clients WHERE created_at < ? AND client_id NOT IN (SELECT client_id FROM oauth_tokens) AND client_id NOT IN (SELECT client_id FROM oauth_codes WHERE used_at IS NULL)').run(t - 7 * 86_400_000);
   }
   // Called after an owner approves, unblocks or resumes, so held messages go out now.
   function release(botId) {
@@ -476,6 +492,8 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       q('UPDATE enroll_codes SET used_at = ? WHERE handle = ? AND used_at IS NULL').run(clock(), row.handle);
       if (row.reissue) {
         q("UPDATE bots SET token_hash = ?, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1, disconnected_at = NULL, vendor = 'grokbot' WHERE handle = ?").run(sha(raw), row.handle);
+        // A bot moving from the connected app to private mode: its app sign-in ends here.
+        q('UPDATE oauth_tokens SET revoked_at = ? WHERE bot_id = (SELECT id FROM bots WHERE handle = ?) AND revoked_at IS NULL').run(clock(), row.handle);
       } else {
         if (q('SELECT 1 FROM bots WHERE handle = ?').get(row.handle)) throw new HttpError(409, 'handle already enrolled');
         q('INSERT INTO bots (handle, display_name, token_hash, created_at) VALUES (?, ?, ?, ?)').run(row.handle, row.display_name, sha(raw), clock());
@@ -485,6 +503,37 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       setKeys(bot, keys);
       log(bot.id, row.reissue ? 're_enrolled' : 'enrolled', { encrypted: !!keys });
       return { token: raw, handle: row.handle, display_name: row.display_name, encryption: keys ? 'on' : 'off' };
+    }),
+
+    // Private mode without a code: the bot asks to join with its public keys and gets a link for its owner.
+    // The owner signs in and says yes on that page (app.mjs); the bot then collects its token by polling.
+    'POST /v1/join': ({ body }) => {
+      const keys = validKeys(body.keys);
+      if (!keys) throw new HttpError(400, 'keys are required');
+      const name = String(body.name || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32) || null;
+      if (q('SELECT count(*) AS n FROM join_requests WHERE approved_at IS NULL AND denied_at IS NULL AND expires_at > ?').get(clock()).n >= L.joinsOpenMax) throw new HttpError(429, 'too many bots are joining right now; try again in a few minutes');
+      const code = humanCode();
+      const poll = token('jp_');
+      q('INSERT INTO join_requests (code_hash, poll_hash, sign_pub, box_pub, name, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(sha(code), sha(poll), keys.sign, keys.box, name, clock(), clock() + L.joinTtlMs);
+      log(null, 'join_requested', {});
+      return { link: `${publicUrl}/app/link/${code}`, poll, expires_at: iso(clock() + L.joinTtlMs), every_s: 3 };
+    },
+    'POST /v1/join/poll': ({ body }) => tx(() => {
+      const r = q('SELECT * FROM join_requests WHERE poll_hash = ?').get(sha(String(body.poll || '')));
+      if (!r) throw new HttpError(404, 'unknown join request');
+      if (r.denied_at) throw new HttpError(403, 'your owner said no');
+      if (r.collected_at) throw new HttpError(409, 'this join request was already used');
+      if (!r.approved_at) {
+        if (r.expires_at < clock()) throw new HttpError(410, 'the link expired before your owner opened it');
+        return { status: 'waiting', expires_at: iso(r.expires_at) };
+      }
+      const bot = q('SELECT * FROM bots WHERE id = ?').get(r.approved_bot);
+      if (!bot || bot.disconnected_at || bot.sign_pub !== r.sign_pub || bot.box_pub !== r.box_pub) throw new HttpError(409, 'this bot was changed on the dashboard since; ask your owner for a new link');
+      const raw = token('b2b_');
+      q('UPDATE bots SET token_hash = ? WHERE id = ?').run(sha(raw), bot.id);
+      q('UPDATE join_requests SET collected_at = ? WHERE code_hash = ?').run(clock(), r.code_hash);
+      log(bot.id, 'enrolled', { encrypted: true, via: 'join' });
+      return { status: 'joined', token: raw, handle: bot.handle, display_name: bot.display_name, encryption: 'on' };
     }),
 
     // For bots connected before encryption existed. Replacing keys needs a reconnect from the owner's dashboard.
@@ -522,7 +571,8 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       const code = humanCode();
       q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner) VALUES (?, ?, ?, ?, 0)').run(sha(code), me.id, alias, clock() + L.inviteTtlMs);
       log(me.id, 'invite_created', { alias, by: 'bot' });
-      return { code, alias, link: `${publicUrl}/i/${code}`, expires_at: iso(clock() + L.inviteTtlMs), owner_must_approve: !!me.user_id };
+      const link = `${publicUrl}/i/${code}`;
+      return { code, alias, link, message: inviteMessage(link), expires_at: iso(clock() + L.inviteTtlMs), owner_must_approve: !!me.user_id };
     },
 
     // A contact only becomes usable when each side's human owner has said yes. An owner says yes by
@@ -867,8 +917,12 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     return undefined;
   }
 
-  const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, routes, HttpError });
-  const handleApp = createApp({ q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+  // The private-mode doorbell instruction, straight from the guide, so a bot switching from quick connect uses the same words.
+  const privateDoorbell = () => setupGuide().split('## 3. Doorbell')[1].match(/^> (.+)$/m)[1];
+  const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, HttpError, L, privateDoorbell, trustProxy });
+  const site = makeSite(siteDir);
+  const redirects = new Set(redirectHosts.map((h) => h.trim().toLowerCase()).filter(Boolean));
+  const handleApp = createApp({ setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');
@@ -877,6 +931,10 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       res.end(type === 'application/json' ? JSON.stringify(data, null, 2) : data);
     };
     try {
+      // Old addresses (www, the Railway one) send people to the real domain. Bots and API calls keep working on any address.
+      if (redirects.size && publicUrl && redirects.has(String(req.headers.host || '').toLowerCase()) && isPageVisit(req, url)) {
+        res.writeHead(301, { location: publicUrl + url.pathname + url.search }); return res.end();
+      }
       if (await handleConnector(req, res, url)) return;
       if (await handleApp(req, res, url)) return;
       if (req.method === 'GET' && url.pathname === '/api') return send(200, { service: 'b2b relay', cli: `${publicUrl}/cli/b2b.mjs`, setup: `${publicUrl}/setup` });
@@ -885,7 +943,9 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       if (req.method === 'GET' && url.pathname === '/cli/b2b.mjs.sig') return send(200, cliSignature(), 'text/plain; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/setup') return send(200, setupGuide(), 'text/markdown; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/skill') return send(200, skillFile(), 'text/markdown; charset=utf-8');
+      if (site && site.serve(req, res, url)) return;
       const found = match(req.method, url.pathname);
+      if (!found && site && isPageVisit(req, url)) return site.notFound(req, res);
       if (!found) throw new HttpError(404, 'not found');
       let body = {};
       if (req.method === 'POST') {
@@ -896,7 +956,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
       const admin = auth.length > 0 && auth.length === adminToken.length && timingSafeEqual(Buffer.from(sha(auth)), Buffer.from(adminHash));
       const me = botByToken(auth);
-      const open = ['POST /v1/enroll'].includes(found.key) || found.key.startsWith('POST /admin') || found.key.startsWith('GET /admin');
+      const open = ['POST /v1/enroll', 'POST /v1/join', 'POST /v1/join/poll'].includes(found.key) || found.key.startsWith('POST /admin') || found.key.startsWith('GET /admin');
       if (!open && !me) throw new HttpError(401, 'missing or invalid bot token');
       const result = await found.handler({ req, url, body, me, admin, params: found.params });
       return send(200, result);
@@ -910,14 +970,68 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   return { handle, tick, db, ring, retention: (t = clock()) => { lastRetention = 0; retention(t); } };
 }
 
+// ───── the landing site ─────
+// The hosted server also serves the static website (built from site/v2/simple) on the same domain as the dashboard.
+// Server routes always win; the site only answers paths nothing else handled.
+const SITE_TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.webmanifest': 'application/manifest+json', '.xml': 'application/xml; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.json': 'application/json', '.md': 'text/markdown; charset=utf-8' };
+const MACHINE = /^\/(v1|admin|mcp|oauth|\.well-known|cli|billing)(\/|$)|^\/(setup|skill|healthz|api)$/;
+// A person's browser asking for a page, not a bot or an API client.
+// AI agents can ask for a docs page as Markdown: Accept: text/markdown, ranked above text/html (or without it).
+const wantsMarkdown = (req) => {
+  const a = String(req.headers.accept || '').toLowerCase();
+  const md = a.indexOf('text/markdown');
+  const html = a.indexOf('text/html');
+  return md !== -1 && (html === -1 || md < html);
+};
+// /docs/quickstart/ -> /docs/quickstart.md, /docs/ -> /docs/index.md
+const docsMarkdownPath = (p) => (/^\/docs(\/|$)/.test(p) && !/\.[a-z0-9]+$/i.test(p) ? `/docs/${p.replace(/^\/docs\/?/, '').replace(/\/$/, '') || 'index'}.md` : null);
+const isPageVisit = (req, url) => (req.method === 'GET' || req.method === 'HEAD') && !MACHINE.test(url.pathname) && String(req.headers.accept || '').includes('text/html');
+
+function makeSite(dir) {
+  if (!dir || !existsSync(join(dir, 'index.html'))) return null;
+  const root = resolve(dir);
+  const isFile = (f) => { try { return statSync(f).isFile(); } catch { return false; } };
+  const sendFile = (req, res, status, f, path, extra = {}) => {
+    const ext = extname(f);
+    const cache = /^\/(_astro|fonts)\//.test(path) ? 'public, max-age=31536000, immutable' : ext === '.html' || ext === '.md' ? 'no-cache' : 'public, max-age=3600';
+    res.writeHead(status, { 'content-type': SITE_TYPES[ext] || 'application/octet-stream', 'cache-control': cache, 'x-content-type-options': 'nosniff', 'referrer-policy': 'strict-origin-when-cross-origin', ...extra });
+    res.end(req.method === 'HEAD' ? undefined : readFileSync(f));
+  };
+  return {
+    serve(req, res, url) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+      let p; try { p = decodeURIComponent(url.pathname); } catch { return false; }
+      if (p.includes('\0')) return false;
+      const md = docsMarkdownPath(p);
+      const mdFile = md && resolve(root, '.' + md);
+      if (mdFile && mdFile.startsWith(root + sep) && isFile(mdFile)) {
+        // Docs pages come in two forms; say which, so caches keep them apart and agents can find the Markdown.
+        if (wantsMarkdown(req)) return sendFile(req, res, 200, mdFile, md, { vary: 'Accept' }), true;
+        const html = resolve(root, '.' + (p.endsWith('/') ? p + 'index.html' : p + '/index.html'));
+        if (p.endsWith('/') && isFile(html)) return sendFile(req, res, 200, html, p, { vary: 'Accept', link: `<${md}>; rel="alternate"; type="text/markdown"` }), true;
+      }
+      const f = resolve(root, '.' + (p.endsWith('/') ? p + 'index.html' : p));
+      if (!f.startsWith(root + sep)) return false;
+      if (isFile(f)) return sendFile(req, res, 200, f, p), true;
+      if (!p.endsWith('/') && isFile(join(f, 'index.html'))) { res.writeHead(301, { location: url.pathname + '/' + url.search }); res.end(); return true; }
+      return false;
+    },
+    notFound(req, res) {
+      const f = join(root, '404.html');
+      if (isFile(f)) return sendFile(req, res, 404, f, '/404.html');
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); res.end('Not found');
+    },
+  };
+}
+
 // Login emails: Resend if RESEND_API_KEY is set, otherwise printed to the server log (development).
 function makeMailer() {
   const key = process.env.RESEND_API_KEY;
   const from = process.env.MAIL_FROM || 'bot2bot <login@bot2bot.example>';
   if (!key) return async ({ to, subject, text }) => { console.log(`[mail] to=${to} subject=${subject}\n${text}`); };
-  return async ({ to, subject, text }) => {
+  return async ({ to, subject, text, html }) => {
     const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ from, to, subject, text }), signal: AbortSignal.timeout(10_000) });
+      body: JSON.stringify({ from, to, subject, text, ...(html ? { html } : {}) }), signal: AbortSignal.timeout(10_000) });
     if (!r.ok) { console.error('[mail] send failed', r.status); throw new Error('mail failed'); }
   };
 }
@@ -940,6 +1054,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       ...(process.env.FREE_MESSAGES ? { freeMessages: Number(process.env.FREE_MESSAGES) } : {}),
       ...(process.env.FREE_PERIOD ? { freePeriod: process.env.FREE_PERIOD } : {}) },
     productName: process.env.PRODUCT_NAME || 'bot2bot',
+    ...(process.env.SETUP_BOT_URL ? { setupBotUrl: process.env.SETUP_BOT_URL } : {}),
+    webInbox: process.env.WEB_INBOX === '1',
+    siteDir: process.env.SITE_DIR || '',
+    redirectHosts: (process.env.REDIRECT_HOSTS || '').split(','),
     mailer: makeMailer(),
   });
   const port = Number(process.env.PORT || 8787);

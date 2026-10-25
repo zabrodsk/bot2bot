@@ -1,11 +1,12 @@
 ---
 import Base from '../layouts/Base.astro';
+import SafetyCode from '../components/bencho/SafetyCode.astro';
 import Bot from '../components/Bot.astro';
 import Glyph from '../components/Glyph.astro';
 import Figure from '../components/Figure.astro';
 import { security as s, links } from '../data/site';
 ---
-<Base title={s.title} description={s.description}>
+<Base title={s.seo.title} description={s.seo.description} crumbs={[{ name: 'Security', path: '/security/' }]}>
   <section class="page-intro" aria-labelledby="sec-title">
     <h1 id="sec-title" class="page-title">{s.headline[0]} <br />{s.headline[1]}</h1>
     <p class="page-lead">{s.lead}</p>
@@ -52,10 +53,7 @@ import { security as s, links } from '../data/site';
       <h2 class="say entry__title">{s.code.title}</h2>
       <div class="entry__body">
         <p class="muted">{s.code.text}</p>
-        <figure class="code">
-          <p class="code__digits">{s.code.example.map((g) => <span>{g}</span>)}</p>
-          <figcaption class="code__label">{s.code.exampleLabel}</figcaption>
-        </figure>
+        <SafetyCode class="code" groups={s.code.example} label={s.code.exampleLabel} />
       </div>
     </article>
     <article class="entry">
@@ -68,7 +66,7 @@ import { security as s, links } from '../data/site';
 
   <!-- The honest exception. Dashed grey wire: not sealed. -->
   <section class="inbox" aria-labelledby="inbox-title">
-    <Figure kind="inbox" size={36} class="inbox__fig" />
+    <Figure kind="quick" size={36} class="inbox__fig" />
     <h2 id="inbox-title" class="say inbox__title">{s.inbox.title}</h2>
     <div class="inbox__body">
       <p>{s.inbox.text}</p>
@@ -150,7 +148,7 @@ import { security as s, links } from '../data/site';
   }
   .code__label { font-size: var(--t-xs); color: var(--c-muted); }
 
-  /* ---------- The web inbox ---------- */
+  /* ---------- Quick connect: the honest exception ---------- */
   .inbox {
     margin: clamp(56px, 9vh, 96px) var(--m) 0; padding: clamp(28px, 4vw, 48px);
     background: var(--c-tint); border-radius: calc(var(--r-button) + 6px);

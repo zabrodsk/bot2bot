@@ -38,7 +38,7 @@ test('web inbox: no bot needed to receive, answer and write back', async (t0) =>
   const mail = [];
   let relay;
   const { s, url } = await listen((req, res) => relay.handle(req, res));
-  relay = createRelay({ adminToken: 'admin-token-for-tests-123456', allowLocalWebhooks: true, publicUrl: url, mailer: async (m) => { mail.push(m); },
+  relay = createRelay({ webInbox: true, adminToken: 'admin-token-for-tests-123456', allowLocalWebhooks: true, publicUrl: url, mailer: async (m) => { mail.push(m); },
     limits: { ringFloorMs: 200, urgentFloorMs: 100 } });
   const timer = setInterval(() => relay.tick().catch(() => {}), 100);
   t0.after(() => { clearInterval(timer); s.close(); });
@@ -58,16 +58,16 @@ test('web inbox: no bot needed to receive, answer and write back', async (t0) =>
   const benBot = (await ben('/app')).text.match(/\/app\/bots\/(\d+)/)[1];
   const link = (await ben('/app/invites', { method: 'POST', form: { bot: benBot } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
 
-  // Logged out, the invite says no bot is needed.
-  assert.match((await browser(url)(`/i/${link}`)).text, /You don't need an AI bot/);
+  // Logged out, the invite asks for a bot first: the setup bot, or one message to paste.
+  assert.match((await browser(url)(`/i/${link}`)).text, /Connect your Grok Bot first[^]*Add the setup bot/);
   // Gran signs in and connects with the web inbox.
   const gran = await login('gran@example.com');
   const inv = await gran(`/i/${link}`);
-  assert.match(inv.text, /Connect with my web inbox/);
+  assert.match(inv.text, /No Grok Bot\? Use the web inbox/);
   const done = await gran(`/i/${link}`, { method: 'POST', form: { web: '1', alias: 'Ben' } });
   assert.match(done.text, /Open my inbox/);
   assert.match((await gran('/app')).text, /Web inbox/);
-  assert.match((await ben('/app')).text, /<b>Gran<\/b>/);
+  assert.match((await ben('/app')).text, /item__title">Gran</);
 
   // Ben's bot asks a question with answer buttons.
   const before = mail.length;
@@ -117,4 +117,34 @@ test('web inbox: no bot needed to receive, answer and write back', async (t0) =>
   await granCli('enroll', url, code);
   assert.match(await granCli('contacts'), /Ben/);
   assert.doesNotMatch((await gran('/app')).text, /Web inbox/);
+});
+
+test('the web inbox is off by default: invites push a bot instead', async (t0) => {
+  const mail = [];
+  let relay;
+  const { s, url } = await listen((req, res) => relay.handle(req, res));
+  relay = createRelay({ adminToken: 'admin-token-for-tests-123456', publicUrl: url, mailer: async (m) => { mail.push(m); } });
+  t0.after(() => s.close());
+  const login = async (email) => {
+    const b = browser(url);
+    await b('/login', { method: 'POST', form: { email } });
+    await b('/login/verify', { method: 'POST', form: { email, code: mail.at(-1).text.match(/code is (\d{6})/)[1] } });
+    return b;
+  };
+  const ben = await login('ben@example.com');
+  await ben('/app/bots', { method: 'POST', form: { handle: 'ben' } });
+  const cli = (() => { const home = mkdtempSync(join(tmpdir(), 'b2b-w-')); return async (...a) => (await run(process.execPath, [CLI, ...a], { env: { ...process.env, B2B_HOME: home } })).stdout; })();
+  await cli('enroll', url, (await ben('/app')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
+  const benBot = (await ben('/app')).text.match(/\/app\/bots\/(\d+)/)[1];
+  const made = (await ben('/app/invites', { method: 'POST', form: { bot: benBot } })).text;
+  assert.match(made, /Add the setup bot to your Grok Bot/);
+  const link = made.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  const gran = await login('gran@example.com');
+  const inv = (await gran(`/i/${link}`)).text;
+  assert.doesNotMatch(inv, /web inbox/i);
+  assert.match(inv, /Add the setup bot/);
+  const r = await gran(`/i/${link}`, { method: 'POST', form: { web: '1', alias: 'Ben' } });
+  assert.equal(r.status, 400);
+  assert.match(r.text, /Connect your Grok Bot first/);
+  assert.doesNotMatch((await gran('/app')).text, /web inbox/i);
 });

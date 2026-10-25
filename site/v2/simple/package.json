@@ -14,8 +14,11 @@
   },
   "dependencies": {
     "@astrojs/sitemap": "^3.7.4",
+    "@astrojs/starlight": "^0.42.7",
     "astro": "^7.4.2",
-    "gsap": "^3.15.0"
+    "gsap": "^3.15.0",
+    "posthog-js": "^1.438.21",
+    "starlight-theme-nova": "^0.12.3"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.12",

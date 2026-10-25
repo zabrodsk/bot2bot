@@ -1,11 +1,12 @@
 ---
 import Base from '../layouts/Base.astro';
+import ToastStack from '../components/bencho/ToastStack.astro';
+import CodeBlock from '../components/arc/CodeBlock.astro';
 import Bot from '../components/Bot.astro';
 import Glyph from '../components/Glyph.astro';
 import { bots as b, links } from '../data/site';
-const command = b.host.code.join('\n');
 ---
-<Base title={b.title} description={b.description}>
+<Base title={b.seo.title} description={b.seo.description} crumbs={[{ name: 'For bots', path: '/bots/' }]}>
   <section class="page-intro" aria-labelledby="bots-title">
     <h1 id="bots-title" class="page-title">{b.headline}</h1>
     <p class="page-lead">{b.lead}</p>
@@ -54,6 +55,7 @@ const command = b.host.code.join('\n');
       </div>
       <div class="part__body">
         <p>{b.doorbell.text}</p>
+        <ToastStack {...b.doorbell.demo} />
       </div>
     </section>
 
@@ -64,15 +66,7 @@ const command = b.host.code.join('\n');
       </div>
       <div class="part__body">
         <p>{b.host.text}</p>
-        <div class="term">
-          <div class="term__bar">
-            <span class="term__label" id="host-code">{b.host.codeLabel}</span>
-            <button class="term__copy" type="button" data-copy={command} aria-describedby="host-code">
-              <span data-copy-label>Copy</span>
-            </button>
-          </div>
-          <pre aria-labelledby="host-code" tabindex="0"><code>{b.host.code.map((line) => <span class="term__line">{line}</span>)}</code></pre>
-        </div>
+        <CodeBlock id="host-code" filename={b.host.codeLabel} lines={b.host.code} />
         <p class="muted small">{b.host.note}</p>
         <p class="part__links">
           <a class="link link--out" href={b.host.link.href} rel="noopener">{b.host.link.label}</a>
@@ -109,24 +103,6 @@ const command = b.host.code.join('\n');
   td:first-child { width: 42%; }
   td code { color: var(--c-ink); font-size: 0.8125rem; white-space: nowrap; }
 
-  /* Terminal: ink, like your bot. */
-  .term { border-radius: var(--r-button); background: var(--c-ink); color: #dfe5ee; overflow: hidden; margin-top: 4px; }
-  .term__bar {
-    display: flex; align-items: center; justify-content: space-between; gap: 16px;
-    padding: 6px 8px 6px 18px; border-bottom: 1px solid #2c3648;
-  }
-  .term__label { font-size: var(--t-xs); color: #9aa6b8; }
-  .term__copy {
-    height: 34px; padding: 0 12px; border-radius: 9px; font-size: var(--t-xs); font-weight: 520; color: #dfe5ee;
-    transition: background-color 0.25s var(--ease-open);
-  }
-  .term__copy:hover { background: #263046; }
-  .term__copy:focus-visible { outline-color: #8ea4ff; }
-  .term pre { margin: 0; padding: 16px 18px 18px; overflow-x: auto; line-height: 1.75; }
-  .term pre:focus-visible { outline: 2px solid #8ea4ff; outline-offset: -4px; }
-  .term code { font-size: 0.875rem; }
-  .term__line { display: block; }
-  .term__line::before { content: '$ '; color: #6f7c91; user-select: none; }
 
   @media (max-width: 899px) {
     .part__head { grid-column: 1 / -1; grid-template-columns: auto 1fr; align-items: center; }
@@ -141,8 +117,7 @@ const command = b.host.code.join('\n');
     tr { display: grid; gap: 4px; padding: 11px 0; border-top: 1px solid var(--c-line); }
     td { display: block; padding: 0; border: 0; width: auto !important; }
     td code { white-space: normal; word-break: break-word; }
-    .term code { font-size: 0.8125rem; }
-    .term pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-    .term__line { padding-left: 1.2em; text-indent: -1.2em; }
+    .part__body :global(.arc-code__pre) { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .part__body :global(.arc-code__line) { padding-left: 1.2em; text-indent: -1.2em; }
   }
 </style>

@@ -5,8 +5,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { setup, owner, login, waitFor, msgId } from './helpers.mjs';
-import { TOOLS } from '../connector.mjs';
+import { setup, owner, login, waitFor, msgId, listen, cliHome, sleep } from './helpers.mjs';
+import { TOOLS, ENCRYPTION_MESSAGE } from '../connector.mjs';
 
 const REDIRECT = 'https://grok.example/oauth/callback';
 
@@ -42,9 +42,9 @@ test('connected app: sign in with OAuth, tools over MCP, chat with a private-mod
   assert.match(anon.headers.get('www-authenticate'), /resource_metadata=".*\/\.well-known\/oauth-protected-resource"/);
 
   const mia = { b: await login(env, 'mia@example.com') };
-  // A new person sees two ways in; quick connect is one message to paste into their bot.
+  // A new person sees the setup bot, then one private-mode message to paste; quick connect is the fallback.
   const first = (await mia.b('/app')).text;
-  assert.match(first, /Quick connect[^]*Add the custom MCP connector http:\/\/127\.0\.0\.1:\d+\/mcp[^]*Private/);
+  assert.match(first, /Add the setup bot[^]*private mode \(end-to-end encrypted\)[^]*b2b\.mjs join http:\/\/127\.0\.0\.1:\d+[^]*Quick connect[^]*Add the custom MCP connector http:\/\/127\.0\.0\.1:\d+\/mcp/);
   const app = await connectApp(env, mia.b, 'mia-bot');
   // Right after connecting, the bot is told its next step: make its own doorbell routine.
   assert.match((await app.tool('whoami')).content[0].text, /NEXT STEP: Make yourself a routine called "b2b doorbell"/);
@@ -121,4 +121,99 @@ test('private mode: `b2b mcp` serves the same tools over stdio, still end-to-end
   assert.match(r.result.content[0].text, /End-to-end encrypted: only their bot can read it/);
   const row = env.relay.db.prepare("SELECT text, sealed FROM messages WHERE kind = 'note' ORDER BY created_at DESC").get();
   assert.equal(row.text, ''); assert.ok(row.sealed);
+});
+
+test('quick connect → private mode: one yes, same name and contacts, encrypted from then on', async (t0) => {
+  const env = await setup(t0);
+  const mia = { b: await login(env, 'mia@example.com') };
+  const app = await connectApp(env, mia.b, 'mia-bot');
+  const botId = (await mia.b('/app')).text.match(/\/app\/bots\/(\d+)/)[1];
+  // Mia's doorbell routine: through the app before the switch, through the tool after. "off" = rung but asleep.
+  const { cli } = cliHome();
+  const routine = { mode: 'app', seen: [] };
+  const { s, url } = await listen(async (req, res) => {
+    res.writeHead(200).end('{}');
+    try {
+      for (let i = 0; i < 4; i++) {
+        if (routine.mode === 'app') {
+          const out = (await app.tool('check_inbox')).content[0].text; routine.seen.push(out);
+          const receipts = [...out.matchAll(/receipt=(msg_[\w~-]+)/g)];
+          if (!receipts.length) break;
+          for (const r of receipts) await app.tool('mark_delivered', { receipt: r[1] });
+        } else if (routine.mode === 'cli') {
+          const out = await cli('inbox', '--via', 'doorbell'); routine.seen.push(out);
+          const acks = [...out.matchAll(/b2b\.mjs ack (msg_[\w~-]+)/g)];
+          if (!acks.length) break;
+          for (const m of acks) await cli('ack', m[1]);
+        }
+      }
+    } catch { /* relay closed */ }
+  });
+  t0.after(() => s.close());
+  await mia.b(`/app/bots/${botId}/doorbell`, { method: 'POST', form: { url: `${url}/automations/webhook/7`, key: 'k-12345678' } });
+  await app.tool('test_doorbell');
+  await waitFor(async () => /Doorbell: working/.test((await app.tool('whoami')).content[0].text));
+
+  // Ben (private mode) and Mia become contacts. Setup is done, so Mia's bot offers encryption.
+  const ben = await owner(env, t0, 'ben@example.com', 'ben');
+  const link = (await app.tool('invite', { name: 'Ben' })).content[0].text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  await ben.b(`/i/${link}`, { method: 'POST', form: { bot: ben.botId, alias: 'Mia' } });
+  const peer = (await mia.b('/app')).text.match(/action="\/app\/contacts\/approve"><input type="hidden" name="bot" value="(\d+)"><input type="hidden" name="peer" value="(\d+)"/);
+  await mia.b('/app/contacts/approve', { method: 'POST', form: { bot: peer[1], peer: peer[2] } });
+  assert.match((await app.tool('whoami')).content[0].text, /NEXT STEP: If you haven't asked your owner yet[^]*Want end-to-end encryption[^]*Only if they say yes, call turn_on_encryption/);
+  const page = (await mia.b(`/app/bots/${botId}`)).text;
+  assert.match(page, /Turn on end-to-end encryption/);
+  assert.ok(page.includes(ENCRYPTION_MESSAGE.replaceAll("'", '&#39;')) || page.includes(ENCRYPTION_MESSAGE), 'the dashboard gives the message to paste');
+
+  // A plain-text message is still waiting when Mia's bot switches. It isn't lost.
+  routine.mode = 'off';
+  await ben.cli('send', 'Mia', 'Sent before the switch');
+
+  const steps = (await app.tool('turn_on_encryption')).content[0].text;
+  const code = steps.match(/b2b\.mjs enroll \S+ ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  assert.match(steps, /Keep the same routine and its webhook[^]*-----\nb2b messages may be waiting[^]*inbox --via doorbell[^]*\n-----/);
+  assert.match(await cli('enroll', env.url, code), /Enrolled as @mia-bot/);
+  assert.match(await cli('whoami'), /Encryption: on/);
+  await assert.rejects(cli('enroll', env.url, code), /invalid, used or expired/, 'the code works once');
+
+  // The app's sign-in is over: nothing can go out in plain text that way any more.
+  assert.equal((await app.rpc('ping')).status, 401);
+  assert.equal((await app.swap({ grant_type: 'refresh_token', refresh_token: app.tokens.refresh_token, client_id: app.clientId })).status, 400);
+
+  // Same doorbell, new instruction: the test passes without Mia pasting the key again, and the waiting message arrives.
+  routine.mode = 'cli';
+  // (A test ring right after another ring is skipped by the cooldown, so ring again until it lands.)
+  await waitFor(async () => {
+    if (/Doorbell: verified/.test(await cli('whoami'))) return true;
+    await cli('doorbell', 'test'); await sleep(300); return false;
+  });
+  await waitFor(async () => routine.seen.some((o) => o.includes('Sent before the switch')));
+
+  // Ben's bot just starts encrypting: no new-key alarm, because it never had keys for Mia's bot.
+  assert.doesNotMatch(await ben.cli('contacts'), /NEW KEY|connected app/);
+  const sent = await ben.cli('send', 'Mia', 'Sealed after the switch');
+  assert.match(sent, /End-to-end encrypted: only their bot can read it/);
+  await waitFor(async () => routine.seen.some((o) => o.includes('Sealed after the switch')));
+  const row = env.relay.db.prepare('SELECT sealed, text FROM messages WHERE id = ?').get(msgId(sent));
+  assert.ok(row.sealed && !row.text, 'the relay only ever held the sealed message');
+  assert.match(await cli('contacts'), /Ben .*end-to-end encrypted/);
+
+  // The dashboard agrees, and the offer is gone.
+  const after = (await mia.b('/app')).text;
+  assert.match(after, /Private mode/);
+  assert.doesNotMatch((await mia.b(`/app/bots/${botId}`)).text, /Turn on end-to-end encryption/);
+});
+
+test('connected app: app registrations are limited per address, and unused ones are cleared', async (t0) => {
+  const env = await setup(t0, { limits: { oauthRegisterPerIpPerHour: 3 } });
+  const reg = () => fetch(`${env.url}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'x', redirect_uris: [REDIRECT] }) });
+  for (let i = 0; i < 3; i++) assert.equal((await reg()).status, 201);
+  const r = await reg();
+  assert.equal(r.status, 429);
+  assert.equal((await r.json()).error, 'too_many_requests');
+  env.advance(3_600_001);
+  assert.equal((await reg()).status, 201, 'the limit is per hour');
+  env.advance(8 * 86_400_000);
+  env.relay.retention(env.now());
+  assert.equal(env.relay.db.prepare('SELECT count(*) AS n FROM oauth_clients').get().n, 0, 'registrations that never signed anyone in are cleared after a week');
 });

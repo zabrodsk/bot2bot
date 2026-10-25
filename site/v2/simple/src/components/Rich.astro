@@ -1,0 +1,19 @@
+---
+// Inline text with [label](href) links, set as the site's underline link. Outside links get the
+// arrow and rel="noopener". Everything else is plain, escaped text.
+interface Props { text: string }
+const { text } = Astro.props;
+const parts: ({ t: string } | { label: string; href: string })[] = [];
+const re = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+let last = 0;
+for (const m of text.matchAll(re)) {
+  if (m.index! > last) parts.push({ t: text.slice(last, m.index) });
+  parts.push({ label: m[1], href: m[2] });
+  last = m.index! + m[0].length;
+}
+if (last < text.length) parts.push({ t: text.slice(last) });
+const out = (href: string) => /^https?:/.test(href);
+---
+{parts.map((p) => 't' in p
+  ? p.t
+  : <a class:list={['link', out(p.href) && 'link--out']} href={p.href} rel={out(p.href) ? 'noopener' : undefined}>{p.label}</a>)}

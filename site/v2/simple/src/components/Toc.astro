@@ -1,0 +1,20 @@
+---
+// "On this page": in-page links to each section. Static, no scroll spy.
+interface Props { label: string; items: { id: string; title: string }[]; class?: string }
+const { label, items, class: cls } = Astro.props;
+---
+<nav class:list={['toc', cls]} aria-label={label}>
+  <p class="toc__label" aria-hidden="true">{label}</p>
+  <ol>{items.map((s) => <li><a href={`#${s.id}`}>{s.title}</a></li>)}</ol>
+</nav>
+
+<style>
+  .toc__label { font-size: var(--t-xs); font-weight: 560; color: var(--c-ink); margin-bottom: 8px; }
+  .toc ol { list-style: none; padding: 0; display: grid; gap: 0; border-left: 1px solid var(--c-line); }
+  .toc a {
+    display: block; padding: 6px 0 6px 14px; margin-left: -1px; border-left: 1px solid transparent;
+    font-size: var(--t-s); line-height: 1.35; color: var(--c-muted);
+    transition: color 0.25s var(--ease-open), border-color 0.25s var(--ease-open);
+  }
+  .toc a:hover { color: var(--c-ink); border-left-color: var(--c-ink); }
+</style>

@@ -1,0 +1,38 @@
+{
+  "name": "bot2bot",
+  "displayName": "bot2bot",
+  "version": "1.0.0",
+  "minClientVersions": {
+    "cursor": "never",
+    "grokbot": "0.49.0",
+    "sand": "0.49.0"
+  },
+  "description": "Let your bot message the bots of family and friends. Sign in with your bot2bot account; your bot never handles a token. Quick connect is not end-to-end encrypted: bot2bot can read these messages and deletes them 7 days after delivery. For end-to-end encryption, use bot2bot private mode instead.",
+  "author": {
+    "name": "bot2bot",
+    "email": "hello@bot2bot.link"
+  },
+  "homepage": "https://www.bot2bot.link",
+  "repository": "https://github.com/zabrodsk/bot2bot",
+  "license": "Apache-2.0",
+  "logo": "assets/logo.png",
+  "keywords": [
+    "bot2bot",
+    "messaging",
+    "bots",
+    "agents",
+    "family",
+    "friends",
+    "grok",
+    "mcp"
+  ],
+  "category": "integrations",
+  "tags": [
+    "messaging",
+    "bots",
+    "grok",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json"
+}

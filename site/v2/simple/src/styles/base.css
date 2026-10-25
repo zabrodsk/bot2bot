@@ -66,40 +66,7 @@ p { text-wrap: pretty; }
 
 /* ---------- Shared UI (one system for every page) ---------- */
 
-/* The button is your bot: an ink rounded rectangle with a blue light. */
-.button {
-  display: inline-flex; align-items: center; justify-content: center; gap: 12px; flex: 0 0 auto;
-  height: 50px; padding: 0 22px 0 20px; border-radius: var(--r-button);
-  background: var(--c-ink); color: var(--c-white); border: 1px solid var(--c-ink);
-  font-size: 1rem; font-weight: 520; letter-spacing: -0.005em; white-space: nowrap;
-  transition: background-color 0.3s var(--ease-open), border-color 0.3s var(--ease-open), translate 0.2s var(--ease-open);
-}
-.button:hover { background: var(--c-ink-2); border-color: var(--c-ink-2); }
-.button:active { translate: 0 1px; }
-.button__light { position: relative; width: 7px; height: 7px; border-radius: 50%; background: #5d7cff; }
-.button__light::after {
-  content: ''; position: absolute; inset: -1px; border-radius: 50%; border: 1px solid #5d7cff; opacity: 0;
-}
-.button:hover .button__light::after, .button:focus-visible .button__light::after {
-  animation: ping 0.9s var(--ease-open) 1;
-}
-@keyframes ping { from { opacity: 0.9; scale: 1; } to { opacity: 0; scale: 3.2; } }
-/* Quiet: a second action. Outline only. */
-.button--quiet { background: transparent; color: var(--c-ink); border-color: var(--c-line); padding: 0 20px; }
-.button--quiet:hover { background: var(--c-tint); border-color: var(--c-sleep); }
-
-/* Text links inside copy: ink, underlined with a hairline that turns blue. */
-.link {
-  color: var(--c-ink); font-weight: 500;
-  text-decoration: underline; text-decoration-color: var(--c-sleep);
-  text-decoration-thickness: 1px; text-underline-offset: 0.24em;
-  transition: text-decoration-color 0.25s var(--ease-open), color 0.25s var(--ease-open);
-}
-.link:hover { text-decoration-color: var(--c-signal); color: var(--c-signal); }
-/* In a row of links, each one gets a 24 px+ tap height. */
-.link { padding-block: 3px; }
-/* Leaving the site: a small arrow, drawn, never an emoji. */
-.link--out::after { content: ' \2197'; font-weight: 400; text-decoration: none; display: inline-block; margin-left: 0.15em; }
+/* Buttons, links, alerts, badges and code blocks are Arc components: see components/arc/arc.css. */
 
 /* Inner pages: the display headline and lead, on the left margin. */
 .page-intro { padding: clamp(40px, 9vh, 104px) var(--m) 0; display: grid; gap: 22px; }
@@ -122,6 +89,3 @@ p { text-wrap: pretty; }
 /* Code: set in the text face, monospace digits, on the tint. */
 code, pre { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 0.875em; }
 
-@media (max-width: 699px) {
-  .button { height: 54px; }
-}
