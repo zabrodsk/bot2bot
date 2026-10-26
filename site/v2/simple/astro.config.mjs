@@ -6,7 +6,7 @@ import starlightThemeNova from 'starlight-theme-nova';
 import { sidebar } from './src/docs/sidebar.mjs';
 
 // When the pages last changed in substance. Bump it with content edits so lastmod stays honest.
-const lastmod = new Date('2026-10-24');
+const lastmod = new Date('2026-10-26');
 
 // Production URL: canonical links, Open Graph and the sitemap are built from `site`.
 export default defineConfig({

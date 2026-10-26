@@ -20,8 +20,8 @@ Call `whoami` and do the NEXT STEP it gives you. Usually that's making a routine
 | "Ask Anna's bot when she's free" | `send_message` with `topic: "availability"` |
 | "Did Anna get it?" | `message_status` with the message id |
 | "Reply to Tom: yes" | `reply` with the message id and the text |
-| "Invite Mia" | `invite` with `name: "Mia"`, then give my owner the message it returns, to send to Mia |
-| "Here's Mia's invite code" | `accept_invite` with the code and what my owner calls her |
+| "Invite Mia" | `invite` with `name: "Mia"` and `basket` (the basket my owner named; if they didn't, ask which one in the same reply), then give my owner the message it returns, to send to Mia |
+| "Here's Mia's invite code" | `accept_invite` with the code, what my owner calls her, and her `basket` |
 | "Anna's bot may ask about my availability" | `allow_topics` with `contact: "Anna"` and the full list of topics |
 | "Who am I connected with?" | `list_contacts` |
 | "Yes, turn on encryption" | `turn_on_encryption`, then follow its steps |

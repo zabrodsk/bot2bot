@@ -506,8 +506,8 @@ test('review: all thirty shipped stickers serve exact PNG bytes; font licence an
   assert.match(readFileSync(join(root, 'public/hand/OFL.txt'), 'utf8'), /Caveat Project Authors[^]*SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(readFileSync(join(root, 'Dockerfile'), 'utf8'), /COPY public \.\/public/);
   assert.match(readFileSync(join(root, '../Dockerfile'), 'utf8'), /COPY relay\/public \.\/public/);
-  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.17.2');
-  assert.equal((await cliHome().cli('version')).trim(), '0.17.2');
+  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.17.3');
+  assert.equal((await cliHome().cli('version')).trim(), '0.17.3');
 });
 
 function privateMcp(t, who) {
@@ -660,4 +660,33 @@ test('everything the dashboard changes, the bot can change too, from the ops its
   assert.equal(settings(env, ann).circles.some((g) => g.name === 'school' || g.name === 'class'), false, 'added, renamed and removed');
   assert.deepEqual(c.rules, [], 'added and removed');
   assert.match((await cliIn(ann.home, '[{"op":"rename_everything"}]', 'settings', 'apply', '-').catch((e) => e)).stderr, /use move, set_mode, add_circle/);
+});
+
+test('inviting picks the basket: friends by default, changeable, and a bot can name one too', async (t) => {
+  const env = await setup(t, { privacyPilot: true });
+  const ann = await quietBot(env, 'ann@example.com', 'ann'), ben = await quietBot(env, 'ben@example.com', 'ben'), cat = await quietBot(env, 'cat@example.com', 'cat');
+  // The dashboard link: friends unless Ann picks another basket; Ben picks for his side when he says yes.
+  const made = await ann.b('/app/invites', { method: 'POST', form: { bot: ann.botId } });
+  assert.match(made.text, /<label>Their basket<select name="basket" data-autosave><option>family<\/option><option selected>friends<\/option>/);
+  const code = made.text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  const picked = await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'family' } });
+  assert.match(picked.text, /<span class="toast__what">They&#39;ll be in family<\/span>|<span class="toast__what">They'll be in family<\/span>/);
+  assert.match(picked.text, /<option selected>family<\/option>/);
+  const page = await ben.b(`/i/${code}`);
+  assert.match(page.text, /<label>Their basket<select name="basket"><option>family<\/option><option selected>friends<\/option>/);
+  const done = await ben.b(`/i/${code}`, { method: 'POST', form: { bot: ben.botId, alias: 'Ann', basket: 'work' } });
+  assert.match(done.text, /Ann is in work\./);
+  assert.doesNotMatch(done.text, /in a basket<\/a>/, 'nothing left to sort');
+  assert.equal(contactOf(env, ann, ben).circle.name, 'family');
+  assert.equal(contactOf(env, ben, ann).circle.name, 'work');
+  assert.equal(contactOf(env, ann, ben).effective_mode, 'handles', 'Ann\'s bot can write to Ben right away');
+
+  // A bot invites with a basket; an unknown basket names the real ones and makes nothing.
+  await assert.rejects(cliIn(ann.home, '', 'invite', 'cat', '--basket', 'golf'), (e) => /basket not found; the baskets are family, friends, work/.test(e.stderr));
+  const out = await ann.cli('invite', 'cat', '--basket', 'work');
+  assert.match(out, /They go in "work" once connected\./);
+  const accepted = await cat.cli('accept', out.match(/accept ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1], 'Ann', '--basket', 'friends');
+  assert.match(accepted, /They're in "friends"\./);
+  assert.equal(contactOf(env, ann, cat).circle.name, 'work');
+  assert.equal(contactOf(env, cat, ann).circle.name, 'friends');
 });

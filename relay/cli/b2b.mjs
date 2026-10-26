@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, sign, verify, createHash, createHmac } from 'node:crypto';
 
-const VERSION = '0.17.2';
+const VERSION = '0.17.3';
 // Updates must be signed with the bot2bot release key (kept offline), so whoever runs the relay can't
 // slip a changed tool onto bots. Self-hosters who change the tool can set B2B_RELEASE_KEY to their own key.
 const RELEASE_KEY = process.env.B2B_RELEASE_KEY || 'r0mPG3PJ8QEip2NHjeu9w5i97plgqLrwkFMtFcP2N1Q';
@@ -434,8 +434,9 @@ const HELP = `b2b ${VERSION}: talk to your contacts' bots
   join <relay-url>                 connect this bot: prints a link for your owner to approve; run again to wait for it
   enroll <relay-url> <code>        connect this bot with a one-time code from your owner's dashboard
   whoami                           your handle, doorbell status, pending messages
-  invite <alias>                   make a pairing code for someone (alias = what YOU call them, e.g. anna)
-  accept <code> <alias>            pair using someone's code (alias = what you call THEM, e.g. son)
+  invite <alias> [--basket B]      make a pairing code for someone (alias = what YOU call them, e.g. anna;
+                                   --basket = the basket they go in once connected)
+  accept <code> <alias> [--basket B]  pair using someone's code (alias = what you call THEM, e.g. son)
   contacts                         list contacts
   allow <contact> "<topic>"...     let a contact's bot ask you about a topic directly (only when your owner asks)
   disallow <contact> "<topic>"     take that back (or --all)
@@ -573,9 +574,9 @@ Run this same command again to keep waiting.`);
   }
   case 'invite': {
     const alias = pos.join(' ');
-    if (!alias) die('Usage: b2b invite <alias>   (what you call this person, e.g. anna)');
-    const r = await api('POST', '/v1/invites', { alias });
-    console.log(`Pairing code for "${r.alias}": ${r.code}  (works once, until ${when(r.expires_at)})`);
+    if (!alias) die('Usage: b2b invite <alias> [--basket <basket>]   (what you call this person, e.g. anna)');
+    const r = await api('POST', '/v1/invites', { alias, ...(typeof flags.basket === 'string' ? { basket: flags.basket } : {}) });
+    console.log(`Pairing code for "${r.alias}": ${r.code}  (works once, until ${when(r.expires_at)})${r.basket ? `. They go in ${quoted(r.basket)} once connected.` : ''}`);
     if (/^https?:\/\//.test(r.link || '')) {
       console.log(`Invite link for "${r.alias}": ${r.link}`);
       if (r.message) console.log(`Give your owner this message to send to ${r.alias}, exactly as written:\n\n${r.message}\n`);
@@ -587,9 +588,9 @@ Run this same command again to keep waiting.`);
   }
   case 'accept': {
     const [code, ...aliasParts] = pos;
-    if (!code || !aliasParts.length) die('Usage: b2b accept <code> <alias>   (alias = what you call the inviter)');
-    const r = await api('POST', '/v1/invites/accept', { code, alias: aliasParts.join(' ') });
-    console.log(`Paired with ${oneLine(r.paired_with)} (they go by ${quoted(r.inviter_name)}). You call them ${quoted(r.your_alias_for_them)}. If that is not who you expected, tell your owner right away.`);
+    if (!code || !aliasParts.length) die('Usage: b2b accept <code> <alias> [--basket <basket>]   (alias = what you call the inviter)');
+    const r = await api('POST', '/v1/invites/accept', { code, alias: aliasParts.join(' '), ...(typeof flags.basket === 'string' ? { basket: flags.basket } : {}) });
+    console.log(`Paired with ${oneLine(r.paired_with)} (they go by ${quoted(r.inviter_name)}). You call them ${quoted(r.your_alias_for_them)}.${r.basket ? ` They're in ${quoted(r.basket)}.` : ''} If that is not who you expected, tell your owner right away.`);
     if (r.waiting_for_your_owner) console.log(`Tell your owner: "Please approve ${oneLine(r.inviter_name)} as a contact on your dashboard: ${r.approve_at}". Nothing can be sent until they do.`);
     else if (r.waiting_for_them) console.log('Their owner still has to approve you on their dashboard before messages flow.');
     break;
@@ -865,8 +866,8 @@ Run this same command again to keep waiting.`);
       ['mark_delivered', 'After telling your owner about a message, confirm it with the receipt from check_inbox.', { receipt: 'string' }, ['receipt']],
       ['reply', 'Answer a message. Set auto=true only when you answered a topic your owner allowed, by yourself.', { message_id: 'string', text: 'string', auto: 'boolean' }, ['message_id', 'text']],
       ['message_status', 'Was a message you sent delivered, and did they reply?', { message_id: 'string' }, ['message_id']],
-      ['invite', 'Make an invite for someone your owner wants to connect with. Give your owner the message it returns, to send them.', { name: 'string' }, ['name']],
-      ['accept_invite', "Accept someone's invite code, when your owner gave it to you. name = what your owner calls them. Your owner then says yes on their bot2bot page.", { code: 'string', name: 'string' }, ['code', 'name']],
+      ['invite', 'Make an invite for someone your owner wants to connect with. Give your owner the message it returns, to send them. basket = the basket they go in once connected (family, friends, work or one of your owner\'s own); ask your owner if they didn\'t say.', { name: 'string', basket: 'string' }, ['name']],
+      ['accept_invite', "Accept someone's invite code, when your owner gave it to you. name = what your owner calls them; basket = which of your owner's baskets they go in. Your owner then says yes on their bot2bot page.", { code: 'string', name: 'string', basket: 'string' }, ['code', 'name']],
       ['allow_topics', "Let a contact's bot ask you about these topics directly. Only when your owner says so. An empty list removes them all.", { contact: 'string', topics: 'string[]' }, ['contact', 'topics']],
       ['test_doorbell', 'Ring your own doorbell once to check the routine wakes you.', {}],
       ['turn_on_encryption', 'Switch to private mode, so messages with other bots are end-to-end encrypted. Only after your owner said yes to it in this chat.', {}],
@@ -890,7 +891,7 @@ Run this same command again to keep waiting.`);
       send_message: ['send', ...(a.links || []).map((l) => `--link=${s(l)}`), ...(a.question ? ['--ask'] : []), ...(a.choices || []).map((c) => `--choice=${s(c)}`),
         ...(a.topic ? [`--topic=${s(a.topic)}`] : []), ...(a.urgent ? ['--urgent'] : []), '--', s(a.to), '-'],
       mark_delivered: ['ack', '--', s(a.receipt)], reply: ['reply', ...(a.auto ? ['--auto'] : []), '--', s(a.message_id), '-'], message_status: ['status', '--', s(a.message_id)],
-      invite: ['invite', '--', s(a.name)], accept_invite: ['accept', '--', s(a.code), s(a.name)], allow_topics: (a.topics || []).length ? ['allow', '--', s(a.contact), ...a.topics.map(s)] : ['disallow', '--all', '--', s(a.contact)],
+      invite: ['invite', ...(a.basket ? ['--basket', s(a.basket)] : []), '--', s(a.name)], accept_invite: ['accept', ...(a.basket ? ['--basket', s(a.basket)] : []), '--', s(a.code), s(a.name)], allow_topics: (a.topics || []).length ? ['allow', '--', s(a.contact), ...a.topics.map(s)] : ['disallow', '--all', '--', s(a.contact)],
       get_settings: ['settings'], update_settings: ['settings', 'apply', '-'], get_request: ['request', '--', s(a.id)],
       propose_reply: ['propose', ...(a.links || []).map((l) => `--link=${s(l)}`), ...(a.question ? [`--question=${s(a.question)}`] : []), ...(a.topic ? [`--topic=${s(a.topic)}`] : []), '--', s(a.message_id || a.to), '-'],
       record_decision: ['decision', ...(a.client_id ? [`--client-id=${s(a.client_id)}`] : []), ...((a.always_days || []).length ? [`--always=${a.always_days.map(s).join(',')}`] : []), '--', s(a.contact), s(a.topic), s(a.answer)],

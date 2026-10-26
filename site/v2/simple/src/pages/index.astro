@@ -3,7 +3,7 @@ import Base from '../layouts/Base.astro';
 import AskAnswers from '../components/bencho/AskAnswers.astro';
 import ConnectDemo from '../components/home/ConnectDemo.astro';
 import NeverDemo from '../components/home/NeverDemo.astro';
-import QuietDay from '../components/home/QuietDay.astro';
+import QuietNight from '../components/home/QuietNight.astro';
 import Row from '../components/home/Row.astro';
 import Button from '../components/arc/Button.astro';
 import Field from '../components/Field.astro';
@@ -38,7 +38,7 @@ const app = softwareApp();
   <section class="quiet" aria-labelledby="quiet-title">
     <h2 id="quiet-title" class="quiet__title say">{home.quiet.title}</h2>
     <p class="quiet__text muted">{home.quiet.text}</p>
-    <div class="quiet__day"><QuietDay label={home.quiet.label} night={home.quiet.night} messages={home.quiet.messages} /></div>
+    <div class="quiet__day"><QuietNight label={home.quiet.label} night={home.quiet.night} morning={home.quiet.morning} setting={home.quiet.setting} /></div>
   </section>
 
   <section class="rows rows--more" aria-label="Safety">
@@ -92,7 +92,7 @@ const app = softwareApp();
   .rows--more { margin-top: 0; }
   .rows--more > :global(.row:first-child) { border-top: 0; }
 
-  /* Quiet hours: the one wide picture on the page, a whole day on the wire. */
+  /* Quiet hours: the one wide picture on the page, a night and the morning after. */
   .quiet {
     margin: 0 var(--m); padding: clamp(44px, 7vh, 72px) 0 clamp(52px, 8vh, 84px); border-bottom: 1px solid var(--c-line);
     display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 20px var(--gap); align-items: start;
@@ -100,16 +100,6 @@ const app = softwareApp();
   .quiet__title { grid-column: 4 / span 5; max-width: 14ch; }
   .quiet__text { grid-column: 9 / span 4; max-width: 36ch; padding-top: 4px; }
   .quiet__day { grid-column: 1 / -1; padding-top: clamp(28px, 5vh, 52px); }
-  /* While the clock in QuietDay runs through the night, the whole section goes dark with it. */
-  .quiet { position: relative; isolation: isolate; }
-  .quiet::before {
-    content: ''; position: absolute; z-index: -1; inset: -1px calc(-1 * var(--m)); background: #121a2b;
-    opacity: 0; transition: opacity 900ms var(--ease-standard);
-  }
-  .quiet__title, .quiet__text { transition: color 900ms var(--ease-standard); }
-  .quiet:has([data-dark])::before { opacity: 1; }
-  .quiet:has([data-dark]) .quiet__title { color: #e7ecf3; }
-  .quiet:has([data-dark]) .quiet__text { color: #8f9bb0; }
 
   /* The close: one plain line about price, and the two ways in. */
   .close {

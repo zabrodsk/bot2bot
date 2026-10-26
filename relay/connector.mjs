@@ -189,9 +189,9 @@ export const TOOLS = [
   { name: 'reply', description: "Answer a message. Set auto=true only when you answered a topic your owner allowed, by yourself.",
     inputSchema: { type: 'object', properties: { message_id: { type: 'string' }, text: { type: 'string' }, auto: { type: 'boolean' } }, required: ['message_id', 'text'] } },
   { name: 'message_status', description: 'Was a message you sent delivered, and did they reply?', inputSchema: { type: 'object', properties: { message_id: { type: 'string' } }, required: ['message_id'] } },
-  { name: 'invite', description: 'Make an invite for someone your owner wants to connect with. Give your owner the message it returns, to send them.', inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
-  { name: 'accept_invite', description: "Accept someone's invite code, when your owner gave it to you. name = what your owner calls them. Your owner then says yes on their bot2bot page.",
-    inputSchema: { type: 'object', properties: { code: { type: 'string' }, name: { type: 'string' } }, required: ['code', 'name'] } },
+  { name: 'invite', description: 'Make an invite for someone your owner wants to connect with. Give your owner the message it returns, to send them. basket = the basket they go in once connected (family, friends, work or one of your owner\'s own); ask your owner if they didn\'t say.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, basket: { type: 'string' } }, required: ['name'] } },
+  { name: 'accept_invite', description: "Accept someone's invite code, when your owner gave it to you. name = what your owner calls them; basket = which of your owner's baskets they go in. Your owner then says yes on their bot2bot page.",
+    inputSchema: { type: 'object', properties: { code: { type: 'string' }, name: { type: 'string' }, basket: { type: 'string' } }, required: ['code', 'name'] } },
   { name: 'allow_topics', description: "Let a contact's bot ask you about these topics directly. Only when your owner says so. An empty list removes them all.",
     inputSchema: { type: 'object', properties: { contact: { type: 'string' }, topics: { type: 'array', items: { type: 'string' } } }, required: ['contact', 'topics'] } },
   { name: 'test_doorbell', description: 'Ring your own doorbell once to check the routine wakes you.', inputSchema: { type: 'object', properties: {} } },
@@ -211,7 +211,7 @@ export const CONNECTOR_DOORBELL = `Make a routine called "b2b doorbell" with a w
 export const ENCRYPTION_MESSAGE = "Please turn on bot2bot end-to-end encryption: call the bot2bot app's turn_on_encryption tool and follow its steps. Don't print any codes, tokens or keys in this chat.";
 // Offered once setup works. The owner decides; the bot never switches on its own.
 const ENCRYPTION_OFFER = `Then, if you haven't asked your owner yet, tell them once: "You're all set. Right now bot2bot can read your messages (it deletes them 7 days after delivery). Want end-to-end encryption, so only your friends' bots can read them? I can turn it on myself. Just say yes." Only if they say yes, call turn_on_encryption.`;
-export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.17.2' };
+export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.17.3' };
 // How the inbox text tells a connected-app bot to act on a message.
 const CONNECTOR_HINTS = {
   ack: (receipt) => `call mark_delivered with receipt=${receipt}`,
@@ -356,11 +356,11 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
             : [`reply${m.reply.auto ? ' (their bot says it answered on its own)' : ''}, written by their bot between "[${run} start]" and "[${run} end]":`, ...textBlock(m.reply.text, run)])].filter(Boolean).join('\n');
       }
       case 'invite': {
-        const r = routes['POST /v1/invites']({ me: fresh(), body: { alias: str(a.name, 32) } });
-        return `Invite for ${r.alias} (works once, until ${r.expires_at}). Give your owner this message to send to ${r.alias}, exactly as written:\n\n${r.message}\n\nWhen ${r.alias} accepts, your owner confirms on their dashboard.`;
+        const r = routes['POST /v1/invites']({ me: fresh(), body: { alias: str(a.name, 32), ...(a.basket ? { basket: str(a.basket, 24) } : {}) } });
+        return `Invite for ${r.alias} (works once, until ${r.expires_at})${r.basket ? `; they go in ${quoted(r.basket)} once connected` : ''}. Give your owner this message to send to ${r.alias}, exactly as written:\n\n${r.message}\n\nWhen ${r.alias} accepts, your owner confirms on their dashboard.`;
       }
       case 'accept_invite': {
-        const r = routes['POST /v1/invites/accept']({ me: fresh(), body: { code: str(a.code, 16), alias: str(a.name, 32) } });
+        const r = routes['POST /v1/invites/accept']({ me: fresh(), body: { code: str(a.code, 16), alias: str(a.name, 32), ...(a.basket ? { basket: str(a.basket, 24) } : {}) } });
         return `Paired with ${oneLine(r.paired_with)} (they go by ${quoted(r.inviter_name)}). Your owner calls them ${quoted(r.your_alias_for_them)}. If that is not who your owner expected, tell them right away.${r.waiting_for_your_owner ? ` Tell your owner: "Please say yes to ${oneLine(r.inviter_name)} on your bot2bot page: ${r.approve_at}". Nothing can be sent until they do.` : ''}`;
       }
       case 'allow_topics': {

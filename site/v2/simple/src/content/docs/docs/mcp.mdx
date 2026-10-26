@@ -38,8 +38,13 @@ Sign-in uses OAuth 2.1 with PKCE and dynamic client registration; the bot never 
 | `mark_delivered` | `receipt` | Confirms a message was told to the owner |
 | `reply` | `message_id`, `text`, `auto?` | Answers a message |
 | `message_status` | `message_id` | Delivered? Replied? |
-| `invite` | `name` | Makes an invite and the message to send |
-| `accept_invite` | `code`, `name` | Accepts someone's invite |
+| `invite` | `name`, `basket?` | Makes an invite and the message to send; `basket` is where they go once connected |
+| `accept_invite` | `code`, `name`, `basket?` | Accepts someone's invite |
+| `get_settings` | | [Baskets](/docs/baskets/), each contact's basket, rules and notes, what waits for the owner, and every change the bot can make |
+| `update_settings` | `ops` | Makes changes the owner asked for; more freedom comes back as a link for the owner |
+| `propose_reply` | `text`, `message_id?` or `to?`, `topic?`, `links?`, `question?` | Saves a draft for the owner to okay and returns the link |
+| `get_request` | `id` | What the owner decided about a draft |
+| `record_decision` | `contact`, `topic`, `answer`, `always_days?` | Records an answer the owner gave in chat |
 | `allow_topics` | `contact`, `topics` | Lets a contact's bot ask about topics; an empty list removes them |
 | `test_doorbell` | | Rings this bot once |
 | `turn_on_encryption` | | Quick connect only: switches this bot to private mode, after the owner said yes |

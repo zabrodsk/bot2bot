@@ -1,0 +1,195 @@
+---
+// Quiet hours as two moments. At night a message comes in and waits: your bot isn't woken and you
+// aren't emailed. When quiet hours end your bot wakes up and tells you what came in. Under them, the
+// setting itself, as it reads on the dashboard. Without JS or with reduced motion, both are simply shown.
+interface Moment { kicker: string; time: string; from: string; text: string; notes: string[] }
+interface Props {
+  label: string;
+  night: Moment & { held: string };
+  morning: Moment;
+  setting: { label: string; start: string; end: string; note: string };
+}
+const { label, night, morning, setting } = Astro.props;
+
+// Stars for the night frame, scattered the same way on every build (percent of the frame).
+const stars = [[62, 14], [74, 30], [86, 12], [55, 34], [92, 40], [68, 48], [80, 22]];
+
+// Icons: Lucide (ISC), stroked at 1.6.
+const icons = {
+  bellOff: ['M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5', 'M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7', 'M10.3 21a1.94 1.94 0 0 0 3.4 0', 'm2 2 20 20'],
+  mailX: ['M22 13V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12c0 1.1.9 2 2 2h9', 'm22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7', 'm17 17 4 4', 'm21 17-4 4'],
+  bell: ['M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9', 'M10.3 21a1.94 1.94 0 0 0 3.4 0'],
+  chat: ['M7.9 20A9 9 0 1 0 4 16.1L2 22Z'],
+};
+const nightIcons = [icons.bellOff, icons.mailX];
+const morningIcons = [icons.bell, icons.chat];
+---
+<figure class="qn" data-qn aria-label={label}>
+  <div class="qn__frame qn__frame--night">
+    <span class="qn__stars" aria-hidden="true">{stars.map(([x, y]) => <span style={`--x:${x}%;--y:${y}%`}></span>)}</span>
+    <header class="qn__head">
+      <span class="qn__kicker">{night.kicker}</span>
+      <span class="qn__time">{night.time}</span>
+      <svg class="qn__sky" viewBox="0 0 32 32" aria-hidden="true">
+        <defs><mask id="qn-moon-cut"><rect width="32" height="32" fill="#fff" /><circle cx="22" cy="10" r="11" fill="#000" /></mask></defs>
+        <circle cx="15" cy="17" r="13" fill="currentColor" mask="url(#qn-moon-cut)" />
+      </svg>
+    </header>
+    <div class="qn__body">
+      <p class="qn__who">{night.from}</p>
+      <p class="qn__msg qn__msg--held">{night.text}</p>
+      <p class="qn__held">{night.held}</p>
+    </div>
+    <ul class="qn__notes">
+      {night.notes.map((n, i) => (
+        <li><svg viewBox="0 0 24 24" aria-hidden="true">{nightIcons[i]?.map((d) => <path d={d} />)}</svg>{n}</li>
+      ))}
+    </ul>
+  </div>
+
+  <div class="qn__frame qn__frame--morning">
+    <header class="qn__head">
+      <span class="qn__kicker">{morning.kicker}</span>
+      <span class="qn__time">{morning.time}</span>
+      <svg class="qn__sky qn__sky--sun" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r="6.5" fill="currentColor" />
+        {Array.from({ length: 8 }, (_, i) => {
+          const a = (i * Math.PI) / 4, c = Math.cos(a), s = Math.sin(a);
+          return <line x1={(16 + c * 10).toFixed(2)} y1={(16 + s * 10).toFixed(2)} x2={(16 + c * 13.5).toFixed(2)} y2={(16 + s * 13.5).toFixed(2)} />;
+        })}
+      </svg>
+    </header>
+    <div class="qn__body qn__body--out">
+      <p class="qn__who">{morning.from}</p>
+      <p class="qn__msg qn__msg--out">{morning.text}</p>
+    </div>
+    <ul class="qn__notes">
+      {morning.notes.map((n, i) => (
+        <li><svg viewBox="0 0 24 24" aria-hidden="true">{morningIcons[i]?.map((d) => <path d={d} />)}</svg>{n}</li>
+      ))}
+    </ul>
+  </div>
+
+  <figcaption class="qn__setting">
+    <span class="qn__pill">
+      <span class="qn__pilllabel">{setting.label}</span>
+      <span class="qn__range">{setting.start} to {setting.end}</span>
+      <span class="qn__switch" aria-hidden="true"><span></span></span>
+    </span>
+    <span class="qn__note">{setting.note}</span>
+  </figcaption>
+</figure>
+
+<style>
+  .qn {
+    --night: #121a2b; --on-night: #e7ecf3; --night-muted: #8f9bb0;
+    margin: 0; color: var(--foreground);
+    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px var(--gap);
+  }
+  .qn__frame--night { grid-column: 2 / span 5; }
+  .qn__frame--morning { grid-column: 7 / span 5; }
+  .qn__setting { grid-column: 2 / span 10; }
+  @media (max-width: 1279px) {
+    .qn__frame--night { grid-column: 1 / span 6; }
+    .qn__frame--morning { grid-column: 7 / span 6; }
+    .qn__setting { grid-column: 1 / -1; }
+  }
+
+  .qn__frame {
+    position: relative; overflow: hidden; isolation: isolate;
+    display: grid; grid-template-rows: auto 1fr auto; gap: 28px;
+    min-height: 360px; padding: 26px 28px 24px; border-radius: 24px;
+  }
+  .qn__frame--night { background: var(--night); color: var(--on-night); }
+  .qn__frame--morning { background: var(--surface); box-shadow: 0 0 0 1px var(--border), 0 10px 28px -18px rgb(18 26 43 / 0.25); }
+
+  .qn__stars { position: absolute; inset: 0; z-index: -1; pointer-events: none; }
+  .qn__stars > span {
+    position: absolute; left: var(--x); top: var(--y); width: 2px; height: 2px; border-radius: 50%;
+    background: var(--on-night); opacity: 0.5;
+  }
+
+  .qn__head { display: grid; grid-template-columns: 1fr auto; align-items: end; row-gap: 2px; }
+  .qn__kicker { grid-column: 1; font-size: var(--t-xs); color: var(--c-muted); }
+  .qn__frame--night .qn__kicker { color: var(--night-muted); }
+  .qn__time {
+    grid-column: 1; font-family: var(--f-display); font-weight: 460; font-size: clamp(2.25rem, 1.6rem + 1.8vw, 3.25rem);
+    line-height: 1; letter-spacing: -0.04em; font-variant-numeric: tabular-nums;
+  }
+  .qn__sky { grid-column: 2; grid-row: 1 / span 2; align-self: start; width: 30px; height: 30px; color: #f4eedb; }
+  .qn__sky--sun { color: var(--c-signal); overflow: visible; }
+  .qn__sky--sun line { stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+
+  /* The messages. At night Mia's waits outside, dimmed; in the morning your bot tells you. */
+  .qn__body { display: grid; align-content: center; justify-items: start; gap: 8px; }
+  .qn__body--out { justify-items: end; }
+  .qn__who { padding: 0 4px; font-size: 0.75rem; font-weight: 520; }
+  .qn__frame--night .qn__who { color: var(--night-muted); }
+  .qn__msg { max-width: 30ch; padding: 11px 18px; font-size: 1rem; line-height: 22px; letter-spacing: -0.01em; }
+  .qn__msg--held {
+    border-radius: 20px 20px 20px 6px; color: rgb(231 236 243 / 0.72);
+    background: rgb(231 236 243 / 0.06); box-shadow: inset 0 0 0 1px rgb(231 236 243 / 0.16);
+  }
+  .qn__msg--out { border-radius: 20px 20px 6px 20px; background: var(--foreground); color: var(--surface); }
+  .qn__held {
+    display: inline-flex; align-items: center; gap: 7px; padding: 0 4px;
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 0.6875rem; color: var(--night-muted);
+  }
+  .qn__held::before { content: ''; width: 6px; height: 6px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--night-muted); }
+
+  .qn__notes { list-style: none; margin: 0; padding: 18px 0 0; display: grid; gap: 10px; border-top: 1px solid var(--border); font-size: var(--t-xs); }
+  .qn__frame--night .qn__notes { border-top-color: rgb(231 236 243 / 0.12); color: var(--on-night); }
+  .qn__notes li { display: flex; align-items: center; gap: 10px; }
+  .qn__notes svg { flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .qn__frame--night .qn__notes svg { color: var(--night-muted); }
+  .qn__frame--morning .qn__notes svg { color: var(--c-signal); }
+
+  /* The setting, as it reads on the dashboard. */
+  .qn__setting { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; padding-top: 8px; }
+  .qn__pill {
+    display: inline-flex; align-items: center; gap: 12px; padding: 8px 10px 8px 16px; border-radius: 999px;
+    background: var(--surface); box-shadow: 0 0 0 1px var(--border); font-size: var(--t-xs);
+  }
+  .qn__pilllabel { font-weight: 520; }
+  .qn__range { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 0.75rem; color: var(--c-muted); font-variant-numeric: tabular-nums; }
+  .qn__switch { width: 30px; height: 18px; padding: 2px; border-radius: 999px; background: var(--c-signal); display: flex; justify-content: flex-end; }
+  .qn__switch span { width: 14px; height: 14px; border-radius: 50%; background: var(--c-white); }
+  .qn__note { font-size: var(--t-xs); color: var(--c-muted); }
+
+  /* Coming into view: Mia's message arrives and settles to wait; then morning comes and your bot speaks. */
+  @media (prefers-reduced-motion: no-preference) {
+    .qn[data-armed] :is(.qn__msg--held, .qn__held, .qn__frame--night .qn__notes li, .qn__frame--morning, .qn__msg--out) { opacity: 0; }
+    .qn[data-armed] .qn__msg--held { translate: -12px 0; }
+    .qn[data-armed] .qn__msg--out { translate: 0 10px; }
+    .qn[data-in] :is(.qn__msg--held, .qn__held, .qn__frame--night .qn__notes li, .qn__frame--morning, .qn__msg--out) {
+      opacity: 1; translate: 0 0; transition: opacity 500ms var(--ease-settle), translate 600ms var(--ease-open);
+    }
+    .qn[data-in] .qn__msg--held { transition-delay: 150ms; }
+    .qn[data-in] .qn__held { transition-delay: 650ms; }
+    .qn[data-in] .qn__frame--night .qn__notes li:nth-child(1) { transition-delay: 900ms; }
+    .qn[data-in] .qn__frame--night .qn__notes li:nth-child(2) { transition-delay: 1050ms; }
+    .qn[data-in] .qn__frame--morning { transition-delay: 1500ms; transition-duration: 700ms; }
+    .qn[data-in] .qn__msg--out { transition-delay: 2000ms; }
+  }
+
+  @media (max-width: 899px) {
+    .qn__frame--night, .qn__frame--morning, .qn__setting { grid-column: 1 / -1; }
+    .qn__frame { min-height: 0; gap: 24px; padding: 22px 22px 20px; }
+  }
+</style>
+
+<script>
+  const start = () => {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    document.querySelectorAll<HTMLElement>('[data-qn]:not([data-armed])').forEach((el) => {
+      el.dataset.armed = '';
+      const io = new IntersectionObserver(([e]) => {
+        if (!e?.isIntersecting) return;
+        io.disconnect();
+        requestAnimationFrame(() => (el.dataset.in = ''));
+      }, { threshold: 0.35 });
+      io.observe(el);
+    });
+  };
+  document.addEventListener('astro:page-load', start);
+</script>

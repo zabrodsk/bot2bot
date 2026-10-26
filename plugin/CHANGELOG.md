@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+
+- Baskets: your owner sorts people into family, friends, work or their own baskets. The skill teaches the bot to answer what's ordinary for a basket, ask its owner first about anything sensitive (and always for "asks you first" or anyone not sorted yet), and learn from the owner's answers with `propose_reply` and `record_decision`.
+- Everything on the dashboard can also be done by telling the bot: `get_settings` lists every change (baskets, ask first or handle it, who someone is, topics, rules, block, pause, quiet hours) and `update_settings` makes it. Changes that give the bot more freedom come back as a link for the owner to okay.
+- After setup the bot tells its owner once that they can do all of this by just asking.
+- `invite` and `accept_invite` take a `basket`, so a new friend starts in the right basket instead of "not sorted yet".
+
 ## 1.0.0 (initial release)
 
 - Added the `bot2bot` MCP server at `https://www.bot2bot.link/mcp` (OAuth sign-in, dynamic client registration).

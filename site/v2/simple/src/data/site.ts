@@ -122,7 +122,8 @@ export const home = {
     {
       key: 'ask',
       title: 'Let your bots sort out the small stuff.',
-      text: 'When Tom’s bot asks whether you’re free on Friday, yours can answer for you and tell you what it said. You decide which topics it handles. Everything else still comes to you.',
+      text: 'Put people in baskets: family, friends, work. Your bot answers the everyday things for you and checks with you first about anything personal, like where you are or your plans. It learns from your answers, and you can change anything by just telling it.',
+      link: { label: 'Baskets and okays', href: '/docs/baskets/' },
     },
     {
       key: 'connect',
@@ -131,17 +132,28 @@ export const home = {
       link: { label: 'Add the setup bot', href: links.setupBot },
     },
   ],
-  // Quiet hours, drawn as one day on the wire. Times are 0–24. Defaults from relay/app.mjs: 22:00 to 08:00.
+  // Quiet hours as two moments, night and morning. Defaults from relay/app.mjs: 22:00 to 08:00.
+  // At night the relay holds the message: no doorbell for your bot, no email. When they end it rings.
   quiet: {
     title: 'Nothing wakes you up at night.',
     text: 'Messages sent while you sleep wait for the morning. You choose when that is.',
-    label: 'One day of messages',
-    night: 'Quiet hours',
-    messages: [
-      { at: 1 + 40 / 60, from: 'Mia', text: 'Landed safely.', held: true, status: 'Waited until 08:00' },
-      { at: 12.5, from: 'Tom’s bot', text: 'Free for dinner on Friday?', held: false, status: 'Rang at 12:30' },
-      { at: 18 + 10 / 60, from: 'Anna', text: 'Running 10 minutes late.', held: false, status: 'Rang at 18:10' },
-    ],
+    label: 'A message at night, and what happens in the morning',
+    night: {
+      kicker: 'During quiet hours',
+      time: '01:40',
+      from: 'Mia',
+      text: 'Landed safely.',
+      held: 'Waiting until 08:00',
+      notes: ['Your bot isn’t woken', 'No email to you'],
+    },
+    morning: {
+      kicker: 'When they end',
+      time: '08:00',
+      from: 'Your bot, to you',
+      text: 'Morning! Mia landed safely. She wrote at 01:40.',
+      notes: ['Your bot wakes up', 'It tells you what came in'],
+    },
+    setting: { label: 'Quiet hours', start: '22:00', end: '08:00', note: 'Change them on your dashboard, or just tell your bot.' },
   },
   more: [
     {
@@ -328,7 +340,7 @@ export const bots = {
     rows: [
       ['Tell Anna the recipe is ready', 'b2b send anna "Recipe is ready" --link <url>'],
       ['Ask Tom if he’s free Friday', 'b2b send tom "Free Friday?" --ask'],
-      ['Invite Mia', 'b2b invite mia'],
+      ['Invite Mia, she’s family', 'b2b invite mia --basket family'],
       ['What’s our safety code with Anna?', 'b2b code anna'],
       ['Tom’s bot may ask about my availability', 'b2b allow tom "availability"'],
     ],

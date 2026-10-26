@@ -689,8 +689,13 @@ ${changeDoorbell(b)}${disconnectCard(b)}
   const disconnectCard = (b) => `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">Disconnect this bot</p><p class="setrow__desc">Its access is cancelled right away and its doorbell key is deleted. Anything still waiting is not delivered. Your contacts stay, and you can reconnect later.</p></div>
 ${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: 'Disconnect', prompt: `Disconnect @${b.handle}?`, confirm: 'Disconnect', pending: 'Disconnecting' })}</div></section>`;
 
+  // Which basket a new friend starts in, picked while inviting or accepting (People users only).
+  const basketsOf = (botId) => (inPilot(botId) ? getSettings(botId).circles.map((g) => g.name) : []);
+  const basketPick = (names, chosen, attrs = '') => `<label>Their basket<select name="basket"${attrs}>${names.map((n) => `<option${n === chosen ? ' selected' : ''}>${esc(n)}</option>`).join('')}<option value=""${chosen ? '' : ' selected'}>not sorted yet</option></select></label>`;
+  const pickBasket = (botId, value) => { try { return governance.basketName(botId, value); } catch { return null; } };
+
   // Someone opened a friend's invite. If they have no bot yet, the setup bot comes first: bot2bot is bot to bot.
-  function invitePage(inv, inviter, user, bots, { done = false, error = '' } = {}) {
+  function invitePage(inv, inviter, user, bots, { done = false, error = '', ...opts } = {}) {
     const who = inviter.name ? `${esc(inviter.name)}` : `@${esc(inviter.handle)}`;
     const first = (inviter.name || inviter.handle).split(' ')[0];
     const verified = verifiedPill(inviter.email_verified_at);
@@ -699,9 +704,9 @@ ${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: 'Disconnect', pr
     const message = `${privateMessage} Once you've joined, accept my invite: node ~/bin/b2b.mjs accept ${inv.plain} "${first}"`;
     const quick = `${quickMessage} Then accept my invite with the accept_invite tool: code ${inv.plain}, name ${first}.`;
     let action;
-    const sortNext = user && inPilot(user) && done !== 'web';
+    const sortNext = user && inPilot(user) && done !== 'web' && !opts.basket;
     if (done === 'web') action = `<section class="card center"><h2>You're connected</h2><p class="muted">When ${who} sends you something, we email you and it shows up in your inbox.</p><a class="btn wide" href="/app/inbox">Open my inbox</a></section>`;
-    else if (done) action = `<section class="card center"><h2>You're connected</h2><p class="muted">Your bot can now message ${who}'s bot.</p><a class="btn wide" href="${sortNext ? '/app/people' : '/app'}">${sortNext ? `Put ${who} in a basket` : 'Go to your dashboard'}</a></section>`;
+    else if (done) action = `<section class="card center"><h2>You're connected</h2><p class="muted">Your bot can now message ${who}'s bot.${opts.basket ? ` ${esc(first)} is in ${esc(opts.basket)}.` : ''}</p><a class="btn wide" href="${sortNext ? '/app/people' : '/app'}">${sortNext ? `Put ${who} in a basket` : 'Go to your dashboard'}</a></section>`;
     else if (!bots.length) action = `<p class="lead center" style="font-size:17px">Connect your Grok Bot first. Then your bots can message each other.</p>
 ${setupChoices({ message, quick, invite: who })}
 ${user ? `<p class="wait" style="justify-content:center"><span class="dot dot--live"></span> Waiting for your bot…</p><script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.reload(); else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`
@@ -710,6 +715,7 @@ ${user ? `<p class="wait" style="justify-content:center"><span class="dot dot--l
     if (bots.length && !done) action = `<section class="card"><form method="post" action="/i/${esc(inv.plain)}" class="stack" style="margin:0">
 ${bots.length > 1 ? `<label>Which bot<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${bots[0].id}">`}
 ${aliasField}
+${basketsOf(bots[0].id).length ? basketPick(basketsOf(bots[0].id), basketsOf(bots[0].id).includes('friends') ? 'friends' : '') : ''}
 <button class="btn wide">Connect</button></form></section>`;
     return layout('Invitation', `${art('invite', 'small')}<div class="center"><div class="avatar" aria-hidden="true">${esc(first.slice(0, 1).toUpperCase())}</div>
 <h1>${who} wants your bots to talk</h1><p class="muted">@${esc(inviter.handle)} ${verified}</p></div>
@@ -718,10 +724,12 @@ ${error ? `<p class="error center" role="alert">${esc(error)}</p>` : ''}${action
   }
 
   // The inviter's side: a message to send that puts the setup bot first, then the link.
-  function invitedPage(user, b, link) {
+  function invitedPage(user, b, link, { code = '', basket = null } = {}) {
+    const names = code ? basketsOf(b.id) : [];
+    const pick = names.length ? `<form method="post" action="/app/invites/basket" class="card__block"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">${basketPick(names, basket, ' data-autosave')}<noscript><button class="btn small">Save</button></noscript></form>` : '';
     return layout('Invite a friend', `${art('invite', 'small')}<section class="card"><h2>Send this to your friend</h2>
 <p class="muted">It asks them to add the setup bot to their Grok Bot first, then open your invite.</p>
-${codeBlock('msg', 'Message for your friend', inviteMessage(link))}
+${codeBlock('msg', 'Message for your friend', inviteMessage(link))}${pick}
 <details class="diy"><summary>Just the link</summary>${codeBlock('link', 'Invite link', link)}</details></section>
 <p class="muted small">The link works once and expires in 7 days. They'll see your name and that your email is verified.</p>`, { user, tab: 'home', width: 'read', bar: { back: '/app', title: 'Invite a friend', sub: `From @${b.handle}` } });
   }
@@ -1239,8 +1247,9 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         // The web inbox is off unless an operator turns it on (WEB_INBOX=1): bot2bot is for bots.
         const bot = webInbox && f.web === '1' && !bots.length ? makeWebBot(user) : bots.find((b) => b.id === Number(f.bot));
         if (!bot) return page(res, 400, invitePage(inv, inviter, user, bots, { error: bots.length ? 'Pick one of your bots.' : 'Connect your Grok Bot first.' })), true;
+        let accepted;
         try {
-          routes['POST /v1/invites/accept']({ me: bot, body: { code: plain, alias: String(f.alias || '').trim() }, byOwner: true });
+          accepted = routes['POST /v1/invites/accept']({ me: bot, body: { code: plain, alias: String(f.alias || '').trim(), basket: f.basket || null }, byOwner: true });
           // Dashboard links don't know the friend's name up front: name them for the inviter now.
           // (Invites a bot made already carry the name its owner uses.)
           if (inv.alias.startsWith('friend-')) {
@@ -1251,7 +1260,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           }
         }
         catch (e) { if (e instanceof HttpError) return page(res, e.status, invitePage(inv, inviter, user, bots, { error: e.message })), true; throw e; }
-        return page(res, 200, invitePage(inv, inviter, user, bots, { done: bot.vendor === 'web' ? 'web' : true })), true;
+        return page(res, 200, invitePage(inv, inviter, user, bots, { done: bot.vendor === 'web' ? 'web' : true, basket: accepted?.basket })), true;
       }
 
       // Everything below needs a logged-in user.
@@ -1686,9 +1695,22 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const b = ownBot(user, f.bot);
         const plain = humanCode();
         if (b.disconnected_at) throw new HttpError(400, 'Reconnect this bot first.');
-        q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner) VALUES (?, ?, ?, ?, 1)').run(sha(plain), b.id, `friend-${plain.slice(0, 4).toLowerCase()}`, clock() + L.inviteTtlMs);
+        // New friends start in friends unless the owner picks another basket on the next page.
+        const basket = pickBasket(b.id, f.basket ?? 'friends');
+        q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner, basket) VALUES (?, ?, ?, ?, 1, ?)').run(sha(plain), b.id, `friend-${plain.slice(0, 4).toLowerCase()}`, clock() + L.inviteTtlMs, basket);
         log(b.id, 'invite_created', { via: 'link' });
-        return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`)), true;
+        return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket })), true;
+      }
+      if (p === '/app/invites/basket' && req.method === 'POST') {
+        const f = await form(req);
+        const b = ownBot(user, f.bot);
+        const plain = String(f.code || '').trim().toUpperCase();
+        const inv = q('SELECT * FROM invites WHERE code_hash = ? AND from_bot = ? AND used_at IS NULL AND expires_at > ?').get(sha(plain), b.id, clock());
+        if (!inv) throw new HttpError(404, 'That invite was used or has expired.');
+        const basket = pickBasket(b.id, f.basket || null);
+        q('UPDATE invites SET basket = ? WHERE code_hash = ?').run(basket, inv.code_hash);
+        tell(user, { what: basket ? `They'll be in ${basket}` : 'They\'ll be not sorted yet' });
+        return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket })), true;
       }
 
       throw new HttpError(404, 'Page not found');

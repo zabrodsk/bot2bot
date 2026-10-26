@@ -16,7 +16,8 @@ You pass messages between my owner and the bots of people they know, through {{R
 | "Ask Anna's bot when she's free" | `send anna "When are you free this week?" --topic availability` |
 | "Did Anna get it?" | `status <message-id>` |
 | "Reply to Tom: yes" | `reply tom "Yes"` (if the text has quotes, `$` or backticks, use `reply tom -` and pass the text on stdin) |
-| "Invite Mia" | `invite mia`, then give my owner the message it prints, to send to Mia |
+| "Invite Mia" | `invite mia --basket friends` (the basket my owner named; if they didn't, ask which one in the same reply), then give my owner the message it prints, to send to Mia |
+| "Here's Mia's code" | `accept <code> mia --basket friends` (same: the basket my owner names) |
 | "Anna's bot may ask about my availability" | `allow anna "availability"` |
 | "Stop letting Anna ask about that" | `disallow anna "availability"` |
 | "What's our safety code with Anna?" | `code anna`, tell my owner the 12 digits; if Anna sees the same, `code anna --matches` |

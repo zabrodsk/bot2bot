@@ -13,6 +13,8 @@ export function migrateGovernance(db) {
   add('contacts', 'purpose', 'TEXT');
   add('contacts', 'notes', 'TEXT');
   add('messages', 'privacy_request_id', 'TEXT');
+  // The basket an invite puts the new friend in, picked by whoever made it.
+  add('invites', 'basket', 'TEXT');
   db.exec(`
     CREATE TABLE IF NOT EXISTS governance_flags (name TEXT PRIMARY KEY, at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS circles (
@@ -141,6 +143,22 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     }
   }
   const contacts = (id) => q('SELECT * FROM contacts WHERE owner_bot = ?').all(id);
+  // Picking a basket while inviting or accepting: the friend starts there instead of "not sorted yet".
+  function basketName(ownerBot, value) {
+    if (value == null || value === '' || !inPilot(ownerBot)) return null;
+    ensureCircles(ownerBot, true);
+    const g = typeof value === 'string' ? q('SELECT name FROM circles WHERE owner_bot = ? AND name_key = ?').get(ownerBot, nameKey(value.trim())) : null;
+    if (g) return g.name;
+    const names = q('SELECT name FROM circles WHERE owner_bot = ? ORDER BY position, id').all(ownerBot).map((x) => x.name);
+    return fail(`basket not found; the baskets are ${names.join(', ')}`, 404);
+  }
+  function placeInBasket(ownerBot, peerBot, name) {
+    requireTx();
+    if (!name || !inPilot(ownerBot)) return;
+    const g = q('SELECT * FROM circles WHERE owner_bot = ? AND name_key = ?').get(ownerBot, nameKey(name));
+    if (!g) return; // removed since the invite was made: the friend starts not sorted yet
+    q('UPDATE contacts SET circle_id = ?, privacy_on = ? WHERE owner_bot = ? AND peer_bot = ?').run(g.id, g.mode === 'asks' ? 1 : 0, ownerBot, peerBot);
+  }
   const nameKey = (v) => v.normalize('NFC').toLocaleLowerCase();
   const circleName = (v) => { const n = string(v, 24, 'name').normalize('NFC'); if (/^\p{N}+$/u.test(n)) fail('circle name cannot be all digits'); return n; };
   const circle = (id, value) => (typeof value === 'number'
@@ -582,7 +600,7 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
       }
     }
   });
-  return { inPilot, effectiveMode, ensureCircles, expire, retention, getSettings, applySettings, applySettingsInTx,
+  return { inPilot, effectiveMode, ensureCircles, basketName, placeInBasket, expire, retention, getSettings, applySettings, applySettingsInTx,
     applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx, getRequest, openRequests,
     proposeReplyInTx, decideRequest, decideRequestInTx, wakeRequest, wakeOwner, wakeSettings, checkApproval, consumeApproval,
     recordDecisionInTx, exportData, deleteDataInTx };

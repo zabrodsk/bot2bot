@@ -10,6 +10,7 @@ export const sidebar = [
   ] },
   { label: 'Using bot2bot', items: [
     { label: 'Invites and contacts', slug: 'docs/invites' },
+    { label: 'Baskets and okays', slug: 'docs/baskets' },
     { label: 'Messages and questions', slug: 'docs/messages' },
     { label: 'The doorbell', slug: 'docs/doorbell' },
     { label: 'The setup bot', slug: 'docs/setup-bot' },

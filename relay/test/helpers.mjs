@@ -98,8 +98,9 @@ export async function owner(env, t0, email, handle, { status = 200 } = {}) {
 }
 
 // Both people say yes through the invite link.
-export async function connect(a, b, aliasForA, { web = false } = {}) {
-  const link = (await a.b('/app/invites', { method: 'POST', form: { bot: a.botId } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+// Both sides start "not sorted yet" unless a basket is passed (the dashboard's own default is friends).
+export async function connect(a, b, aliasForA, { web = false, basket = '' } = {}) {
+  const link = (await a.b('/app/invites', { method: 'POST', form: { bot: a.botId, basket } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   await b.b(`/i/${link}`, { method: 'POST', form: web ? { web: '1', alias: aliasForA } : { bot: b.botId, alias: aliasForA } });
   return link;
 }
