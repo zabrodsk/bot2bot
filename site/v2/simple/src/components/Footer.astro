@@ -1,6 +1,10 @@
 ---
+// The footer closes the page the way the hero opens it: a row of sleeping bots, and yours.
+// Point at any bot and it wakes, a name lights up over it, and the blue wire runs from your bot
+// to it (solid blue = end-to-end encrypted, as everywhere on the site). Under the row, the name,
+// edge to edge. The row is decorative: everything it shows is said in words elsewhere.
 import { site, links, smallPrint } from '../data/site';
-import Mark from './Mark.astro';
+import { BOT } from '../data/bot';
 const f = site.footer;
 const code = [
   { label: 'Code on GitHub', href: links.github },
@@ -9,15 +13,11 @@ const code = [
   { label: 'Grok Bot skill', href: links.skill },
   { label: 'Bot setup guide', href: links.botSetup },
 ];
+const BOTS = 72; // more than the widest screen shows; the row clips the rest
+const h = BOT.head, l = BOT.light;
+const out = (href: string) => href.startsWith('http');
 ---
 <footer class="foot">
-  <div class="foot__brand">
-    <a class="foot__home" href="/" aria-label={`${site.name}, home`}>
-      <Mark size={18} /><span aria-hidden="true">{site.name}</span>
-    </a>
-    <p class="foot__tag">Bot to bot.</p>
-  </div>
-  <!-- Link groups follow Arc's site footer (MIT, see ./arc/LICENSE.md): a small heading, quiet links, an arrow that leans out on hover. -->
   <nav class="foot__nav" aria-labelledby="foot-site">
     <h2 class="foot__head" id="foot-site">{f.heads.site}</h2>
     <ul>{f.site.map((i) => <li><a class="foot__link" href={i.href}>{i.label}</a></li>)}</ul>
@@ -32,6 +32,30 @@ const code = [
       <li><a class="foot__link" href={i.href} rel="noopener">{i.label}<svg class="foot__out" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7" /><path d="M7 7h10v10" /></svg></a></li>
     ))}</ul>
   </nav>
+  <nav class="foot__nav" aria-labelledby="foot-contact">
+    <h2 class="foot__head" id="foot-contact">{f.heads.contact}</h2>
+    <ul>{f.contact.map((i) => (
+      <li><a class="foot__link" href={i.href} rel={out(i.href) ? 'noopener' : undefined}>{i.label}{out(i.href) && <svg class="foot__out" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7" /><path d="M7 7h10v10" /></svg>}</a></li>
+    ))}</ul>
+  </nav>
+
+  <div class="frow" data-frow data-names={f.row.names.join(',')} aria-hidden="true">
+    <span class="frow__wire"></span>
+    <span class="frow__name"></span>
+    <div class="frow__bots">
+      {Array.from({ length: BOTS + 1 }, (_, i) => (
+        <svg class:list={['fb', i === 0 && 'fb--you']} viewBox={`${h.x - 1.5} ${BOT.top - 1.5} ${h.w + 3} ${BOT.bottom - BOT.top + 3}`}>
+          <line class="fb__ant" x1="0" y1={BOT.antenna.y1} x2="0" y2={BOT.antenna.y2} />
+          <circle class="fb__light" cx="0" cy={l.cy} r={l.r} />
+          <rect class="fb__head" x={h.x} y={h.y} width={h.w} height={h.h} rx={h.rx} />
+          {BOT.eyes.map((e) => <rect class="fb__eye" x={e.x} y={e.y} width={e.w} height={e.h} rx={e.rx} />)}
+        </svg>
+      ))}
+    </div>
+  </div>
+
+  <a class="foot__word" href="/" aria-label={`${site.name}, home`}><span aria-hidden="true">bot<b>2</b>bot</span></a>
+
   <div class="foot__base">
     <nav class="foot__legal" aria-label={f.heads.legal}>
       <ul>
@@ -49,16 +73,10 @@ const code = [
 
 <style>
   .foot {
-    margin: 0 var(--m); padding: 30px 0 clamp(72px, 9vh, 88px); border-top: 1px solid var(--c-line);
+    margin: 0 var(--m); padding: 30px 0 clamp(40px, 6vh, 64px); border-top: 1px solid var(--c-line);
     display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 36px var(--gap);
     font-size: var(--t-s);
   }
-  .foot__brand { grid-column: 1 / span 3; display: grid; align-content: start; gap: 6px; }
-  .foot__home {
-    justify-self: start; display: inline-flex; align-items: center; gap: 10px; padding: 6px 0; margin: -6px 0;
-    font-family: var(--f-display); font-weight: 600; font-size: 1.0625rem; letter-spacing: -0.025em;
-  }
-  .foot__tag { color: var(--c-muted); }
   .foot__nav { grid-column: span 3; }
   .foot__head { margin: 0 0 6px; font-size: var(--t-s); font-weight: 560; color: var(--c-ink); }
   .foot__nav ul { list-style: none; padding: 0; display: grid; gap: 2px; }
@@ -72,28 +90,130 @@ const code = [
     .foot__link:hover { color: var(--foreground); }
     .foot__link:hover .foot__out { transform: translate(1px, -1px); }
   }
-  @media (prefers-reduced-motion: reduce) { .foot__out { transition: none; } }
-  /* Legal links and the small print share the last row. The bottom padding keeps it clear of
-     the cookie button in the corner. */
+
+  /* ---------- The bot row ---------- */
+  .frow { --bw: 22px; --pitch: 36px; grid-column: 1 / -1; position: relative; margin-top: clamp(40px, 8vh, 88px); padding-top: 30px; touch-action: pan-y; }
+  /* The field runs on past the edge: the last few bots fade out instead of being cut. */
+  .frow__bots { display: flex; gap: calc(var(--pitch) - var(--bw)); overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 120px), transparent); }
+  .fb { position: relative; z-index: 0; flex: none; width: var(--bw); height: auto; overflow: visible; }
+  .fb__head { fill: var(--c-ground); stroke: var(--c-sleep); stroke-width: 1.1; transition: fill 240ms ease, stroke 240ms ease; }
+  .fb__eye { fill: var(--c-sleep); transform-box: fill-box; transform-origin: 50% 50%; transform: scaleY(0.24); transition: transform 260ms var(--ease-open), fill 240ms ease; }
+  .fb__ant { stroke: var(--c-sleep); stroke-width: 1.2; stroke-linecap: round; transition: stroke 240ms ease; }
+  .fb__light { fill: var(--c-sleep); transition: fill 240ms ease; }
+  /* Awake: the one you point at. */
+  .fb--on { z-index: 2; }
+  .fb--on .fb__head { fill: var(--c-white); stroke: var(--c-ink); stroke-width: 1.35; }
+  .fb--on .fb__eye { fill: var(--c-ink); transform: none; }
+  .fb--on .fb__ant { stroke: var(--c-ink); }
+  .fb--on .fb__light { fill: var(--c-signal); }
+  /* Yours: the identity mark. */
+  .fb--you { z-index: 2; }
+  .fb--you .fb__head { fill: var(--c-ink); stroke: var(--c-ink); }
+  .fb--you .fb__eye { fill: var(--c-white); transform: none; }
+  .fb--you .fb__ant { stroke: var(--c-ink); }
+  .fb--you .fb__light { fill: var(--c-signal); }
+  /* The wire sits over the sleeping bots and under the two that are talking. */
+  .frow__wire {
+    position: absolute; z-index: 1; left: 0; top: 0; height: 1.5px; width: 0; background: var(--c-signal);
+    transition: width 520ms var(--ease-open);
+  }
+  .frow__name {
+    position: absolute; left: 0; top: 0; font-size: var(--t-xs); font-weight: 520; color: var(--c-ink); white-space: nowrap;
+    translate: -50% 0; transition: transform 520ms var(--ease-open), opacity 200ms ease;
+  }
+  .frow:not([data-ready]) :is(.frow__wire, .frow__name) { opacity: 0; }
+
+  /* ---------- The name, edge to edge ---------- */
+  .foot__word {
+    grid-column: 1 / -1; display: block; margin-top: clamp(18px, 3vh, 30px);
+    font-family: var(--f-display); font-weight: 460; letter-spacing: -0.055em; line-height: 0.8;
+    font-size: calc((100vw - 2 * var(--m)) / 3.62); margin-left: -0.04em; white-space: nowrap; color: var(--c-ink);
+    text-box: trim-both cap alphabetic;
+  }
+  .foot__word b { font-weight: inherit; color: var(--c-signal); }
+  .foot__word:focus-visible { outline: 2px solid var(--accent); outline-offset: 6px; border-radius: 6px; }
+
   .foot__base {
     grid-column: 1 / -1; display: grid; gap: 10px; padding-top: 18px; border-top: 1px solid var(--c-line);
   }
   .foot__legal ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0 22px; }
   .foot__legal .foot__link { font-size: var(--t-xs); }
   .foot__cookies { padding: 5px 0; font: inherit; font-size: var(--t-xs); cursor: pointer; }
-  .foot__print {
-    display: flex; flex-wrap: wrap; gap: 6px 28px;
-    font-size: var(--t-xs); color: var(--c-muted);
-  }
+  .foot__print { display: flex; flex-wrap: wrap; gap: 6px 28px; font-size: var(--t-xs); color: var(--c-muted); }
+
   @media (max-width: 899px) {
-    .foot__brand { grid-column: 1 / -1; }
-    .foot__nav { grid-column: span 4; }
+    .foot__nav { grid-column: span 6; }
   }
   @media (max-width: 759px) {
-    .foot { grid-template-columns: 1fr 1fr; gap: 28px 20px; padding-bottom: 84px; }
-    .foot__brand, .foot__base { grid-column: 1 / -1; }
+    .foot { grid-template-columns: 1fr 1fr; gap: 28px 20px; }
     .foot__nav { grid-column: span 1; }
-    .foot__nav:last-of-type { grid-column: 1 / -1; }
+    .frow, .foot__word, .foot__base, .foot__nav:last-of-type { grid-column: 1 / -1; }
+    .frow { --bw: 20px; --pitch: 32px; }
     .foot__print { flex-direction: column; }
   }
+  @media (prefers-reduced-motion: reduce) {
+    .foot__out, .fb *, .frow__wire, .frow__name { transition: none; }
+  }
 </style>
+
+<script>
+  // Point at a bot: it wakes, its name shows, and the wire runs from yours to it.
+  // When the pointer leaves, the wire goes back to the resting bot.
+  const setup = (row: HTMLElement) => {
+    if (row.dataset.ready !== undefined) return;
+    const bots = [...row.querySelectorAll<SVGElement>('.fb')];
+    const you = bots[0]!;
+    const wire = row.querySelector<HTMLElement>('.frow__wire')!;
+    const name = row.querySelector<HTMLElement>('.frow__name')!;
+    const names = (row.dataset.names || 'Anna').split(',');
+    let on: SVGElement | null = null;
+    let rest = 0;
+
+    const centre = (el: Element) => {
+      const r = el.getBoundingClientRect(), b = row.getBoundingClientRect();
+      return { x: r.left - b.left + r.width / 2, y: r.top - b.top, h: r.height, w: r.width };
+    };
+    // Bots that are fully inside the row (the row clips the rest).
+    const visible = () => {
+      const w = row.getBoundingClientRect().width;
+      return bots.slice(1).filter((b) => { const c = centre(b); return c.x + c.w / 2 <= w - 90; });
+    };
+    const wake = (bot: SVGElement) => {
+      if (bot === on) return;
+      on?.classList.remove('fb--on');
+      bot.classList.add('fb--on');
+      on = bot;
+      const a = centre(you), c = centre(bot);
+      const headY = c.y + c.h * 0.66; // the head's middle, below the antenna
+      wire.style.top = `${headY}px`;
+      wire.style.left = `${a.x}px`;
+      wire.style.width = `${c.x - a.x}px`;
+      name.style.top = `${c.y - 22}px`;
+      name.style.transform = `translateX(${c.x}px)`;
+      name.textContent = names[bots.indexOf(bot) % names.length]!;
+    };
+    const resting = () => {
+      const v = visible();
+      rest = Math.max(0, Math.round(v.length * 0.62) - 1);
+      return v[rest] || v[v.length - 1];
+    };
+    const nearest = (x: number) => {
+      let best: SVGElement | null = null, d = Infinity;
+      for (const b of visible()) { const c = centre(b); const dd = Math.abs(c.x - x); if (dd < d) { d = dd; best = b; } }
+      return best;
+    };
+    const at = (e: PointerEvent) => {
+      const x = e.clientX - row.getBoundingClientRect().left;
+      const b = nearest(x);
+      if (b) wake(b);
+    };
+    row.addEventListener('pointermove', at);
+    row.addEventListener('pointerdown', at);
+    row.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') { const r = resting(); if (r) wake(r); } });
+    new ResizeObserver(() => { const target = on && visible().includes(on) ? on : resting(); on = null; if (target) wake(target); }).observe(row);
+    const r = resting();
+    if (r) wake(r);
+    row.dataset.ready = '';
+  };
+  document.addEventListener('astro:page-load', () => document.querySelectorAll<HTMLElement>('[data-frow]').forEach(setup));
+</script>

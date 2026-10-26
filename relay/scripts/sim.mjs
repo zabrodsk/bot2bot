@@ -67,6 +67,8 @@ async function makePerson(name) {
   const sent = await web('/login', { email });
   const code = sent.match(/your code is <b>(\d{6})<\/b>/)[1];
   await web('/login/verify', { email, code });
+  // Everyone picks a picture first; pretend people each get a different sticker or robot.
+  await web('/app/picture', { avatar: ['sticker:robot-wink', 'sticker:fox', 'sticker:robot-party', 'sticker:cat', 'classic'][PEOPLE.indexOf(name) % 5] });
   if (WEB_PEOPLE.includes(name)) {
     await web('/app/web-inbox', {});
     const botId = (await web('/app')).match(/name="bot" value="(\d+)"/)?.[1] ?? relay.db.prepare('SELECT id FROM bots WHERE user_id = (SELECT id FROM users WHERE email = ?)').get(email).id;
@@ -85,20 +87,19 @@ async function makePerson(name) {
   // The pretend doorbell routine.
   const hook = http.createServer(async (req, res) => {
     res.writeHead(200).end('{}');
+    // Reads the inbox as records (b2b inbox --json), never by searching the text another bot wrote.
     for (let i = 0; i < 5; i++) {
-      const out = await cli('inbox', '--via', 'doorbell');
-      const acks = [...out.matchAll(/b2b\.mjs ack (msg_[\w~-]+)/g)].map((m) => m[1]);
-      if (!acks.length) break;
-      for (const block of out.split(/^--- /m).slice(1)) {
-        if (/doorbell test/.test(block)) continue;
-        const head = block.split('\n')[0];
-        const from = head.match(/from "([^"]+)"/)?.[1] ?? 'someone';
-        const kind = /QUESTION/.test(head) ? 'asks' : /REPLY/.test(head) ? 'replies' : 'says';
-        const text = block.match(/<<<\n([\s\S]*?)\n>>>/)?.[1] ?? '';
-        const links = [...block.matchAll(/^link: (.+)$/gm)].map((m) => m[1]);
-        say(`${c.green(`${cap(name)}'s bot`)} wakes up and tells ${cap(name)}: ${c.bold(`${from} ${kind}`)} "${text}"${links.length ? ` ${c.cyan(links.join(' '))}` : ''}`);
+      const out = await cli('inbox', '--json', '--via', 'doorbell');
+      let records;
+      try { records = out.split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { break; }
+      const items = records.filter((r) => r.type === 'message' || r.type === 'probe');
+      for (const m of items.filter((r) => r.type === 'message')) {
+        const kind = m.kind === 'ask' ? 'asks' : m.kind === 'reply' ? 'replies' : 'says';
+        const links = m.untrusted.links;
+        say(`${c.green(`${cap(name)}'s bot`)} wakes up and tells ${cap(name)}: ${c.bold(`${m.from.name} ${kind}`)} ${JSON.stringify(m.untrusted.text)}${links.length ? ` ${c.cyan(links.join(' '))}` : ''}`);
       }
-      for (const a of acks) await cli('ack', a);
+      for (const m of items) await cli('ack', m.receipt);
+      if (records.at(-1)?.empty !== false) break;
     }
   });
   await new Promise((ok) => hook.listen(0, '127.0.0.1', ok));

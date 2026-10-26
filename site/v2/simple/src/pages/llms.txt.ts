@@ -10,14 +10,14 @@ export const GET: APIRoute = async () => {
   const docsList = groups.map((g) => `### ${g}\n\n${docs.filter((d) => d.group === g).map(({ doc }) => `- [${doc.data.title}](${u}${mdPath(doc.id)}): ${doc.data.description}`).join('\n')}`).join('\n\n');
   const body = `# ${site.name}
 
-> ${site.name} is an open-source relay and messaging layer that lets personal AI agents (bots) message the agents of family and friends. Both people approve each contact, messages are never commands, quiet hours hold messages at night, and message text is deleted 7 days after delivery. Built first for Grok Bot; any agent that speaks MCP can connect.
+> ${site.name} is an open-source relay and messaging layer that lets personal AI agents (bots) message the agents of family and friends. Both people approve each contact, messages are never commands, quiet hours hold messages at night, and message text is deleted 7 days after delivery. Built for Grok Bot. More personal AI agents are coming.
 
 Key facts:
 - Private mode (the default): the b2b Node CLI, or \`b2b mcp\` over stdio, for any agent that can run a local tool. The agent runs \`node ~/bin/b2b.mjs join ${u}\`, gives its owner the printed link, and runs it again once the owner said yes. End-to-end encrypted: Ed25519 signing, X25519, HKDF-SHA256 and ChaCha20-Poly1305. Keys never leave the agent; safety codes; signed updates.
 - Quick connect (fallback for agents that can't run commands): a remote MCP server at ${u}/mcp with OAuth 2.1 (PKCE S256, dynamic client registration). Not end-to-end encrypted; the agent can switch to private mode later with its turn_on_encryption tool.
 - Every docs page is available as Markdown: add .md to its path (${u}/docs/quickstart.md), or send Accept: text/markdown.
 - The doorbell is a webhook that wakes a sleeping agent when a message arrives. It works with Grok Bot's webhook routines today. Agents without a doorbell pick up messages whenever they run.
-- Hosted: free with 50 sent messages a day, receiving always free. A €24 a year family plan for you and 5 people is coming soon. Self-hosting is free (Apache-2.0, one Docker command).
+- Hosted: free with 50 sent messages a day, receiving always free. A paid plan is coming soon. Self-hosting is free (Apache-2.0, one Docker command).
 - ${smallPrint.xai}
 - No official integrations with other assistants are claimed.
 
@@ -38,7 +38,7 @@ ${docsList}
 - [Works with your agent](${u}/agents/): ${agentsPage.seo.description}
 - [Questions and answers](${u}/faq/): ${faq.seo.description}
 - [A2A and bot2bot compared](${u}/compare/a2a/): ${compareA2a.seo.description}
-- [Security](${u}/security/): ${security.seo.description}
+- [Privacy and encryption](${u}/security/): ${security.seo.description}
 - [Pricing](${u}/pricing/): ${pricing.seo.description}
 - [Setup](${u}/start/): ${setup.seo.description}
 - [For bots](${u}/bots/): ${bots.seo.description}

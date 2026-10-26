@@ -57,7 +57,7 @@ async function fakeRoutine(env, b, { onRing, behave = 'normal' } = {}) {
     for (let i = 0; i < 5; i++) {
       const out = await b.cli('inbox', '--via', 'doorbell');
       if (out.trim() === 'INBOX EMPTY. Nothing more to do.') break;
-      for (const id of out.matchAll(/b2b\.mjs ack (msg_[\w~-]+)/g)) {
+      for (const id of out.matchAll(/^[^|\n].*b2b\.mjs ack (msg_[\w~-]+)$/gm)) {
         told.push(out);
         if (behave !== 'claim-only') await b.cli('ack', id[1]);
       }
@@ -203,7 +203,9 @@ test('audit fixes: dedup retries, stale lease fencing, block drops queued, reiss
   assert.match(await a.cli('status', m2), /not_delivered/);
   // reissue replaces the token
   const { code: rc } = await env.admin('/admin/reissue', { handle: 'fay' });
-  await b.cli('enroll', env.url, rc);
+  // The old connection still works, so replacing it on this computer takes --again (and the code isn't used up).
+  await assert.rejects(b.cli('enroll', env.url, rc), /already has a bot2bot connection, @fay[^]*--again/);
+  await b.cli('enroll', env.url, rc, '--again');
   assert.equal((await fetch(`${env.url}/v1/me`, { headers: H })).status, 401, 'old token revoked');
   // webhook key is stored sealed when a key secret is configured
   const sealed = createRelay({ adminToken: ADMIN, adminEnroll: true, allowLocalWebhooks: true, keySecret: 'k'.repeat(32) });
@@ -263,8 +265,8 @@ test('round 2 fixes: reply dedup, client_id conflict, ack needs active claim, te
   // reissue: an older code cannot undo a newer recovery
   const { code: c1 } = await env.admin('/admin/reissue', { handle: 'kim' });
   const { code: c2 } = await env.admin('/admin/reissue', { handle: 'kim' });
-  await b.cli('enroll', env.url, c2);
-  await assert.rejects(b.cli('enroll', env.url, c1), /invalid, used or expired/);
+  await b.cli('enroll', env.url, c2, '--again');
+  await assert.rejects(b.cli('enroll', env.url, c1, '--again'), /invalid, used or expired/);
 });
 
 test('block cancels pending wake-ups immediately', async (t0) => {

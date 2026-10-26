@@ -56,6 +56,7 @@ async function owner(env, t0, email, handle) {
   const b = browser(env.url);
   await b('/login', { method: 'POST', form: { email } });
   await b('/login/verify', { method: 'POST', form: { email, code: env.mail.at(-1).text.match(/code is (\d{6})/)[1] } });
+  await b('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
   await b('/app/bots', { method: 'POST', form: { handle } });
   const home = mkdtempSync(join(tmpdir(), `b2b-bill-${handle}-`));
   const cli = async (...a) => (await run(process.execPath, [CLI, ...a], { env: { ...process.env, B2B_HOME: home } })).stdout;
@@ -67,7 +68,7 @@ async function owner(env, t0, email, handle) {
     try {
       for (let i = 0; i < 4; i++) {
         const out = await cli('inbox', '--via', 'doorbell');
-        const acks = [...out.matchAll(/b2b\.mjs ack (msg_[\w~-]+)/g)];
+        const acks = [...out.matchAll(/^[^|\n].*b2b\.mjs ack (msg_[\w~-]+)$/gm)];
         if (!acks.length) break;
         for (const m of acks) await cli('ack', m[1]);
       }
@@ -114,6 +115,7 @@ test('hosted: free messages each month, receiving stays free, signed payment, ho
   const granB = browser(env.url);
   await granB('/login', { method: 'POST', form: { email: 'gran@example.com' } });
   await granB('/login/verify', { method: 'POST', form: { email: 'gran@example.com', code: env.mail.at(-1).text.match(/code is (\d{6})/)[1] } });
+  await granB('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
   await invite({ b: granB });
   const page = (await granB('/app/inbox')).text;
   const [bot, peer] = [page.match(/name="bot" value="(\d+)"/)[1], page.match(/name="peer" value="(\d+)"/)[1]];

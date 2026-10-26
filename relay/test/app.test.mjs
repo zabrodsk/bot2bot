@@ -47,6 +47,7 @@ async function signup(env, email) {
   const code = env.mail.at(-1).text.match(/code is (\d{6})/)[1];
   const r = await b('/login/verify', { method: 'POST', form: { email, code } });
   assert.equal(r.status, 303);
+  await b('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
   return b;
 }
 
@@ -79,7 +80,7 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
       for (let i = 0; i < 4 && !done; i++) {
         const out = await benBot.cli('inbox', '--via', 'doorbell');
         if (out.trim() === 'INBOX EMPTY. Nothing more to do.') break;
-        for (const m of out.matchAll(/b2b\.mjs ack (msg_[\w~-]+)/g)) await benBot.cli('ack', m[1]);
+        for (const m of out.matchAll(/^[^|\n].*b2b\.mjs ack (msg_[\w~-]+)$/gm)) await benBot.cli('ack', m[1]);
       }
     } catch { /* relay closed after the test */ }
   });
@@ -119,7 +120,7 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   // Bot to bot is end-to-end encrypted: the relay (and so the dashboard) never has the text.
   const dash = (await ben('/app/activity')).text;
   assert.doesNotMatch(dash, /Recipe for tonight/);
-  assert.match(dash, /End-to-end encrypted. Only the bots can read it./);
+  assert.match(dash, /End-to-end encrypted messages show no text here. Only the bots can read them./);
   const seen = env.relay.db.prepare("SELECT status, text, links, sealed FROM messages WHERE kind = 'note'").get();
   assert.equal(seen.status, 'delivered');
   assert.equal(seen.text, ''); assert.equal(seen.links, '[]');
@@ -145,6 +146,8 @@ test('login codes: wrong code, attempts limit, rate limit, magic link', async (t
   assert.match((await c(linkPath)).text, /Continue to/);                 // GET only shows a button
   assert.match((await browser(env2.url)(linkPath)).text, /same browser/);  // another browser can't use it
   assert.equal((await c('/login/link', { method: 'POST', form: { t: linkPath.split('t=')[1] } })).status, 303);
+  assert.match((await c('/app')).location, /^\/app\/picture/, 'new people pick a picture first');
+  await c('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
   assert.match((await c('/app')).text, /Connect your Grok Bot/);
 });
 

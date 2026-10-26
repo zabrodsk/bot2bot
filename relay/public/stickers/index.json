@@ -1,0 +1,152 @@
+[
+  {
+    "key": "robot-wink",
+    "name": "winky",
+    "kind": "robot"
+  },
+  {
+    "key": "robot-sleepy",
+    "name": "moon nap",
+    "kind": "robot"
+  },
+  {
+    "key": "robot-party",
+    "name": "party pal",
+    "kind": "robot"
+  },
+  {
+    "key": "robot-heart-eyes",
+    "name": "sweetheart",
+    "kind": "robot"
+  },
+  {
+    "key": "robot-wave",
+    "name": "hello mint",
+    "kind": "robot"
+  },
+  {
+    "key": "robot-peekaboo",
+    "name": "peekaboo",
+    "kind": "robot"
+  },
+  {
+    "key": "robot-thinking",
+    "name": "ponder",
+    "kind": "robot"
+  },
+  {
+    "key": "robot-star-struck",
+    "name": "starry",
+    "kind": "robot"
+  },
+  {
+    "key": "robot-shy",
+    "name": "blush",
+    "kind": "robot"
+  },
+  {
+    "key": "robot-grumpy",
+    "name": "little grump",
+    "kind": "robot"
+  },
+  {
+    "key": "square-lilac",
+    "name": "lilac square",
+    "kind": "bot"
+  },
+  {
+    "key": "blob-mint",
+    "name": "mint jelly",
+    "kind": "bot"
+  },
+  {
+    "key": "triangle-blue",
+    "name": "blue triangle",
+    "kind": "bot"
+  },
+  {
+    "key": "cloud-sleepy",
+    "name": "cloud nap",
+    "kind": "bot"
+  },
+  {
+    "key": "pill-coral",
+    "name": "coral pop",
+    "kind": "bot"
+  },
+  {
+    "key": "star",
+    "name": "little star",
+    "kind": "bot"
+  },
+  {
+    "key": "capsule",
+    "name": "peaches",
+    "kind": "bot"
+  },
+  {
+    "key": "twins",
+    "name": "jelly twins",
+    "kind": "bot"
+  },
+  {
+    "key": "cat",
+    "name": "lilac kitty",
+    "kind": "animal"
+  },
+  {
+    "key": "dog",
+    "name": "biscuit",
+    "kind": "animal"
+  },
+  {
+    "key": "fox",
+    "name": "peach fox",
+    "kind": "animal"
+  },
+  {
+    "key": "bunny",
+    "name": "pink bunny",
+    "kind": "animal"
+  },
+  {
+    "key": "bear",
+    "name": "honey bear",
+    "kind": "animal"
+  },
+  {
+    "key": "panda",
+    "name": "bamboo buddy",
+    "kind": "animal"
+  },
+  {
+    "key": "frog",
+    "name": "mint frog",
+    "kind": "animal"
+  },
+  {
+    "key": "penguin",
+    "name": "puddle",
+    "kind": "animal"
+  },
+  {
+    "key": "heart",
+    "name": "lovebug",
+    "kind": "symbol"
+  },
+  {
+    "key": "sun",
+    "name": "sunbeam",
+    "kind": "symbol"
+  },
+  {
+    "key": "sprout",
+    "name": "little sprout",
+    "kind": "symbol"
+  },
+  {
+    "key": "ghost",
+    "name": "little boo",
+    "kind": "symbol"
+  }
+]

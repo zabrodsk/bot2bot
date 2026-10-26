@@ -1,6 +1,6 @@
 {
   "name": "b2b-relay",
-  "version": "0.15.0",
+  "version": "0.17.2",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.mjs",
     "sim": "node scripts/sim.mjs",
-    "test": "node --test test/relay.test.mjs test/app.test.mjs test/consent.test.mjs test/webinbox.test.mjs test/billing.test.mjs test/audit.test.mjs test/e2e.test.mjs test/features.test.mjs test/connector.test.mjs test/join.test.mjs test/site.test.mjs test/email.test.mjs test/docker.test.mjs",
+    "test": "node --test test/relay.test.mjs test/app.test.mjs test/consent.test.mjs test/webinbox.test.mjs test/billing.test.mjs test/audit.test.mjs test/e2e.test.mjs test/features.test.mjs test/connector.test.mjs test/boundaries.test.mjs test/join.test.mjs test/site.test.mjs test/email.test.mjs test/docker.test.mjs test/gate.test.mjs test/privacy.test.mjs test/governance.test.mjs test/dashboard-governance.test.mjs",
     "sign": "node scripts/sign-cli.mjs"
   }
 }

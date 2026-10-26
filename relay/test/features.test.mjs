@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setup, owner, connect, login, cliHome, waitFor, msgId } from './helpers.mjs';
+import { setup, owner, connect, login, browser, cliHome, waitFor, msgId } from './helpers.mjs';
 
 test('ask their bot: only topics the owner allowed, answered by the bot, removable on the dashboard', async (t0) => {
   const env = await setup(t0);
@@ -17,8 +17,8 @@ test('ask their bot: only topics the owner allowed, answered by the bot, removab
   // Anna's owner tells her bot that Ben's bot may ask about her availability.
   assert.match(await anna.cli('allow', 'Ben', 'availability'), /may now ask you directly about: availability/);
   assert.match((await ben.cli('contacts')), /Anna/);
-  assert.match((await anna.b('/app')).text, /Their bot may ask yours about[^]*availability/);
-  assert.match((await ben.b('/app')).text, /Your bot may ask theirs about[^]*availability/);
+  assert.match((await anna.b('/app')).text, /Ben can ask about[^]*availability/);
+  assert.match((await ben.b('/app')).text, /You can ask Anna about[^]*availability/);
 
   // Read Anna's inbox by hand, so the test sees what her bot is told.
   db.prepare('UPDATE bots SET webhook_url = NULL WHERE id = ?').run(annaId);
@@ -28,18 +28,18 @@ test('ask their bot: only topics the owner allowed, answered by the bot, removab
   assert.doesNotMatch(sealed, /availability/, 'the topic travels sealed');
   const inbox = await anna.cli('inbox');
   assert.match(inbox, /You may answer this yourself[^]*reply .* --auto/);
-  assert.match(inbox, /"wishlist", which your owner hasn't let Ben ask you about/);
+  assert.match(inbox, /"wishlist", which your owner hasn't let "Ben" ask you about/);
   assert.ok(wishlist);
 
   // Her bot answers on its own; Ben's bot sees it was the bot.
   await anna.cli('reply', q1, 'Thursday evening works', '--auto');
-  assert.match(await ben.cli('status', q1), /answered by their bot on its own\): Thursday evening works/);
+  assert.match(await ben.cli('status', q1), /their bot says it answered on its own\), written by their bot[^]*\n\| Thursday evening works/);
 
   // Removing it on the dashboard wins, even though the bot still remembers it.
   const peer = (await anna.b('/app')).text.match(/name="peer" value="(\d+)"/)[1];
   await anna.b('/app/contacts/disallow', { method: 'POST', form: { bot: anna.botId, peer, topic: 'availability' } });
   await ben.cli('send', 'Anna', 'And next week?', '--topic', 'availability');
-  assert.match(await anna.cli('inbox'), /"availability", which your owner hasn't let Ben ask you about/);
+  assert.match(await anna.cli('inbox'), /"availability", which your owner hasn't let "Ben" ask you about/);
   assert.doesNotMatch((await anna.b('/app')).text, /Their bot may ask yours about/);
 });
 
@@ -96,8 +96,54 @@ test('the skill, the backup check, the setup checklist and the bot tiles', async
   await ben.b(`/app/bots/${ben.botId}/backup`, { method: 'POST', form: { every: '4' } });
   const page = (await ben.b(`/app/bots/${ben.botId}`)).text;
   assert.match(page, /also run it every 4 hours/);
-  assert.match(page, /class="tile"[^]*Encryption[^]*<b>On<\/b>/);
+  assert.match(page, /<dt>Encryption<\/dt><dd><b>On<\/b>/);
   assert.match(page, /Backup check[^]*Every 4 h/);
   await ben.cli('backup-check', 'off');
-  assert.match((await ben.b(`/app/bots/${ben.botId}`)).text, /Backup check<\/span><b>Off<\/b>/);
+  assert.match((await ben.b(`/app/bots/${ben.botId}`)).text, /<dt>Backup check<\/dt><dd><b>Off<\/b>/);
+});
+
+test('profile pictures: picked before the dashboard, shown to friends who said yes, never to strangers', async (t0) => {
+  const env = await setup(t0);
+  const ben = await owner(env, t0, 'ben@example.com', 'ben');
+  const anna = await owner(env, t0, 'anna@example.com', 'anna');
+  const zoe = await owner(env, t0, 'zoe@example.com', 'zoe');
+  await connect(ben, anna, 'Ben');
+
+  // Someone new picks a picture first, then lands where they were going.
+  const b = browser(env.url);
+  await b('/login', { method: 'POST', form: { email: 'new@example.com' } });
+  await b('/login/verify', { method: 'POST', form: { email: 'new@example.com', code: env.mail.at(-1).text.match(/code is (\d{6})/)[1] } });
+  assert.equal((await b('/app/activity')).location, '/app/picture?next=%2Fapp%2Factivity');
+  const picker = (await b('/app/picture?next=/app/activity')).text;
+  assert.match(picker, /Pick your picture/);
+  assert.equal((picker.match(/name="avatar" value="[a-z]+"/g) || []).length, 12, 'the twelve robots, next to any stickers');
+  assert.equal((await b('/app/picture', { method: 'POST', form: { next: '/app/activity' } })).status, 400, 'a picture is required');
+  assert.equal((await b('/app/picture', { method: 'POST', form: { avatar: 'nope', next: '/app/activity' } })).status, 400);
+  assert.equal((await b('/app/picture', { method: 'POST', form: { avatar: 'visor', next: '//evil.example' } })).location, '/app');
+  assert.equal((await b('/app/activity')).status, 200);
+  assert.match((await b('/app')).text, /src="\/avatars\/visor\.svg"/);
+  const robot = await fetch(env.url + '/avatars/visor.svg');
+  assert.equal(robot.headers.get('content-type'), 'image/svg+xml');
+  assert.doesNotMatch(await robot.text(), /<script/);
+
+  // Anna uploads her own photo. Not a JPEG: refused.
+  const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(200, 7), Buffer.from([0xff, 0xd9])]);
+  assert.equal((await anna.b('/app/picture', { method: 'POST', form: { photo: 'data:image/jpeg;base64,PHN2Zz4=' } })).status, 400);
+  assert.equal((await anna.b('/app/picture', { method: 'POST', form: { photo: `data:image/jpeg;base64,${jpg.toString('base64')}`, next: '/app/account' } })).location, '/app/account');
+  const src = (await anna.b('/app/account')).text.match(/<img src="(\/app\/photo\/\d+\?v=\d+)"/)[1];
+
+  // Ben is her friend, so his overview shows it and he can load it. Zoe isn't, and signed-out visitors aren't.
+  assert.ok((await ben.b('/app')).text.includes(`<img src="${src}"`));
+  assert.notEqual((await fetch(env.url + src, { redirect: 'manual' })).status, 200);
+  assert.equal((await ben.b(src)).status, 200);
+  assert.equal((await zoe.b(src)).status, 404);
+  const [, bot, peer] = (await anna.b('/app')).text.match(/name="bot" value="(\d+)"><input type="hidden" name="peer" value="(\d+)"/);
+  await anna.b('/app/contacts/block', { method: 'POST', form: { bot, peer } });
+  assert.equal((await ben.b(src)).status, 404, 'blocked: the photo is hidden too');
+  assert.ok(!(await ben.b('/app')).text.includes(`<img src="${src}"`));
+
+  // Switching to a robot drops the photo.
+  await anna.b('/app/picture', { method: 'POST', form: { avatar: 'mint' } });
+  assert.equal((await anna.b(src)).status, 404);
+  assert.match((await anna.b('/app/account')).text, /src="\/avatars\/mint\.svg"/);
 });

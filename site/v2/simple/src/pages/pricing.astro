@@ -37,14 +37,14 @@ import { softwareApp } from '../data/schema';
 <style>
   .plans {
     margin: clamp(64px, 11vh, 120px) var(--m) 0;
-    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--gap);
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap); max-width: 1040px;
   }
   .plan {
     display: grid; grid-template-rows: auto auto auto 1fr auto; gap: 10px;
     padding-top: 26px; border-top: 1px solid var(--c-line);
   }
-  /* The plan you can use today carries the ink rule; the others are asleep. */
-  .plan--self { border-top: 2px solid var(--c-ink); padding-top: 25px; }
+  /* The hosted plan is where most people start: it carries the ink rule. */
+  .plan:first-child { border-top: 2px solid var(--c-ink); padding-top: 25px; }
   .plan__fig { height: 46px; display: flex; align-items: flex-start; }
   .plan__name { font-size: var(--t-s); font-weight: 560; }
   .plan__price {

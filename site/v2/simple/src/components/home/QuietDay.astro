@@ -1,0 +1,293 @@
+---
+// One day on the wire, noon to noon, so the night sits in one piece in the middle. Quiet hours are
+// the dark block, with a moon and stars. A message that arrives at night sleeps on the wire until
+// morning, then rings with the sun.
+// Wide screens lay the day out left to right; narrow ones top to bottom. When it scrolls into view
+// a clock runs through the day once: the wire draws, messages ring as it passes them, and the whole
+// section goes dark while it's night. Without JS or with reduced motion, everything is simply shown.
+interface Message { at: number; from: string; text: string; held: boolean; status: string }
+interface Props { label: string; night: string; messages: Message[]; start?: number; end?: number; origin?: number }
+const { label, night, messages, start = 22, end = 8, origin = 12 } = Astro.props;
+
+// Hour of day to position along the day, 0..1, starting at `origin`.
+const p = (h: number) => (((h - origin) % 24) + 24) % 24 / 24;
+const f = (n: number) => n.toFixed(4);
+const hhmm = (h: number) => `${String(Math.floor(h) % 24).padStart(2, '0')}:${String(Math.round((h % 1) * 60)).padStart(2, '0')}`;
+const na = p(start), nb = p(end);
+const inNight = (k: number) => k > na && k < nb;
+
+const items = messages
+  .map((m) => ({ ...m, dot: p(m.at), card: m.held ? nb : p(m.at) }))
+  .sort((a, b) => a.card - b.card);
+const held = items.filter((m) => m.held);
+
+// Evenly spaced: a mark every hour, a label every six.
+const marks = Array.from({ length: 25 }, (_, i) => ({ k: i / 24, major: i % 6 === 0 }));
+const labels = [0, 6, 12, 18, 24].map((i) => ({ k: i / 24, text: hhmm(origin + i) }));
+
+// Stars, scattered the same way on every build. x and y are percentages of the night block.
+let seed = 7;
+const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
+const stars = Array.from({ length: 22 }, (_, i) => {
+  let x = 0, y = 0;
+  do { x = 4 + rand() * 92; y = 6 + rand() * 58; } while ((x < 34 && y < 18) || (x > 76 && y < 30));
+  return { x: x.toFixed(1), y: y.toFixed(1), size: i < 6 ? 7 + Math.round(rand() * 5) : 2, sparkle: i < 6, d: (rand() * 4).toFixed(2), r: (rand() * 0.9).toFixed(2) };
+});
+---
+<figure class="qd" data-quiet data-na={f(na)} data-nb={f(nb)} data-origin={origin} aria-label={label}>
+  <div class="qd__day">
+    <div class="qd__track">
+      <div class="qd__night" style={`--a:${f(na)};--b:${f(nb)}`} aria-hidden="true">
+        <span class="qd__nightlabel">{night} <time>{hhmm(start)} to {hhmm(end)}</time></span>
+        <svg class="qd__moon" viewBox="0 0 32 32">
+          <defs><mask id="qd-moon-cut"><rect width="32" height="32" fill="#fff" /><circle cx="22" cy="10" r="11" fill="#000" /></mask></defs>
+          <circle cx="15" cy="17" r="13" fill="currentColor" mask="url(#qd-moon-cut)" />
+        </svg>
+        {stars.map((s) => s.sparkle ? (
+          <svg class="qd__star qd__star--big" viewBox="0 0 10 10" style={`--x:${s.x}%;--y:${s.y}%;--s:${s.size}px;--d:${s.d}s;--r:${s.r}s`}>
+            <path d="M5 0C5.4 3.6 6.4 4.6 10 5 6.4 5.4 5.4 6.4 5 10 4.6 6.4 3.6 5.4 0 5 3.6 4.6 4.6 3.6 5 0Z" fill="currentColor" />
+          </svg>
+        ) : (
+          <span class="qd__star" style={`--x:${s.x}%;--y:${s.y}%;--s:${s.size}px;--d:${s.d}s;--r:${s.r}s`}></span>
+        ))}
+      </div>
+
+      <span class="qd__marks" aria-hidden="true">
+        {marks.map((m) => <span class:list={['qd__mark', m.major && 'qd__mark--major', inNight(m.k) && 'is-night']} style={`--t:${f(m.k)}`}></span>)}
+      </span>
+      <span class="qd__labels" aria-hidden="true">
+        {labels.map((l) => <span class:list={['qd__label', inNight(l.k) && 'is-night']} style={`--t:${f(l.k)}`}>{l.text}</span>)}
+      </span>
+
+      <span class="qd__line" aria-hidden="true">
+        <span class="qd__wire" style={`--a:0;--b:${f(na)}`}></span>
+        <span class="qd__wire qd__wire--night" style={`--a:${f(na)};--b:${f(nb)}`}></span>
+        <span class="qd__wire" style={`--a:${f(nb)};--b:1`}></span>
+        {held.map((m) => <span class="qd__wait" style={`--a:${f(m.dot)};--b:${f(nb)}`}></span>)}
+      </span>
+
+      {items.map((m) => <span class="qd__stem" data-t={f(m.card)} style={`--t:${f(m.card)}`} aria-hidden="true"></span>)}
+      {items.map((m) => (
+        <span class:list={['qd__dot', m.held && 'qd__dot--held']} data-t={f(m.dot)} style={`--t:${f(m.dot)}`} aria-hidden="true"></span>
+      ))}
+      {held.map((m) => (
+        <span class="qd__zz" data-t={f(m.dot)} style={`--t:${f(m.dot)}`} aria-hidden="true"><span>z</span><span>z</span><span>z</span></span>
+      ))}
+      <svg class="qd__sun" data-t={f(nb)} style={`--t:${f(nb)}`} viewBox="0 0 28 28" aria-hidden="true">
+        <circle cx="14" cy="14" r="6" fill="currentColor" />
+        {Array.from({ length: 8 }, (_, i) => {
+          const a = (i * Math.PI) / 4, c = Math.cos(a), s = Math.sin(a);
+          return <line x1={f(14 + c * 9)} y1={f(14 + s * 9)} x2={f(14 + c * 12)} y2={f(14 + s * 12)} />;
+        })}
+      </svg>
+
+      <span class="qd__now" aria-hidden="true"><span class="qd__clock">{hhmm(origin)}</span></span>
+
+      <ol class="qd__msgs">
+        {items.map((m) => (
+          <li class:list={['qd__card', m.held && 'qd__card--held']} data-t={f(m.card)} style={`--t:${f(m.card)};--lim:${m.card < na ? f(na) : 2}`}>
+            <span class="qd__from">{m.from} <time class="qd__at">{hhmm(m.at)}</time></span>
+            <span class="qd__text">{m.text}</span>
+            <span class="qd__status">{m.status}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </div>
+</figure>
+
+<style>
+  /* --k is the clock, 0..1 through the day. Without JS it stays at 1: the whole day, shown. */
+  .qd {
+    --night: #121a2b; --on-night: #e7ecf3; --night-muted: #8f9bb0; --night-line: rgb(231 236 243 / 0.2);
+    --bg: var(--c-ground); --muted: var(--c-muted); --mark: var(--c-sleep);
+    --wire: 1.5px; --wy: 64px; --stem: 34px; --cw: 224px;
+    margin: 0; color: var(--foreground);
+  }
+  .qd[data-dark] { --bg: var(--night); --muted: var(--night-muted); --mark: var(--night-line); }
+  .qd__day { position: relative; height: 344px; }
+  .qd__track { position: absolute; inset: 0 24px; }
+  .qd__track > *, .qd__night > *, .qd__marks > *, .qd__labels > *, .qd__line > *, .qd__msgs > *, .qd__now > * { position: absolute; }
+
+  /* The night: one dark block, full height, with a moon and stars. */
+  .qd__night {
+    left: calc(var(--a) * 100%); width: calc((var(--b) - var(--a)) * 100%); top: 0; bottom: 0;
+    border-radius: 22px; background: var(--night); color: var(--on-night);
+  }
+  .qd__nightlabel { left: 22px; top: 20px; font-size: var(--t-xs); font-weight: 520; display: flex; gap: 10px; align-items: baseline; }
+  .qd__nightlabel time { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 0.6875rem; font-weight: 450; color: var(--night-muted); }
+  .qd__moon { right: 26px; top: 22px; width: 30px; height: 30px; color: #f4eedb; }
+  .qd__star {
+    left: var(--x); top: var(--y); width: var(--s); height: var(--s); margin: calc(var(--s) / -2);
+    border-radius: 50%; background: var(--on-night); color: var(--on-night); opacity: 0.55;
+  }
+  .qd__star--big { background: none; opacity: 0.9; }
+
+  /* The ruler: a mark every hour, a label every six. Everything sits on one baseline grid. */
+  .qd__marks, .qd__labels, .qd__line, .qd__msgs { inset: 0; }
+  .qd__marks, .qd__labels, .qd__line { pointer-events: none; }
+  .qd__mark { left: calc(var(--t) * 100%); bottom: calc(var(--wy) - 12px); width: 1px; height: 5px; margin-left: -0.5px; background: var(--mark); }
+  .qd__mark--major { height: 9px; bottom: calc(var(--wy) - 16px); }
+  .qd__mark.is-night { background: var(--night-line); }
+  .qd__label {
+    left: calc(var(--t) * 100%); bottom: 18px; translate: -50% 0;
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; font-size: 0.6875rem; color: var(--muted);
+  }
+  .qd__label.is-night { color: var(--night-muted); }
+
+  /* The wire: blue by day, asleep at night. A held message waits on it in light grey. */
+  .qd__wire { left: calc(var(--a) * 100%); width: calc((var(--b) - var(--a)) * 100%); bottom: var(--wy); height: var(--wire); margin-bottom: calc(var(--wire) / -2); background: var(--c-signal); }
+  .qd__wire--night { background: var(--night-line); }
+  .qd__wait {
+    left: calc(var(--a) * 100%); width: calc((var(--b) - var(--a)) * 100%); bottom: var(--wy); height: var(--wire); margin-bottom: calc(var(--wire) / -2);
+    background: rgb(195 202 213 / 0.7); transform-origin: 0 50%;
+  }
+
+  .qd__stem { left: calc(var(--t) * 100%); bottom: var(--wy); width: 1px; height: var(--stem); margin-left: -0.5px; background: var(--c-line); }
+  .qd[data-dark] .qd__stem { background: var(--night-line); }
+  .qd__dot {
+    left: calc(var(--t) * 100%); bottom: var(--wy); width: 11px; height: 11px; margin: 0 0 -5.5px -5.5px;
+    border-radius: 50%; background: var(--c-signal); box-shadow: 0 0 0 4px var(--bg);
+  }
+  /* Rings once when it arrives. */
+  .qd__dot::after { content: ''; position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 1.5px var(--c-signal); opacity: 0; }
+  .qd__dot--held { background: var(--night); box-shadow: inset 0 0 0 1.5px var(--on-night), 0 0 0 4px var(--night); }
+  .qd__dot--held::after { content: none; }
+
+  .qd__zz { left: calc(var(--t) * 100%); bottom: calc(var(--wy) + 12px); width: 40px; height: 52px; color: var(--on-night); font-family: var(--f-display); font-weight: 500; }
+  .qd__zz span { position: absolute; left: 6px; bottom: 0; font-size: 11px; line-height: 1; opacity: 0.8; }
+  .qd__zz span:nth-child(2) { left: 14px; bottom: 15px; font-size: 14px; }
+  .qd__zz span:nth-child(3) { left: 24px; bottom: 32px; font-size: 18px; }
+
+  .qd__sun { left: calc(var(--t) * 100%); bottom: var(--wy); width: 28px; height: 28px; margin: 0 0 -14px -14px; color: var(--c-signal); overflow: visible; }
+  .qd__sun line { stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+  .qd__sun circle { stroke: var(--c-ground); stroke-width: 3; paint-order: stroke; }
+
+  .qd__now { left: calc(var(--k, 0) * 100%); top: 0; bottom: calc(var(--wy) - 16px); width: 1px; margin-left: -0.5px; background: var(--c-ink); opacity: 0; transition: opacity 400ms; }
+  .qd[data-dark] .qd__now { background: var(--on-night); }
+  .qd__clock {
+    top: 12px; left: 0; translate: -50% 0; padding: 3px 7px; border-radius: 6px;
+    background: var(--c-ink); color: var(--c-white);
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; font-size: 0.6875rem;
+  }
+  .qd[data-dark] .qd__clock { background: var(--on-night); color: var(--night); }
+
+  /* Cards stand on their stems. A card slides left if it would run into the night or off the end. */
+  .qd__msgs { list-style: none; margin: 0; padding: 0; }
+  .qd__card {
+    left: clamp(0px, min(calc(var(--t) * 100% - 14px), calc(var(--lim) * 100% - var(--cw) - 16px)), calc(100% - var(--cw))); bottom: calc(var(--wy) + var(--stem)); width: var(--cw);
+    display: grid; gap: 2px; padding: 11px 14px 12px; border-radius: 14px;
+    background: var(--surface); box-shadow: 0 0 0 1px var(--border), 0 6px 16px -10px rgb(18 26 43 / 0.25);
+  }
+  .qd__from { font-size: 0.75rem; font-weight: 540; display: flex; justify-content: space-between; gap: 8px; }
+  .qd__at, .qd__status { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  .qd__at { font-size: 0.6875rem; font-weight: 450; color: var(--c-muted); }
+  .qd__text { font-size: 0.9375rem; line-height: 1.3; letter-spacing: -0.01em; white-space: nowrap; }
+  .qd__status { margin-top: 4px; font-size: 0.6875rem; color: var(--c-signal); }
+  .qd__card--held .qd__status { color: var(--c-muted); }
+
+  /* The run through the day. Armed only when JS runs and motion is allowed. */
+  .qd[data-armed] .qd__line { clip-path: inset(-4px calc((1 - var(--k, 1)) * 100%) -4px 0); }
+  .qd[data-armed] .qd__wait { transform: scaleX(clamp(0, (var(--k, 1) - var(--a)) / (var(--b) - var(--a)), 1)); }
+  .qd[data-armed]:not([data-done]) .qd__now { opacity: 1; }
+  .qd[data-armed] .qd__night { opacity: 0; transition: opacity 900ms var(--ease-standard); }
+  .qd[data-armed] .qd__night.is-on { opacity: 1; }
+  .qd[data-armed] :is(.qd__moon, .qd__star, .qd__nightlabel) { opacity: 0; transition: opacity 700ms var(--ease-standard), translate 1400ms var(--ease-standard); }
+  .qd[data-armed] .qd__moon { translate: 0 14px; }
+  .qd[data-armed] .qd__night.is-on .qd__moon { opacity: 1; translate: 0 0; transition-delay: 200ms; }
+  .qd[data-armed] .qd__night.is-on .qd__nightlabel { opacity: 1; }
+  .qd[data-armed] .qd__night.is-on .qd__star { opacity: 0.55; transition-delay: calc(var(--r) * 1s + 150ms); }
+  .qd[data-armed] .qd__night.is-on .qd__star--big { opacity: 0.9; }
+  .qd[data-armed] [data-t] { opacity: 0; }
+  .qd[data-armed] [data-t][data-on] { opacity: 1; }
+  .qd[data-armed] .qd__dot[data-on], .qd[data-armed] .qd__sun[data-on] { animation: qd-pop 520ms var(--ease-spring) both; }
+  .qd[data-armed] .qd__dot[data-on]::after { animation: qd-ring 1100ms var(--ease-standard) 120ms both; }
+  .qd[data-armed] .qd__sun[data-on] line { animation: qd-rays 900ms var(--ease-standard) both; transform-origin: 14px 14px; }
+  .qd[data-armed] .qd__stem[data-on] { animation: qd-stem 320ms var(--ease-standard) both; }
+  .qd[data-armed] .qd__card[data-on] { animation: qd-card 520ms var(--ease-standard) 160ms both; }
+  .qd[data-armed] .qd__zz[data-on] { transition: opacity 400ms 300ms; }
+  @keyframes qd-pop { from { opacity: 0; scale: 0.2; } to { opacity: 1; scale: 1; } }
+  @keyframes qd-ring { 0% { opacity: 0.7; scale: 1; } 100% { opacity: 0; scale: 3.4; } }
+  @keyframes qd-rays { from { rotate: -60deg; opacity: 0; } to { rotate: 0deg; opacity: 1; } }
+  @keyframes qd-stem { from { scale: 1 0; transform-origin: 50% 100%; } to { scale: 1 1; transform-origin: 50% 100%; } }
+  @keyframes qd-card { from { opacity: 0; translate: 0 10px; } to { opacity: 1; translate: 0 0; } }
+
+  /* Ambient: the stars twinkle and the held message sleeps. */
+  @media (prefers-reduced-motion: no-preference) {
+    .qd__star { animation: qd-twinkle 3.6s ease-in-out var(--d) infinite; }
+    .qd__zz span { animation: qd-zz 3s ease-in-out infinite; }
+    .qd__zz span:nth-child(2) { animation-delay: 0.5s; }
+    .qd__zz span:nth-child(3) { animation-delay: 1s; }
+    .qd__moon { animation: qd-float 7s ease-in-out infinite; }
+  }
+  @keyframes qd-twinkle { 0%, 100% { scale: 1; filter: none; } 50% { scale: 0.55; filter: opacity(0.35); } }
+  @keyframes qd-zz { 0%, 100% { translate: 0 0; filter: opacity(1); } 50% { translate: 3px -4px; filter: opacity(0.35); } }
+  @keyframes qd-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+
+  /* Narrow: the day runs down the page. The night is a dark band across; cards sit right of the wire. */
+  @media (max-width: 1279px) {
+    .qd { --wx: 64px; --stem: 30px; --cw: min(300px, calc(100% - 104px)); }
+    .qd__day { height: 720px; }
+    .qd__track { inset: 28px 0; }
+    .qd__night { left: -8px; right: -8px; width: auto; top: calc(var(--a) * 100%); height: calc((var(--b) - var(--a)) * 100%); bottom: auto; border-radius: 20px; }
+    .qd__nightlabel { left: calc(var(--wx) + 42px); top: 16px; }
+    .qd__moon { right: 22px; top: 18px; }
+    .qd__mark { left: calc(var(--wx) - 12px); top: calc(var(--t) * 100%); bottom: auto; width: 5px; height: 1px; margin: -0.5px 0 0; }
+    .qd__mark--major { left: calc(var(--wx) - 16px); width: 9px; height: 1px; }
+    .qd__label { left: 0; bottom: auto; top: calc(var(--t) * 100%); translate: 0 -50%; }
+    .qd__wire, .qd__wait { left: var(--wx); bottom: auto; top: calc(var(--a) * 100%); width: var(--wire); height: calc((var(--b) - var(--a)) * 100%); margin: 0 0 0 calc(var(--wire) / -2); }
+    .qd__wait { transform-origin: 50% 0; }
+    .qd__stem { left: var(--wx); bottom: auto; top: calc(var(--t) * 100%); width: var(--stem); height: 1px; margin: -0.5px 0 0; }
+    .qd__dot, .qd__sun, .qd__zz { left: var(--wx); bottom: auto; top: calc(var(--t) * 100%); }
+    .qd__dot { margin: -5.5px 0 0 -5.5px; }
+    .qd__sun { margin: -14px 0 0 -14px; }
+    .qd__zz { margin: -58px 0 0 8px; }
+    .qd__now { left: calc(var(--wx) - 24px); right: 0; top: calc(var(--k, 0) * 100%); bottom: auto; width: auto; height: 1px; margin: -0.5px 0 0; }
+    .qd__clock { top: 0; left: auto; right: 0; translate: 0 -50%; }
+    .qd__card { left: calc(var(--wx) + var(--stem)); bottom: auto; top: calc(var(--t) * 100%); translate: 0 -18px; }
+    .qd[data-armed] .qd__line { clip-path: inset(0 -4px calc((1 - var(--k, 1)) * 100%) -4px); }
+    .qd[data-armed] .qd__wait { transform: scaleY(clamp(0, (var(--k, 1) - var(--a)) / (var(--b) - var(--a)), 1)); }
+    @keyframes qd-stem { from { scale: 0 1; transform-origin: 0 50%; } to { scale: 1 1; transform-origin: 0 50%; } }
+    @keyframes qd-card { from { opacity: 0; translate: 10px -18px; } to { opacity: 1; translate: 0 -18px; } }
+  }
+</style>
+
+<script>
+  // Runs the clock through the day once. Each piece with data-t switches on as the clock passes it;
+  // the figure is marked dark while it's night, which the section uses to go dark with it.
+  const DURATION = 7200;
+  const play = (el: HTMLElement) => {
+    const na = Number(el.dataset.na), nb = Number(el.dataset.nb), origin = Number(el.dataset.origin);
+    const items = [...el.querySelectorAll<HTMLElement | SVGElement>('[data-t]')];
+    const night = el.querySelector('.qd__night');
+    const clock = el.querySelector('.qd__clock');
+    let t0 = 0;
+    const step = (ts: number) => {
+      t0 ||= ts;
+      const k = Math.min(1, (ts - t0) / DURATION);
+      el.style.setProperty('--k', k.toFixed(4));
+      for (const it of items) if (!it.hasAttribute('data-on') && k >= Number(it.dataset.t)) it.setAttribute('data-on', '');
+      if (k >= na) night?.classList.add('is-on');
+      el.toggleAttribute('data-dark', k >= na && k < nb);
+      const m = Math.round((origin * 60 + k * 1440) / 10) * 10 % 1440;
+      if (clock) clock.textContent = `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+      if (k < 1) requestAnimationFrame(step);
+      else el.dataset.done = '';
+    };
+    requestAnimationFrame(step);
+  };
+  const start = () => {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    document.querySelectorAll<HTMLElement>('[data-quiet]:not([data-armed])').forEach((el) => {
+      el.dataset.armed = '';
+      el.style.setProperty('--k', '0');
+      const io = new IntersectionObserver(([e]) => {
+        if (!e?.isIntersecting) return;
+        io.disconnect();
+        play(el);
+      }, { threshold: 0.5 });
+      io.observe(el);
+    });
+  };
+  document.addEventListener('astro:page-load', start);
+</script>

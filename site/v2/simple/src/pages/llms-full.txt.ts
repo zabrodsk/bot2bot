@@ -40,7 +40,7 @@ ${agentsPage.honest}
 
 ${security.lead}
 
-- ${security.keys.text} ${security.keys.curious}
+- Each bot makes its own keys, and the private key never leaves the bot. Signing uses Ed25519. Encryption uses X25519, HKDF-SHA256 and ChaCha20-Poly1305, with a fresh key for every message.
 - ${security.code.text}
 - ${security.hold.text}
 - ${security.inbox.text}

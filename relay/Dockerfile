@@ -1,6 +1,6 @@
 FROM node:26-slim
 WORKDIR /app
-COPY package.json server.mjs app.mjs connector.mjs email.mjs SETUP-FOR-BOTS.md README.md ./
+COPY package.json server.mjs app.mjs connector.mjs governance.mjs email.mjs SETUP-FOR-BOTS.md README.md ./
 COPY cli ./cli
 COPY skill ./skill
 COPY setup-bot ./setup-bot

@@ -1,0 +1,90 @@
+---
+// The one-tap connect, as it really looks: your bot's chat message with the link, then the
+// "Connect your bot" page from relay/app.mjs (linkPage), cut down to its title, text, name and button.
+// It's an example: the button only flips the card to the "connected" state.
+interface Props {
+  chatFrom: string; chat: string; url: string; title: string; body: string; name: string; handle: string;
+  yes: string; done: string; doneBody: string; reset: string;
+}
+const p = Astro.props;
+---
+<div class="cd" data-connect>
+  <p class="cd__who">{p.chatFrom}</p>
+  <p class="cd__msg">{p.chat} <span class="cd__url">{p.url}</span></p>
+  <div class="cd__card" role="group" aria-label={`Example: ${p.title}`}>
+    <div class="cd__step" data-step="ask">
+      <p class="cd__title">{p.title}</p>
+      <p class="cd__body">{p.body}</p>
+      <p class="cd__field"><span>{p.name}</span><span class="cd__input">{p.handle}</span></p>
+      <button type="button" class="cd__yes" data-yes>{p.yes}</button>
+    </div>
+    <div class="cd__step" data-step="done" hidden>
+      <p class="cd__title cd__title--done">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="9" fill="currentColor" /><path d="M5.2 9.3l2.4 2.4 5-5.2" fill="none" stroke="var(--surface)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        {p.done}
+      </p>
+      <p class="cd__body">{p.doneBody}</p>
+      <button type="button" class="cd__reset" data-reset>{p.reset}</button>
+    </div>
+  </div>
+  <p class="sr-only" aria-live="polite" data-said></p>
+</div>
+
+<style>
+  .cd { display: grid; gap: 8px; justify-items: start; max-width: 360px; color: var(--foreground); }
+  .cd__who { padding-left: 4px; font-size: 0.75rem; font-weight: 520; }
+  .cd__msg {
+    padding: 11px 18px; border-radius: 20px 20px 20px 6px; background: var(--surface); box-shadow: 0 0 0 1px var(--border);
+    font-size: 1rem; line-height: 22px; letter-spacing: -0.01em;
+  }
+  .cd__url { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  .cd__card {
+    width: 100%; margin-top: 10px; padding: 18px 18px 16px; border-radius: var(--radius-panel);
+    background: var(--surface); box-shadow: 0 0 0 1px var(--border), 0 12px 28px -18px rgb(26 34 48 / 0.28);
+  }
+  .cd__step { display: grid; gap: 10px; }
+  .cd__step[hidden] { display: none; }
+  .cd__step:not([hidden]) { animation: cd-in 380ms var(--ease-standard) both; }
+  .cd__title { font-family: var(--f-display); font-weight: 480; font-size: 1.25rem; letter-spacing: -0.03em; line-height: 1.1; }
+  .cd__title--done { display: flex; align-items: center; gap: 8px; }
+  .cd__title--done svg { color: var(--success); flex: none; }
+  .cd__body { font-size: 0.875rem; line-height: 1.45; color: var(--text-secondary); }
+  .cd__field { display: grid; gap: 4px; font-size: 0.75rem; font-weight: 520; color: var(--text-secondary); }
+  .cd__input {
+    display: block; padding: 8px 12px; border-radius: 10px; box-shadow: inset 0 0 0 1px var(--border);
+    font-size: 0.9375rem; font-weight: 450; color: var(--foreground);
+  }
+  .cd__yes {
+    margin-top: 4px; height: 44px; border: 0; border-radius: var(--radius-control); cursor: pointer;
+    background: var(--foreground); color: var(--surface); font: inherit; font-size: 0.9375rem; font-weight: 520;
+    transition: background-color 160ms ease, scale 160ms var(--ease-standard);
+  }
+  .cd__yes:hover { background: var(--c-ink-2); }
+  .cd__yes:active { scale: 0.98; }
+  .cd__reset {
+    justify-self: start; padding: 2px 0; border: 0; background: none; cursor: pointer; font: inherit; font-size: 0.8125rem;
+    color: var(--text-secondary); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px;
+  }
+  .cd__yes:focus-visible, .cd__reset:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+  @keyframes cd-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .cd__step:not([hidden]) { animation: none; } }
+</style>
+
+<script>
+  const setup = (root: HTMLElement) => {
+    if (root.dataset.ready) return;
+    root.dataset.ready = '';
+    const ask = root.querySelector<HTMLElement>('[data-step="ask"]')!;
+    const done = root.querySelector<HTMLElement>('[data-step="done"]')!;
+    const said = root.querySelector<HTMLElement>('[data-said]')!;
+    const show = (yes: boolean) => {
+      ask.hidden = yes;
+      done.hidden = !yes;
+      said.textContent = yes ? done.querySelector('.cd__title')!.textContent!.trim() : '';
+      root.querySelector<HTMLButtonElement>(yes ? '[data-reset]' : '[data-yes]')!.focus({ preventScroll: true });
+    };
+    root.querySelector('[data-yes]')!.addEventListener('click', () => show(true));
+    root.querySelector('[data-reset]')!.addEventListener('click', () => show(false));
+  };
+  document.addEventListener('astro:page-load', () => document.querySelectorAll<HTMLElement>('[data-connect]').forEach(setup));
+</script>

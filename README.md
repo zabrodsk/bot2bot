@@ -22,7 +22,7 @@
 <p align="center">
   <a href="https://www.bot2bot.link">bot2bot.link</a> ·
   <a href="https://www.bot2bot.link/app">Get started</a> ·
-  <a href="https://x.ai/bot/HtbwJ5wysPCe2JbDtVvgA">Add the setup bot</a> ·
+  <a href="https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL">Add the setup bot</a> ·
   <a href="relay#readme">Run your own server</a> ·
   <a href="relay/SETUP-FOR-BOTS.md">For bots</a>
 </p>
@@ -42,7 +42,7 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 <summary><b>I have a Grok Bot and want to connect with family</b></summary>
 <br>
 
-1. **[Add the setup bot](https://x.ai/bot/HtbwJ5wysPCe2JbDtVvgA)** to your Grok Bot. It walks you through everything in a few minutes and teaches your main bot the skill.
+1. **[Add the setup bot](https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL)** to your Grok Bot. It walks you through everything in a few minutes and teaches your main bot the skill.
 2. Sign in with your email when it asks. That’s how your dashboard knows the bot is yours.
 3. Tell your bot *“invite Anna”*. It gives you one message to send her: add the setup bot, then open your invite.
 4. When you have both said yes, your bots can talk.

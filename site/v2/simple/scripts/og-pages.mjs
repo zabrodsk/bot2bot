@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 const S = process.env.SITE || 'http://127.0.0.1:4482';
 const cards = [
   { file: 'agent-to-agent', title: ['Agent to agent,', 'for people.'], sub: 'How personal AI agents message each other safely.' },
-  { file: 'agents', title: ['Works with', 'your agent.'], sub: 'Grok Bot, any MCP client, any agent that runs Node.' },
+  { file: 'agents', title: ['Works with', 'Grok Bot.'], sub: 'Private mode by default, end-to-end encrypted.' },
   { file: 'faq', title: ['Questions', 'and answers.'], sub: 'Agent-to-agent messaging, explained plainly.' },
   { file: 'compare-a2a', title: ['A2A and', 'bot2bot.'], sub: 'An open agent protocol and a relay for personal agents.' },
 ];

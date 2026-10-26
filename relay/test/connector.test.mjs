@@ -5,34 +5,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { setup, owner, login, waitFor, msgId, listen, cliHome, sleep } from './helpers.mjs';
+import { setup, owner, login, waitFor, msgId, listen, cliHome, sleep, connectApp, REDIRECT } from './helpers.mjs';
 import { TOOLS, ENCRYPTION_MESSAGE } from '../connector.mjs';
-
-const REDIRECT = 'https://grok.example/oauth/callback';
-
-// The OAuth dance a connected app does: register, send the person to sign in and approve, swap the code.
-async function connectApp(env, b, handle) {
-  const meta = await (await fetch(`${env.url}/.well-known/oauth-authorization-server`)).json();
-  const reg = await (await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Grok Bot', redirect_uris: [REDIRECT] }) })).json();
-  const verifier = randomBytes(32).toString('base64url');
-  const params = { response_type: 'code', client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', state: 'xyz' };
-  const consent = await b(`/oauth/authorize?${new URLSearchParams(params)}`);
-  assert.match(consent.text, /Connect Grok Bot to bot2bot[^]*not end-to-end encrypted/);
-  const ok = await b('/oauth/authorize', { method: 'POST', form: { ...params, bot: 'new', handle, decision: 'allow' } });
-  const loc = new URL(ok.location);
-  assert.equal(loc.searchParams.get('state'), 'xyz');
-  const swap = (form) => fetch(meta.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(form) });
-  assert.equal((await swap({ grant_type: 'authorization_code', code: loc.searchParams.get('code'), redirect_uri: REDIRECT, client_id: reg.client_id, code_verifier: 'x'.repeat(43) })).status, 400, 'wrong verifier');
-  const tokens = await (await swap({ grant_type: 'authorization_code', code: loc.searchParams.get('code'), redirect_uri: REDIRECT, client_id: reg.client_id, code_verifier: verifier })).json();
-  assert.ok(tokens.access_token && tokens.refresh_token);
-  let id = 0;
-  const rpc = async (method, params_ = {}, token = tokens.access_token) => {
-    const r = await fetch(`${env.url}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params: params_ }) });
-    return { status: r.status, body: r.status === 200 ? await r.json() : null, headers: r.headers };
-  };
-  const tool = async (name, args = {}) => (await rpc('tools/call', { name, arguments: args })).body.result;
-  return { tokens, rpc, tool, swap, clientId: reg.client_id };
-}
 
 test('connected app: sign in with OAuth, tools over MCP, chat with a private-mode bot', async (t0) => {
   const env = await setup(t0);
@@ -71,12 +45,12 @@ test('connected app: sign in with OAuth, tools over MCP, chat with a private-mod
   const sent = await ben.cli('send', 'Mia', 'Lunch Sunday?', '--choice', 'Yes', '--choice', 'No');
   assert.match(sent, /Not end-to-end encrypted: their bot uses the bot2bot connected app/);
   const inbox = (await app.tool('check_inbox')).content[0].text;
-  assert.match(inbox, /QUESTION[^]*<<<\nLunch Sunday\?\n>>>[^]*answer options: "Yes" \/ "No"/);
+  assert.match(inbox, /QUESTION[^]*\[(\w{4}) start\]\n\| Lunch Sunday\?\n\[\1 end\][^]*answer options: "Yes" \/ "No"/);
   const receipt = inbox.match(/receipt=(msg_[\w~-]+)/)[1];
   assert.match((await app.tool('mark_delivered', { receipt })).content[0].text, /delivered/);
   await waitFor(async () => /passed_on/.test(await ben.cli('status', msgId(sent))));
   await app.tool('reply', { message_id: msgId(sent), text: 'Yes!' });
-  assert.match(await ben.cli('status', msgId(sent)), /reply .*: Yes!/);
+  assert.match(await ben.cli('status', msgId(sent)), /reply \([^)]*\), written by their bot[^]*\n\| Yes!/);
 
   // Ask their bot works in plain text too: Mia allows "availability"; Ben's bot asks; Mia's bot may answer itself.
   await app.tool('allow_topics', { contact: 'Ben', topics: ['availability'] });
@@ -84,7 +58,7 @@ test('connected app: sign in with OAuth, tools over MCP, chat with a private-mod
   const inbox2 = (await app.tool('check_inbox')).content[0].text;
   assert.match(inbox2, /You may answer this yourself/);
   await app.tool('reply', { message_id: q, text: 'Friday after 6', auto: true });
-  assert.match(await ben.cli('status', q), /answered by their bot on its own\): Friday after 6/);
+  assert.match(await ben.cli('status', q), /their bot says it answered on its own\), written by their bot[^]*\n\| Friday after 6/);
 });
 
 test('connected app: refresh tokens rotate, and disconnecting revokes everything', async (t0) => {
@@ -142,7 +116,7 @@ test('quick connect → private mode: one yes, same name and contacts, encrypted
           for (const r of receipts) await app.tool('mark_delivered', { receipt: r[1] });
         } else if (routine.mode === 'cli') {
           const out = await cli('inbox', '--via', 'doorbell'); routine.seen.push(out);
-          const acks = [...out.matchAll(/b2b\.mjs ack (msg_[\w~-]+)/g)];
+          const acks = [...out.matchAll(/^[^|\n].*b2b\.mjs ack (msg_[\w~-]+)$/gm)];
           if (!acks.length) break;
           for (const m of acks) await cli('ack', m[1]);
         }
@@ -161,6 +135,7 @@ test('quick connect → private mode: one yes, same name and contacts, encrypted
   const peer = (await mia.b('/app')).text.match(/action="\/app\/contacts\/approve"><input type="hidden" name="bot" value="(\d+)"><input type="hidden" name="peer" value="(\d+)"/);
   await mia.b('/app/contacts/approve', { method: 'POST', form: { bot: peer[1], peer: peer[2] } });
   assert.match((await app.tool('whoami')).content[0].text, /NEXT STEP: If you haven't asked your owner yet[^]*Want end-to-end encryption[^]*Only if they say yes, call turn_on_encryption/);
+  assert.match((await app.tool('whoami')).content[0].text, /anything on their dashboard [^]* they can just tell you/);
   const page = (await mia.b(`/app/bots/${botId}`)).text;
   assert.match(page, /Turn on end-to-end encryption/);
   assert.ok(page.includes(ENCRYPTION_MESSAGE.replaceAll("'", '&#39;')) || page.includes(ENCRYPTION_MESSAGE), 'the dashboard gives the message to paste');
@@ -172,9 +147,14 @@ test('quick connect → private mode: one yes, same name and contacts, encrypted
   const steps = (await app.tool('turn_on_encryption')).content[0].text;
   const code = steps.match(/b2b\.mjs enroll \S+ ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   assert.match(steps, /Keep the same routine and its webhook[^]*-----\nb2b messages may be waiting[^]*inbox --via doorbell[^]*\n-----/);
+  // On a computer where another bot already uses private mode, the switch refuses instead of taking it over,
+  // the code still works, and it says how to use a folder of its own.
+  await assert.rejects(ben.cli('enroll', env.url, code), /already has a bot2bot connection, @ben[^]*B2B_HOME=/);
+  assert.match(await ben.cli('whoami'), /@ben /);
+  assert.match(steps, /If it says this computer already has a bot2bot connection[^]*B2B_HOME=~\/\.b2b-mia-bot/);
   assert.match(await cli('enroll', env.url, code), /Enrolled as @mia-bot/);
   assert.match(await cli('whoami'), /Encryption: on/);
-  await assert.rejects(cli('enroll', env.url, code), /invalid, used or expired/, 'the code works once');
+  await assert.rejects(cli('enroll', env.url, code, '--again'), /invalid, used or expired/, 'the code works once');
 
   // The app's sign-in is over: nothing can go out in plain text that way any more.
   assert.equal((await app.rpc('ping')).status, 401);
@@ -216,4 +196,24 @@ test('connected app: app registrations are limited per address, and unused ones 
   env.advance(8 * 86_400_000);
   env.relay.retention(env.now());
   assert.equal(env.relay.db.prepare('SELECT count(*) AS n FROM oauth_clients').get().n, 0, 'registrations that never signed anyone in are cleared after a week');
+});
+
+test('connected app consent: a new bot by default, a disconnected bot when one waits to come back', async (t0) => {
+  const env = await setup(t0);
+  const mia = { b: await login(env, 'mia@example.com') };
+  await connectApp(env, mia.b, 'mia-bot');
+  const meta = await (await fetch(`${env.url}/.well-known/oauth-authorization-server`)).json();
+  const reg = await (await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Cursor', redirect_uris: [REDIRECT] }) })).json();
+  const consent = async () => (await mia.b(`/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: 'x'.repeat(43), code_challenge_method: 'S256', state: 's' })}`)).text;
+  // An existing bot is never pre-picked: signing in again makes a new bot unless the person chooses otherwise.
+  let page = await consent();
+  assert.match(page, /Connect your bot to bot2bot[^]*Requested by the app "Cursor"/);
+  assert.match(page, /<option value="new" selected>A new bot<\/option><option value="\d+">@mia-bot<\/option>/);
+  assert.match(page, /<label id="newname">Name for the new bot/);
+  // Once that bot is disconnected, it's the one waiting to come back, so it's pre-picked and the name field hides.
+  const botId = (await mia.b('/app')).text.match(/\/app\/bots\/(\d+)/)[1];
+  await mia.b(`/app/bots/${botId}/disconnect`, { method: 'POST' });
+  page = await consent();
+  assert.match(page, /<option value="new">A new bot<\/option><option value="\d+" selected>@mia-bot \(reconnect\)<\/option>/);
+  assert.match(page, /<label id="newname" hidden>/);
 });

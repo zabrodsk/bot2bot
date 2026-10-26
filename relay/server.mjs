@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp, migrateApp } from './app.mjs';
 import { createConnector, migrateConnector } from './connector.mjs';
 import { messageEmail } from './email.mjs';
+import { migrateGovernance, createGovernance } from './governance.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -161,10 +162,12 @@ export function openDb(path) {
   addColumn('messages', 'lease_token', 'TEXT');
   addColumn('bots', 'doorbell_gen', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('messages', 'probe_gen', 'INTEGER');
+  addColumn('contacts', 'privacy_on', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('contacts', 'gen', 'INTEGER NOT NULL DEFAULT 0');
   return db;
 }
 
-export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/HtbwJ5wysPCe2JbDtVvgA', webInbox = false, siteDir = '', redirectHosts = [], keySecret, limits = {}, dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
+export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', stickersDir, redirectHosts = [], keySecret, limits = {}, dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
   if (!adminToken || adminToken.length < 16) throw new Error('ADMIN_TOKEN (16+ chars) is required');
   const L = { ...LIMITS, ...limits };
   // What an owner sends a friend: get a bot first (the setup bot does it all), then open the invite.
@@ -219,6 +222,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   const db = openDb(dbPath);
   migrateApp(db);
   migrateConnector(db);
+  migrateGovernance(db);
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => { db.exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
   // The one place that erases message content. Waiting messages become "not delivered".
@@ -228,6 +232,20 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       WHERE ${where}`).run(clock(), ...params);
   // Blocking or removing someone drops whatever is still waiting, in both directions.
   const dropBetween = (a, b) => erase(`status IN ('pending', 'claimed') AND ((from_bot = ? AND to_bot = ?) OR (from_bot = ? AND to_bot = ?))`, a, b, b, a);
+  const bumpGen = (botId) => q('UPDATE contacts SET gen = max(gen + 1, ?) WHERE owner_bot = ? OR peer_bot = ?').run(clock(), botId, botId);
+  const bumpPair = (a, b) => q('UPDATE contacts SET gen = max(gen + 1, ?) WHERE (owner_bot = ? AND peer_bot = ?) OR (owner_bot = ? AND peer_bot = ?)').run(clock(), a, b, b, a);
+  // Internal owner control. The dashboard authenticates the owner before calling this.
+  const setPrivacyInTx = (ownerBot, peerBot, on) => {
+    if (!db.isTransaction) throw new Error('setPrivacyInTx requires a transaction');
+    if (on && !governance.inPilot(ownerBot)) throw new HttpError(404, 'Page not found');
+    const c = contact(ownerBot, peerBot);
+    if (!c) throw new HttpError(404, 'contact not found');
+    if (!!c.privacy_on === !!on && (!governance.inPilot(ownerBot) || governance.effectiveMode(c) === (on ? 'asks' : 'handles'))) return;
+    q('UPDATE contacts SET privacy_on = ? WHERE owner_bot = ? AND peer_bot = ?').run(on ? 1 : 0, ownerBot, peerBot);
+    if (governance.inPilot(ownerBot)) q('UPDATE contacts SET mode_override = ? WHERE owner_bot = ? AND peer_bot = ?').run(on ? 'asks' : 'handles', ownerBot, peerBot);
+    bumpPair(ownerBot, peerBot);
+  };
+  const setPrivacy = (ownerBot, peerBot, on) => tx(() => setPrivacyInTx(ownerBot, peerBot, on));
   const VIA = new Set(['doorbell', 'manual', 'schedule']);
   const log = (bot, kind, detail = {}) => q('INSERT INTO events (ts, bot, kind, detail) VALUES (?, ?, ?, ?)').run(clock(), bot ?? null, kind, JSON.stringify(detail));
 
@@ -237,6 +255,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     if (!changed) return false;
     q('UPDATE bots SET sign_pub = ?, box_pub = ?, keys_at = ? WHERE id = ?').run(keys?.sign ?? null, keys?.box ?? null, clock(), bot.id);
     q('UPDATE contacts SET codes_compared_at = NULL WHERE owner_bot = ? OR peer_bot = ?').run(bot.id, bot.id);
+    bumpGen(bot.id);
     erase(`to_bot = ? AND status IN ('pending', 'claimed') AND sealed IS NOT NULL`, bot.id);
     log(bot.id, 'keys_set', { first: !bot.box_pub });
     return true;
@@ -330,6 +349,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   // One scheduler pass: release expired leases, then ring every bot with due messages.
   async function tick() {
     const t = clock();
+    governance.expire(t);
     retention(t);
     const expired = q("SELECT id, to_bot FROM messages WHERE status = 'claimed' AND lease_until <= ?").all(t);
     for (const m of expired) {
@@ -410,6 +430,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   function retention(t) {
     if (t - lastRetention < 10 * 60_000) return;
     lastRetention = t;
+    governance.retention(t);
     const expired = q(`UPDATE messages SET status = 'dropped', next_ring_at = NULL, lease_until = NULL, note = coalesce(note, 'expired')
                        WHERE status IN ('pending', 'claimed') AND kind != 'probe' AND created_at < ?`).run(t - L.undeliveredExpiryMs);
     if (expired.changes) log(null, 'expired', { count: Number(expired.changes) });
@@ -428,6 +449,119 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   }
 
   // ───── route handlers ─────
+  // Runs inside the caller's transaction; the caller wakes recipients after commit.
+  function enqueue(me, body, ctx = {}) {
+    const ownerWeb = ctx?.actor === 'owner_web';
+    const pilot = governance.inPilot(me);
+    const decision = pilot && ctx?.actor === 'owner_decision' && ctx.decisionId
+      ? q("SELECT * FROM privacy_requests WHERE id = ? AND owner_bot = ? AND state = 'PENDING_OWNER' AND expires_at > ?").get(ctx.decisionId, me.id, clock()) : null;
+    if (me.paused_at) throw new HttpError(403, `your owner paused ${productName}. Nothing can be sent until they resume it on their dashboard.`);
+    const peer = resolveRecipient(me, body.to);
+    const recipient = q('SELECT webhook_url, vendor, box_pub FROM bots WHERE id = ?').get(peer.peer_bot);
+    const kind = body.kind ?? 'note';
+    if (!['note', 'ask', 'reply'].includes(kind)) throw new HttpError(400, 'kind must be note, ask or reply');
+    // Between two bots that have keys, only sealed messages are accepted, so nothing readable ever reaches us.
+    const sealed = body.sealed ?? null;
+    const tag = body.content_tag ?? null;
+    let text = '', links = [], choices = [];
+    if (sealed !== null) {
+      if (ownerWeb || typeof sealed !== 'string' || sealed.length > L.sealedMax || !SEALED_RE.test(sealed)) throw new HttpError(400, 'sealed message is malformed');
+      if (tag !== null && (typeof tag !== 'string' || !TAG_RE.test(tag))) throw new HttpError(400, 'content_tag is malformed');
+      if (!recipient.box_pub) throw new HttpError(400, "their bot can't read encrypted messages yet; send it as plain text");
+      if (!me.box_pub) throw new HttpError(400, 'this bot has no keys, so its sealed messages could never be checked. Run: node ~/bin/b2b.mjs keys');
+      if (body.text || (Array.isArray(body.links) && body.links.length) || (Array.isArray(body.choices) && body.choices.length)) throw new HttpError(400, 'send either a sealed message or plain text, not both');
+    } else {
+      if (!ownerWeb && me.box_pub && recipient.box_pub) throw new HttpError(400, 'messages between bots are end-to-end encrypted and this one was not. Update the tool (node ~/bin/b2b.mjs update), then send again.');
+      text = typeof body.text === 'string' ? body.text.trim() : '';
+      links = Array.isArray(body.links) ? body.links.map(String) : [];
+      if (!text && !links.length) throw new HttpError(400, 'text or links required');
+      choices = Array.isArray(body.choices) ? body.choices.map((c) => String(c).trim()).filter(Boolean) : [];
+      if (choices.length && kind !== 'ask') throw new HttpError(400, 'choices only go with a question (--ask)');
+      if (choices.length > L.choicesMax || choices.some((c) => c.length > L.choiceMax)) throw new HttpError(400, `up to ${L.choicesMax} choices, each under ${L.choiceMax} characters`);
+      if (new Set(choices.map((c) => c.toLowerCase())).size !== choices.length) throw new HttpError(400, 'choices must be different from each other');
+      if (body.topic != null && (typeof body.topic !== 'string' || !TOPIC_RE.test(body.topic.trim().toLowerCase()) || kind !== 'ask')) throw new HttpError(400, 'a topic is a short word or phrase, and only goes with a question');
+      if (text.length > L.textMax) throw new HttpError(413, `text is longer than ${L.textMax} characters`);
+      if (links.length > L.linksMax) throw new HttpError(413, `at most ${L.linksMax} links`);
+      for (const l of links) {
+        let u; try { u = new URL(l); } catch { throw new HttpError(400, `not a valid link: ${l.slice(0, 80)}`); }
+        if (!['http:', 'https:'].includes(u.protocol) || l.length > L.linkMax) throw new HttpError(400, 'links must be http(s) URLs under 2000 chars');
+      }
+    }
+    let replyTo = null;
+    if (kind === 'reply' || body.reply_to) {
+      const orig = q('SELECT * FROM messages WHERE id = ?').get(String(body.reply_to || ''));
+      if (!orig || orig.to_bot !== me.id || orig.from_bot !== peer.peer_bot) throw new HttpError(400, 'reply_to must be a message you received from this contact');
+      replyTo = orig.id;
+    }
+    const clientId = body.client_id ? String(body.client_id).slice(0, 64) : null;
+    if (!ownerWeb && !decision && clientId?.startsWith('privacy:') && (!pilot || body.approval !== clientId.slice(8))) throw new HttpError(403, 'privacy client_id requires an approval');
+    const t = clock();
+    const choicesJson = choices.length ? JSON.stringify(choices) : null;
+    const answer = (m, to) => ({ id: m.id, status: m.status, duplicate: true, to: `@${to}`, recipient_can_be_woken: true, encrypted: !!m.sealed });
+    if (clientId) {
+      // Explicit idempotency key: a genuine retry returns the original; reuse for something else is an error.
+      // For sealed messages the sender's content tag stands in for the text we can't see.
+      const dup = q('SELECT m.*, b.handle FROM messages m JOIN bots b ON b.id = m.to_bot WHERE m.from_bot = ? AND m.client_id = ?').get(me.id, clientId);
+      if (dup) {
+        const sameContent = sealed !== null
+          ? dup.sealed !== null && (dup.sealed === sealed || (tag !== null && dup.content_tag === tag))
+          : dup.sealed === null && dup.text === text && dup.links === JSON.stringify(links) && (dup.choices ?? null) === choicesJson;
+        if ((clientId.startsWith('privacy:') && !ownerWeb && !decision && dup.privacy_request_id !== body.approval) || dup.to_bot !== peer.peer_bot || !sameContent || dup.kind !== kind || (dup.reply_to ?? null) !== replyTo || !!dup.urgent !== !!body.urgent) {
+          throw new HttpError(409, 'client_id was already used for a different message');
+        }
+        return answer(dup, dup.handle);
+      }
+    }
+    const ownerDecision = decision && decision.peer_bot === peer.peer_bot && decision.contact_gen === peer.gen;
+    const approval = pilot && body.approval != null ? governance.checkApproval(me, peer, body.approval, body) : null;
+    if (!ownerWeb && !ownerDecision && !approval && (pilot ? governance.effectiveMode(peer) === 'asks' : peer.privacy_on)) {
+      throw new HttpError(403, 'owner_approval_required: your owner approves messages to this contact first. For now, pass the matter to your owner.' + (pilot ? ' Use propose_reply.' : ''));
+    }
+    // For end-to-end pairs the bot seals the owner-approved answer. The relay cannot check
+    // that sealed content matches the approved candidate; the approval is single-use and pair-bound.
+    if (approval && (!sealed || !me.box_pub || !recipient.box_pub)) throw new HttpError(400, 'approved end-to-end replies must be sealed');
+    if (!approval && !ownerDecision && !clientId && !body.again && (sealed === null || tag !== null)) {
+      // No key: a bot that retries after a lost response would send the same thing twice: treat as one.
+      const same = sealed !== null
+        ? q(`SELECT id, status, sealed FROM messages WHERE from_bot = ? AND to_bot = ? AND kind = ? AND content_tag = ? AND coalesce(reply_to, '') = ? AND urgent = ? AND created_at > ?`)
+          .get(me.id, peer.peer_bot, kind, tag, replyTo ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs)
+        : q(`SELECT id, status, sealed FROM messages WHERE from_bot = ? AND to_bot = ? AND kind = ? AND sealed IS NULL AND text = ? AND links = ?
+              AND coalesce(reply_to, '') = ? AND coalesce(choices, '') = ? AND urgent = ? AND created_at > ?`)
+          .get(me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo ?? '', choicesJson ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs);
+      if (same) return answer(same, peer.handle);
+    }
+    if (q('SELECT count(*) AS n FROM messages WHERE from_bot = ? AND created_at > ?').get(me.id, t - 3_600_000).n >= L.sendPerHour) throw new HttpError(429, 'sending too fast (hourly limit)');
+    if (q('SELECT count(*) AS n FROM messages WHERE from_bot = ? AND to_bot = ? AND created_at > ?').get(me.id, peer.peer_bot, t - 600_000).n >= L.sendPerContactPer10Min) throw new HttpError(429, 'too many messages to this contact in 10 minutes');
+    if (hosted && !ownerWeb && me.vendor !== 'web') {
+      const a = allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me, t);
+      if (a.limited && a.left <= 0) {
+        const when = B.freePeriod === 'day' ? 'at midnight UTC' : `on ${new Date(a.resets).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' })}`;
+        throw new HttpError(402, `your ${a.limit} free messages for ${B.periodWord} are used up. They come back ${when}. Receiving still works. Your owner can remove the limit (${B.priceLabel}) at ${publicUrl}/app/billing`);
+      }
+    }
+    const id = token('msg_', 9);
+    // Plain messages carry their "ask their bot" topic and "answered by the bot" mark in the open; sealed ones inside the seal.
+    const topic = sealed === null && body.topic ? body.topic.trim().toLowerCase() : null;
+    q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag, topic, auto)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
+      choicesJson, ownerWeb ? 'web' : 'bot', sealed, sealed !== null ? tag : null, topic, sealed === null && body.auto && kind === 'reply' ? 1 : 0);
+    if (approval) governance.consumeApproval(approval, id);
+    if (replyTo) q('UPDATE messages SET replied_at = ? WHERE id = ?').run(t, replyTo);
+    log(me.id, 'sent', { message: id, to: peer.handle, kind, encrypted: sealed !== null });
+    return { id, status: 'queued', to: `@${peer.handle}`, encrypted: sealed !== null, recipient_can_be_woken: !!recipient.webhook_url, recipient_uses_web_inbox: recipient.vendor === 'web' };
+  }
+
+  function visibleReply(messageId, botId) {
+    return q(`SELECT r.id, r.text, r.sealed, r.auto, r.created_at FROM messages r
+             JOIN bots b ON b.id = r.to_bot
+             JOIN contacts c ON c.owner_bot = r.to_bot AND c.peer_bot = r.from_bot
+             JOIN contacts back ON back.owner_bot = r.from_bot AND back.peer_bot = r.to_bot
+             WHERE r.reply_to = ? AND r.to_bot = ? AND r.status IN ('pending', 'claimed', 'delivered')
+               AND coalesce(r.note, '') != 'key_check' AND (r.status = 'delivered' OR r.created_at > ?)
+               AND r.body_purged_at IS NULL AND b.paused_at IS NULL AND c.blocked = 0 AND back.blocked = 0
+             ORDER BY r.created_at LIMIT 1`).get(messageId, botId, clock() - L.undeliveredExpiryMs);
+  }
+
   const routes = {
     'POST /admin/enroll': ({ body, admin }) => {
       if (!admin) throw new HttpError(401, 'admin token required');
@@ -500,7 +634,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       }
       if (row.user_id) q('UPDATE bots SET user_id = ? WHERE handle = ?').run(row.user_id, row.handle);
       const bot = q('SELECT * FROM bots WHERE handle = ?').get(row.handle);
-      setKeys(bot, keys);
+      if (!setKeys(bot, keys) && row.reissue) bumpGen(bot.id);
       log(bot.id, row.reissue ? 're_enrolled' : 'enrolled', { encrypted: !!keys });
       return { token: raw, handle: row.handle, display_name: row.display_name, encryption: keys ? 'on' : 'off' };
     }),
@@ -537,7 +671,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     }),
 
     // For bots connected before encryption existed. Replacing keys needs a reconnect from the owner's dashboard.
-    'POST /v1/keys': ({ me, body }) => {
+    'POST /v1/keys': ({ me, body }) => tx(() => {
       const keys = validKeys(body.keys);
       if (!keys) throw new HttpError(400, 'keys are required');
       if (me.box_pub) {
@@ -546,7 +680,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       }
       setKeys(me, keys);
       return { ok: true, encryption: 'on' };
-    },
+    }),
 
     'GET /v1/me': ({ me }) => ({
       handle: me.handle, display_name: me.display_name,
@@ -595,32 +729,41 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       const t = clock();
       const inviterOk = !inviter.user_id || inv.by_owner ? t : null;
       const mineOk = !me.user_id || byOwner ? t : null;
-      q('INSERT INTO contacts (owner_bot, peer_bot, alias, created_at, approved_at) VALUES (?, ?, ?, ?, ?)').run(inv.from_bot, me.id, inv.alias, t, inviterOk);
-      q('INSERT INTO contacts (owner_bot, peer_bot, alias, created_at, approved_at) VALUES (?, ?, ?, ?, ?)').run(me.id, inv.from_bot, alias, t, mineOk);
+      q('INSERT INTO contacts (owner_bot, peer_bot, alias, created_at, approved_at, gen, privacy_on) VALUES (?, ?, ?, ?, ?, ?, ?)').run(inv.from_bot, me.id, inv.alias, t, inviterOk, t, governance.inPilot(inviter) ? 1 : 0);
+      q('INSERT INTO contacts (owner_bot, peer_bot, alias, created_at, approved_at, gen, privacy_on) VALUES (?, ?, ?, ?, ?, ?, ?)').run(me.id, inv.from_bot, alias, t, mineOk, t, governance.inPilot(me) ? 1 : 0);
       log(me.id, 'paired', { with: inviter.handle, by: byOwner ? 'owner' : 'bot', waiting: [!mineOk && 'me', !inviterOk && 'them'].filter(Boolean) });
       return { paired_with: `@${inviter.handle}`, inviter_name: inviter.display_name, your_alias_for_them: alias,
         waiting_for_your_owner: !mineOk, waiting_for_them: !inviterOk,
         approve_at: !mineOk ? `${publicUrl}/app` : undefined };
     }); } catch (e) { if (failedAccept) log(failedAccept, 'accept_failed', {}); throw e; } },
 
+    'GET /v1/settings': ({ me }) => governance.getSettings(me.id),
+    'PATCH /v1/settings': ({ me, body }) => governance.applySettings(me.id, body.ops),
+    'POST /v1/decisions': ({ me, body }) => tx(() => governance.recordDecisionInTx(me.id, body)),
+    'POST /v1/requests': ({ me, body }) => tx(() => governance.proposeReplyInTx(me.id, body)),
+    'GET /v1/requests': ({ me }) => ({ requests: governance.openRequests(me.id) }),
+    'GET /v1/requests/:id': ({ me, params }) => governance.getRequest(me.id, params.id),
+
     'GET /v1/contacts': ({ me }) => ({
-      contacts: q(`SELECT c.alias, b.handle, b.display_name, b.vendor, b.sign_pub, b.box_pub, b.keys_at, c.codes_compared_at, c.can_ask, back.can_ask AS they_let_me_ask, c.blocked, c.approved_at, back.approved_at AS their_ok, b.webhook_url IS NOT NULL AS has_doorbell
+      contacts: q(`SELECT c.*, b.handle, b.display_name, b.vendor, b.sign_pub, b.box_pub, b.keys_at, c.codes_compared_at, c.privacy_on, c.can_ask, back.can_ask AS they_let_me_ask, c.blocked, c.approved_at, back.approved_at AS their_ok, b.webhook_url IS NOT NULL AS has_doorbell
                    FROM contacts c JOIN bots b ON b.id = c.peer_bot LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot
                    WHERE c.owner_bot = ? ORDER BY c.alias`).all(me.id)
-        .map((c) => ({ alias: c.alias, handle: `@${c.handle}`, display_name: c.display_name, blocked: !!c.blocked, can_wake: !!c.has_doorbell,
+        .map((c) => ({ alias: c.alias, handle: `@${c.handle}`, display_name: c.display_name, blocked: !!c.blocked, owner_approves_first: governance.inPilot(me) ? governance.effectiveMode(c) === 'asks' : !!c.privacy_on, can_wake: !!c.has_doorbell,
           uses: c.vendor === 'web' ? 'web_inbox' : c.vendor === 'connector' ? 'connected_app' : 'bot', keys: c.box_pub ? { sign: c.sign_pub, box: c.box_pub } : null, keys_since: iso(c.keys_at), codes_compared: !!c.codes_compared_at,
           may_ask_you_about: JSON.parse(c.can_ask || '[]'), you_may_ask_about: JSON.parse(c.they_let_me_ask || '[]'),
           status: c.blocked ? 'blocked' : !c.approved_at ? 'waiting_for_your_owner' : !c.their_ok ? 'waiting_for_them' : 'active' })),
     }),
 
-    'POST /v1/contacts/block': ({ me, body }) => {
+    'POST /v1/contacts/block': ({ me, body }) => tx(() => {
       const c = resolveContactLoose(me, body.contact);
+      if (governance.inPilot(me)) return governance.applySettingsInTx(me.id, [{ op: 'block', contact: c.peer_bot, on: !body.unblock }]);
       // A bot may block on its own, but only its human can lift a block (on the dashboard).
       if (body.unblock && me.user_id) throw new HttpError(403, `only your owner can unblock a contact, on their dashboard: ${publicUrl}/app`);
       q('UPDATE contacts SET blocked = ? WHERE owner_bot = ? AND peer_bot = ?').run(body.unblock ? 0 : 1, me.id, c.peer_bot);
+      bumpPair(me.id, c.peer_bot);
       if (!body.unblock) { dropBetween(me.id, c.peer_bot); log(me.id, 'contact_blocked', { peer: c.peer_bot, by: 'bot' }); }
       return { ok: true, blocked: !body.unblock };
-    },
+    }),
 
     // Ask their bot: the bot records what its owner lets this contact's bot ask about directly. The owner sees
     // and can shorten the list on the dashboard. The topic of each question travels sealed; we never see it.
@@ -628,6 +771,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       const c = resolveContactLoose(me, body.contact);
       const topics = Array.isArray(body.topics) ? [...new Set(body.topics.map((t) => String(t).trim().toLowerCase()).filter(Boolean))] : null;
       if (!topics || topics.length > TOPICS_MAX || topics.some((t) => !TOPIC_RE.test(t))) throw new HttpError(400, `topics must be up to ${TOPICS_MAX} short words or phrases (letters and numbers, under 40 characters)`);
+      if ((governance.inPilot(me) || c.privacy_on) && topics.some((t) => !JSON.parse(c.can_ask || '[]').includes(t))) throw new HttpError(403, 'owner_only: your owner manages what this contact may ask about. You can only remove topics.');
       q('UPDATE contacts SET can_ask = ? WHERE owner_bot = ? AND peer_bot = ?').run(JSON.stringify(topics), me.id, c.peer_bot);
       log(me.id, 'ask_topics_set', { peer: c.peer_bot, count: topics.length });
       return { ok: true, topics };
@@ -659,100 +803,19 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       return { ok: true };
     },
 
-    'POST /v1/messages': ({ me, body, viaWeb = false }) => tx(() => {
-      if (me.paused_at) throw new HttpError(403, `your owner paused ${productName}. Nothing can be sent until they resume it on their dashboard.`);
-      const peer = resolveRecipient(me, body.to);
-      const recipient = q('SELECT webhook_url, vendor, box_pub FROM bots WHERE id = ?').get(peer.peer_bot);
-      const kind = body.kind ?? 'note';
-      if (!['note', 'ask', 'reply'].includes(kind)) throw new HttpError(400, 'kind must be note, ask or reply');
-      // Between two bots that have keys, only sealed messages are accepted, so nothing readable ever reaches us.
-      const sealed = body.sealed ?? null;
-      const tag = body.content_tag ?? null;
-      let text = '', links = [], choices = [];
-      if (sealed !== null) {
-        if (viaWeb || typeof sealed !== 'string' || sealed.length > L.sealedMax || !SEALED_RE.test(sealed)) throw new HttpError(400, 'sealed message is malformed');
-        if (tag !== null && (typeof tag !== 'string' || !TAG_RE.test(tag))) throw new HttpError(400, 'content_tag is malformed');
-        if (!recipient.box_pub) throw new HttpError(400, "their bot can't read encrypted messages yet; send it as plain text");
-        if (!me.box_pub) throw new HttpError(400, 'this bot has no keys, so its sealed messages could never be checked. Run: node ~/bin/b2b.mjs keys');
-        if (body.text || (Array.isArray(body.links) && body.links.length) || (Array.isArray(body.choices) && body.choices.length)) throw new HttpError(400, 'send either a sealed message or plain text, not both');
-      } else {
-        if (!viaWeb && me.box_pub && recipient.box_pub) throw new HttpError(400, 'messages between bots are end-to-end encrypted and this one was not. Update the tool (node ~/bin/b2b.mjs update), then send again.');
-        text = typeof body.text === 'string' ? body.text.trim() : '';
-        links = Array.isArray(body.links) ? body.links.map(String) : [];
-        if (!text && !links.length) throw new HttpError(400, 'text or links required');
-        choices = Array.isArray(body.choices) ? body.choices.map((c) => String(c).trim()).filter(Boolean) : [];
-        if (choices.length && kind !== 'ask') throw new HttpError(400, 'choices only go with a question (--ask)');
-        if (choices.length > L.choicesMax || choices.some((c) => c.length > L.choiceMax)) throw new HttpError(400, `up to ${L.choicesMax} choices, each under ${L.choiceMax} characters`);
-        if (new Set(choices.map((c) => c.toLowerCase())).size !== choices.length) throw new HttpError(400, 'choices must be different from each other');
-        if (body.topic != null && (typeof body.topic !== 'string' || !TOPIC_RE.test(body.topic.trim().toLowerCase()) || kind !== 'ask')) throw new HttpError(400, 'a topic is a short word or phrase, and only goes with a question');
-        if (text.length > L.textMax) throw new HttpError(413, `text is longer than ${L.textMax} characters`);
-        if (links.length > L.linksMax) throw new HttpError(413, `at most ${L.linksMax} links`);
-        for (const l of links) {
-          let u; try { u = new URL(l); } catch { throw new HttpError(400, `not a valid link: ${l.slice(0, 80)}`); }
-          if (!['http:', 'https:'].includes(u.protocol) || l.length > L.linkMax) throw new HttpError(400, 'links must be http(s) URLs under 2000 chars');
-        }
-      }
-      let replyTo = null;
-      if (kind === 'reply' || body.reply_to) {
-        const orig = q('SELECT * FROM messages WHERE id = ?').get(String(body.reply_to || ''));
-        if (!orig || orig.to_bot !== me.id || orig.from_bot !== peer.peer_bot) throw new HttpError(400, 'reply_to must be a message you received from this contact');
-        replyTo = orig.id;
-      }
-      const clientId = body.client_id ? String(body.client_id).slice(0, 64) : null;
-      const t = clock();
-      const choicesJson = choices.length ? JSON.stringify(choices) : null;
-      const answer = (m, to) => ({ id: m.id, status: m.status, duplicate: true, to: `@${to}`, recipient_can_be_woken: true, encrypted: !!m.sealed });
-      if (clientId) {
-        // Explicit idempotency key: a genuine retry returns the original; reuse for something else is an error.
-        // For sealed messages the sender's content tag stands in for the text we can't see.
-        const dup = q('SELECT m.*, b.handle FROM messages m JOIN bots b ON b.id = m.to_bot WHERE m.from_bot = ? AND m.client_id = ?').get(me.id, clientId);
-        if (dup) {
-          const sameContent = sealed !== null
-            ? dup.sealed !== null && (dup.sealed === sealed || (tag !== null && dup.content_tag === tag))
-            : dup.sealed === null && dup.text === text && dup.links === JSON.stringify(links) && (dup.choices ?? null) === choicesJson;
-          if (dup.to_bot !== peer.peer_bot || !sameContent || dup.kind !== kind || (dup.reply_to ?? null) !== replyTo || !!dup.urgent !== !!body.urgent) {
-            throw new HttpError(409, 'client_id was already used for a different message');
-          }
-          return answer(dup, dup.handle);
-        }
-      } else if (!body.again && (sealed === null || tag !== null)) {
-        // No key: a bot that retries after a lost response would send the same thing twice: treat as one.
-        const same = sealed !== null
-          ? q(`SELECT id, status, sealed FROM messages WHERE from_bot = ? AND to_bot = ? AND kind = ? AND content_tag = ? AND coalesce(reply_to, '') = ? AND urgent = ? AND created_at > ?`)
-            .get(me.id, peer.peer_bot, kind, tag, replyTo ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs)
-          : q(`SELECT id, status, sealed FROM messages WHERE from_bot = ? AND to_bot = ? AND kind = ? AND sealed IS NULL AND text = ? AND links = ?
-                AND coalesce(reply_to, '') = ? AND coalesce(choices, '') = ? AND urgent = ? AND created_at > ?`)
-            .get(me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo ?? '', choicesJson ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs);
-        if (same) return answer(same, peer.handle);
-      }
-      if (q('SELECT count(*) AS n FROM messages WHERE from_bot = ? AND created_at > ?').get(me.id, t - 3_600_000).n >= L.sendPerHour) throw new HttpError(429, 'sending too fast (hourly limit)');
-      if (q('SELECT count(*) AS n FROM messages WHERE from_bot = ? AND to_bot = ? AND created_at > ?').get(me.id, peer.peer_bot, t - 600_000).n >= L.sendPerContactPer10Min) throw new HttpError(429, 'too many messages to this contact in 10 minutes');
-      if (hosted && !viaWeb && me.vendor !== 'web') {
-        const a = allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me, t);
-        if (a.limited && a.left <= 0) {
-          const when = B.freePeriod === 'day' ? 'at midnight UTC' : `on ${new Date(a.resets).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' })}`;
-          throw new HttpError(402, `your ${a.limit} free messages for ${B.periodWord} are used up. They come back ${when}. Receiving still works. Your owner can remove the limit (${B.priceLabel}) at ${publicUrl}/app/billing`);
-        }
-      }
-      const id = token('msg_', 9);
-      // Plain messages carry their "ask their bot" topic and "answered by the bot" mark in the open; sealed ones inside the seal.
-      const topic = sealed === null && body.topic ? body.topic.trim().toLowerCase() : null;
-      q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag, topic, auto)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
-        choicesJson, viaWeb ? 'web' : 'bot', sealed, sealed !== null ? tag : null, topic, sealed === null && body.auto && kind === 'reply' ? 1 : 0);
-      if (replyTo) q('UPDATE messages SET replied_at = ? WHERE id = ?').run(t, replyTo);
-      log(me.id, 'sent', { message: id, to: peer.handle, kind, encrypted: sealed !== null });
-      setImmediate(() => { void tick(); });
-      return { id, status: 'queued', to: `@${peer.handle}`, encrypted: sealed !== null, recipient_can_be_woken: !!recipient.webhook_url, recipient_uses_web_inbox: recipient.vendor === 'web' };
-    }),
+    'POST /v1/messages': ({ me, body, viaWeb = false }) => {
+      const result = tx(() => enqueue(me, body, { actor: viaWeb ? 'owner_web' : 'bot' }));
+      if (!result.duplicate) setImmediate(() => { void tick(); });
+      return result;
+    },
 
     'GET /v1/messages/:id': ({ me, params }) => {
       const m = q('SELECT m.*, f.handle AS from_handle, t.handle AS to_handle, t.last_ring_status AS to_ring_status, t.paused_at AS to_paused, t.vendor AS to_vendor, t.user_id AS to_user FROM messages m JOIN bots f ON f.id = m.from_bot JOIN bots t ON t.id = m.to_bot WHERE m.id = ?').get(params.id);
       if (!m || (m.from_bot !== me.id && m.to_bot !== me.id)) throw new HttpError(404, 'message not found');
-      const reply = q('SELECT id, text, sealed, auto, created_at FROM messages WHERE reply_to = ? ORDER BY created_at LIMIT 1').get(m.id);
+      const reply = visibleReply(m.id, me.id);
       return {
         id: m.id, from: `@${m.from_handle}`, to: `@${m.to_handle}`, kind: m.kind, encrypted: !!m.sealed, reply_to: m.reply_to,
-        status: m.replied_at ? 'replied'
+        status: reply ? 'replied'
           : m.status === 'delivered' ? (m.to_vendor === 'web' ? 'seen' : 'passed_on')
           : m.status === 'claimed' ? 'picked_up'
           : m.status === 'dropped' ? 'not_delivered'
@@ -784,7 +847,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
 
     'GET /v1/sent': ({ me }) => ({
       messages: q('SELECT m.id, m.kind, m.status, m.ring_count, m.created_at, m.delivered_at, m.replied_at, c.alias FROM messages m LEFT JOIN contacts c ON c.owner_bot = m.from_bot AND c.peer_bot = m.to_bot WHERE m.from_bot = ? ORDER BY m.created_at DESC LIMIT 20').all(me.id)
-        .map((m) => ({ id: m.id, to: m.alias, kind: m.kind, status: m.replied_at ? 'replied' : m.status, created_at: iso(m.created_at), delivered_at: iso(m.delivered_at) })),
+        .map((m) => ({ id: m.id, to: m.alias, kind: m.kind, status: visibleReply(m.id, me.id) ? 'replied' : m.status, created_at: iso(m.created_at), delivered_at: iso(m.delivered_at) })),
     }),
 
     'POST /v1/inbox/claim': ({ me, body }) => tx(() => {
@@ -838,7 +901,11 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       if (m.status !== 'claimed' || !lease || lease !== m.lease_token || !(m.lease_until > t)) {
         throw new HttpError(409, 'this receipt is out of date (another run has this message, or it was never picked up). Skip it; run inbox again.');
       }
-      q("UPDATE messages SET status = 'delivered', delivered_at = ?, lease_until = NULL, next_ring_at = NULL, note = ? WHERE id = ? AND lease_token = ?").run(t, body.note ? String(body.note).slice(0, 280) : null, m.id, lease);
+      const receiptContact = contact(me.id, m.from_bot);
+      const note = (governance.inPilot(me) ? receiptContact && governance.effectiveMode(receiptContact) === 'asks' : receiptContact?.privacy_on)
+        ? ['failed security check', 'could not be opened by a connected-app bot'].includes(body.note) ? body.note : 'received'
+        : body.note ? String(body.note).slice(0, 280) : null;
+      q("UPDATE messages SET status = 'delivered', delivered_at = ?, lease_until = NULL, next_ring_at = NULL, note = ? WHERE id = ? AND lease_token = ?").run(t, note, m.id, lease);
       log(me.id, 'delivered', { message: m.id, since_sent_ms: t - m.created_at });
       return { id: m.id, status: 'delivered' };
     }),
@@ -922,7 +989,12 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, HttpError, L, privateDoorbell, trustProxy });
   const site = makeSite(siteDir);
   const redirects = new Set(redirectHosts.map((h) => h.trim().toLowerCase()).filter(Boolean));
-  const handleApp = createApp({ setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+  const governance = createGovernance({ db, q, tx, clock, token, HttpError, publicUrl, privacyPilot,
+    resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L });
+  const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
+    decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
+  const handleApp = createApp({ governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
+    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');
@@ -948,11 +1020,12 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       if (!found && site && isPageVisit(req, url)) return site.notFound(req, res);
       if (!found) throw new HttpError(404, 'not found');
       let body = {};
-      if (req.method === 'POST') {
+      if (['POST', 'PATCH'].includes(req.method)) {
         let raw = '';
         for await (const chunk of req) { raw += chunk; if (raw.length > 64_000) throw new HttpError(413, 'body too large'); }
         if (raw) { try { body = JSON.parse(raw); } catch { throw new HttpError(400, 'body must be JSON'); } }
       }
+      if (['PATCH /v1/settings', 'POST /v1/requests', 'POST /v1/decisions'].includes(found.key) && (!body || typeof body !== 'object' || Array.isArray(body))) throw new HttpError(400, 'body must be a JSON object');
       const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
       const admin = auth.length > 0 && auth.length === adminToken.length && timingSafeEqual(Buffer.from(sha(auth)), Buffer.from(adminHash));
       const me = botByToken(auth);
@@ -967,7 +1040,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     }
   }
 
-  return { handle, tick, db, ring, retention: (t = clock()) => { lastRetention = 0; retention(t); } };
+  return { handle, tick, db, ring, enqueue, governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, setPrivacy, setPrivacyInTx, retention: (t = clock()) => { lastRetention = 0; retention(t); } };
 }
 
 // ───── the landing site ─────
@@ -1056,6 +1129,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     productName: process.env.PRODUCT_NAME || 'bot2bot',
     ...(process.env.SETUP_BOT_URL ? { setupBotUrl: process.env.SETUP_BOT_URL } : {}),
     webInbox: process.env.WEB_INBOX === '1',
+    privacyPilot: process.env.PRIVACY_PILOT === '1' ? true : (process.env.PRIVACY_PILOT || '').split(',').map((s) => s.trim()).filter(Boolean),
     siteDir: process.env.SITE_DIR || '',
     redirectHosts: (process.env.REDIRECT_HOSTS || '').split(','),
     mailer: makeMailer(),

@@ -7,7 +7,7 @@ import Bot from './Bot.astro';
 import Glyph from './Glyph.astro';
 import { BOT } from '../data/bot';
 
-type Kind = 'locked' | 'ask' | 'inbox' | 'consent' | 'self' | 'free' | 'family' | 'setup' | 'quick' | 'many';
+type Kind = 'locked' | 'ask' | 'inbox' | 'consent' | 'self' | 'free' | 'family' | 'setup' | 'quick' | 'many' | 'never';
 interface Props { kind: Kind; size?: number; class?: string }
 const { kind, size = 30, class: cls } = Astro.props;
 // Wires sit on the head's centre line, which is below the svg's centre (the antenna is above).
@@ -43,6 +43,10 @@ const drop = ((BOT.vc + 0.25) * size) / 16;
     <Glyph kind="server" size={size} /><span class="wire wire--short wire--sealed"></span>
     <Bot state="you" size={size} />
   </>)}
+  {kind === 'never' && (<>
+    <Bot state="lit" size={size} /><span class="wire wire--sealed wire--msg"></span>
+    <Bot state="you" size={size} /><span class="wire wire--short wire--stop"></span>
+  </>)}
   {kind === 'many' && (<>
     <Bot state="you" size={size} /><span class="wire wire--gap"></span>
     <Bot state="awake" size={size} /><span class="wire wire--gap"></span>
@@ -69,6 +73,9 @@ const drop = ((BOT.vc + 0.25) * size) / 16;
     background: repeating-linear-gradient(90deg, var(--c-muted) 0 4px, transparent 4px 8px);
     height: 1.2px;
   }
+  /* The message stops at your bot: a short grey stub with an end bar. */
+  .wire--stop { position: relative; background: var(--c-sleep); }
+  .wire--stop::after { content: ''; position: absolute; right: 0; top: 50%; width: 1.5px; height: 10px; margin-top: -5px; background: var(--c-sleep); }
   /* A message on the wire: a dot in the middle. */
   .wire--msg { position: relative; }
   .wire--msg::after {

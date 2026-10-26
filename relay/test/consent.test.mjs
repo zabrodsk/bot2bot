@@ -53,6 +53,7 @@ async function owner(env, email, handle) {
   await b('/login', { method: 'POST', form: { email } });
   const code = env.mail.at(-1).text.match(/code is (\d{6})/)[1];
   await b('/login/verify', { method: 'POST', form: { email, code } });
+  await b('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
   await b('/app/bots', { method: 'POST', form: { handle } });
   const joinCode = (await b('/app')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   const home = mkdtempSync(join(tmpdir(), `b2b-c-${handle}-`));
@@ -67,8 +68,8 @@ async function owner(env, email, handle) {
     try {
       for (let i = 0; i < 4; i++) {
         const out = await cli('inbox', '--via', 'doorbell');
-        if (out.trim().endsWith('INBOX EMPTY. Nothing more to do.') && !/b2b\.mjs ack/.test(out)) break;
-        for (const m of out.matchAll(/b2b\.mjs ack (msg_[\w~-]+)/g)) await cli('ack', m[1]);
+        if (out.trim().endsWith('INBOX EMPTY. Nothing more to do.') && !/^[^|\n].*b2b\.mjs ack/m.test(out)) break;
+        for (const m of out.matchAll(/^[^|\n].*b2b\.mjs ack (msg_[\w~-]+)$/gm)) await cli('ack', m[1]);
       }
     } catch { /* relay closed */ }
   });

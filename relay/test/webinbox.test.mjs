@@ -46,6 +46,7 @@ test('web inbox: no bot needed to receive, answer and write back', async (t0) =>
     const b = browser(url);
     await b('/login', { method: 'POST', form: { email } });
     await b('/login/verify', { method: 'POST', form: { email, code: mail.at(-1).text.match(/code is (\d{6})/)[1] } });
+    await b('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
     return b;
   };
   const cliFor = () => { const home = mkdtempSync(join(tmpdir(), 'b2b-w-')); return async (...a) => (await run(process.execPath, [CLI, ...a], { env: { ...process.env, B2B_HOME: home } })).stdout; };
@@ -100,11 +101,11 @@ test('web inbox: no bot needed to receive, answer and write back', async (t0) =>
   assert.match(await benCli('status', id), /replied[\s\S]*Next week/);
   assert.match((await gran('/app/inbox')).text, /You answered: <b>Next week<\/b>/);
   const benInbox = await benCli('inbox');
-  assert.match(benInbox, /REPLY[\s\S]*typed by them on the web[\s\S]*Next week/);
+  assert.match(benInbox, /REPLY[\s\S]*sent from their web inbox[\s\S]*\n\| Next week/);
 
   // Gran writes her own message with a link.
   await gran('/app/inbox/send', { method: 'POST', form: { bot: granBot, peer, text: 'Look at this', link: 'https://example.com/cake' } });
-  assert.match(await benCli('inbox'), /Look at this[\s\S]*link: https:\/\/example\.com\/cake/);
+  assert.match(await benCli('inbox'), /Look at this[\s\S]*link: <https:\/\/example\.com\/cake>/);
 
   // Someone else can't write from Gran's inbox.
   const eve = await login('eve@example.com');
@@ -129,6 +130,7 @@ test('the web inbox is off by default: invites push a bot instead', async (t0) =
     const b = browser(url);
     await b('/login', { method: 'POST', form: { email } });
     await b('/login/verify', { method: 'POST', form: { email, code: mail.at(-1).text.match(/code is (\d{6})/)[1] } });
+    await b('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
     return b;
   };
   const ben = await login('ben@example.com');

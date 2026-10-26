@@ -6,7 +6,7 @@ import Glyph from '../components/Glyph.astro';
 import Figure from '../components/Figure.astro';
 import { security as s, links } from '../data/site';
 ---
-<Base title={s.seo.title} description={s.seo.description} crumbs={[{ name: 'Security', path: '/security/' }]}>
+<Base title={s.seo.title} description={s.seo.description} crumbs={[{ name: 'Privacy', path: '/security/' }]}>
   <section class="page-intro" aria-labelledby="sec-title">
     <h1 id="sec-title" class="page-title">{s.headline[0]} <br />{s.headline[1]}</h1>
     <p class="page-lead">{s.lead}</p>
@@ -30,25 +30,7 @@ import { security as s, links } from '../data/site';
     </ol>
   </section>
 
-  <section class="sees" aria-labelledby="sees-title">
-    <h2 id="sees-title" class="say sees__title">{s.seesTitle}</h2>
-    {[s.sees.can, s.sees.cant].map((col, i) => (
-      <div class:list={['sees__col', i === 1 && 'sees__col--sealed']}>
-        <h3 class="sees__label">{col.label}</h3>
-        <ul>{col.items.map((it) => <li>{it}</li>)}</ul>
-      </div>
-    ))}
-    <p class="sees__note muted small">{s.seesNote}</p>
-  </section>
-
-  <section class="ledger" aria-label="Keys and checks">
-    <article class="entry">
-      <h2 class="say entry__title">{s.keys.title}</h2>
-      <div class="entry__body">
-        <p class="muted">{s.keys.text}</p>
-        <p class="muted small entry__fine">{s.keys.curious}</p>
-      </div>
-    </article>
+  <section class="ledger" aria-label="Checks">
     <article class="entry">
       <h2 class="say entry__title">{s.code.title}</h2>
       <div class="entry__body">
@@ -113,26 +95,7 @@ import { security as s, links } from '../data/site';
   .path__who { font-weight: 560; font-size: var(--t-s); }
   .path__text { color: var(--c-muted); max-width: 26ch; }
 
-  /* ---------- Can and can't see ---------- */
-  .sees {
-    margin: clamp(96px, 16vh, 168px) var(--m) 0; padding-top: 34px; border-top: 1px solid var(--c-line);
-    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 28px var(--gap);
-  }
-  .sees__title { grid-column: 1 / span 5; max-width: 12ch; }
-  .sees__col { grid-column: span 3; }
-  .sees__col:nth-of-type(1) { grid-column: 7 / span 3; }
-  .sees__label { font-size: var(--t-s); font-weight: 560; margin-bottom: 10px; }
-  .sees__col ul { list-style: none; padding: 0; }
-  .sees__col li { padding: 9px 0 9px 20px; border-top: 1px solid var(--c-line); position: relative; }
-  .sees__col li::before {
-    content: ''; position: absolute; left: 0; top: 50%; width: 8px; height: 8px; margin-top: -4px;
-    border-radius: 50%; border: 1.2px solid var(--c-muted);
-  }
-  /* What is sealed: a closed light. */
-  .sees__col--sealed li::before { border: 0; background: var(--c-ink); }
-  .sees__note { grid-column: 7 / span 6; }
-
-  /* ---------- Ledger: keys, codes, holds ---------- */
+  /* ---------- Ledger: safety codes, new keys ---------- */
   .ledger { margin: clamp(96px, 16vh, 168px) var(--m) 0; }
   .entry {
     display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 18px var(--gap);
@@ -140,7 +103,6 @@ import { security as s, links } from '../data/site';
   }
   .entry__title { grid-column: 1 / span 5; max-width: 13ch; }
   .entry__body { grid-column: 7 / span 6; display: grid; gap: 14px; max-width: 46ch; padding-top: 4px; }
-  .entry__fine { font-size: var(--t-xs); }
   .code { display: grid; gap: 6px; margin-top: 8px; }
   .code__digits {
     display: flex; flex-wrap: wrap; gap: 0 0.5em;
@@ -181,9 +143,6 @@ import { security as s, links } from '../data/site';
   .keep__links { display: flex; flex-wrap: wrap; gap: 10px 26px; font-size: var(--t-s); }
 
   @media (max-width: 899px) {
-    .sees__title { grid-column: 1 / -1; max-width: none; }
-    .sees__col:nth-of-type(1), .sees__col { grid-column: span 6; }
-    .sees__note { grid-column: 1 / -1; }
     .entry__title { grid-column: 1 / -1; max-width: none; }
     .entry__body { grid-column: 1 / -1; }
     .inbox__title, .inbox__body { grid-column: 1 / -1; }
@@ -199,8 +158,7 @@ import { security as s, links } from '../data/site';
     /* The wire turns vertical: down from one head to the next. */
     .path__wire { top: 48px; bottom: -4px; left: 20px; right: auto; width: 1.5px; height: auto; }
     .motion .path__signal { clip-path: inset(0% 0% 100% 0%); }
-    .sees, .entry, .inbox { grid-template-columns: 1fr; }
-    .sees__col:nth-of-type(1), .sees__col, .sees__note { grid-column: 1; }
+    .entry, .inbox { grid-template-columns: 1fr; }
     .keep__list { grid-template-columns: 1fr; gap: 24px; }
     .keep__item { grid-template-columns: 8.25rem 1fr; align-items: baseline; gap: 14px; }
     .keep__value { font-size: 2.125rem; }

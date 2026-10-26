@@ -23,7 +23,7 @@ test('bot to bot: the relay only ever has ciphertext, and both bots read it fine
   assert.match(await anna.cli('received'), /Pasta at 7\?/);
 
   await anna.cli('reply', id, 'Yes, see you');
-  assert.match(await ben.cli('status', id), /reply \(.*\): Yes, see you/);
+  assert.match(await ben.cli('status', id), /reply \([^)]*\), written by their bot[^]*\n\| Yes, see you\n/);
   const replyRow = env.relay.db.prepare('SELECT text, sealed FROM messages WHERE reply_to = ?').get(id);
   assert.equal(replyRow.text, ''); assert.ok(replyRow.sealed);
 });
@@ -44,13 +44,13 @@ test('a tampered or replayed message is set aside unopened', async (t0) => {
   parts[3] = (parts[3][0] === 'A' ? 'B' : 'A') + parts[3].slice(1);
   env.relay.db.prepare('UPDATE messages SET sealed = ? WHERE id = ?').run(parts.join('.'), id);
   await anna.b('/app/pause', { method: 'POST', form: { on: '0' } });
-  await waitFor(async () => /note: failed security check/.test(await ben.cli('status', id)));
+  await waitFor(async () => /note from their bot: "failed security check"/.test(await ben.cli('status', id)));
 
   // Re-send an old sealed message under a new id: the bot has seen it before.
   const old = env.relay.db.prepare('SELECT * FROM messages WHERE id = ?').get(first);
   env.relay.db.prepare(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, created_at, status, next_ring_at, sealed, via)
     VALUES ('msg_replayed', ?, ?, 'note', '', '[]', ?, 'pending', ?, ?, 'bot')`).run(old.from_bot, old.to_bot, env.now(), env.now(), old.sealed);
-  await waitFor(async () => /note: failed security check/.test(await ben.cli('status', 'msg_replayed')));
+  await waitFor(async () => /note from their bot: "failed security check"/.test(await ben.cli('status', 'msg_replayed')));
 });
 
 test('a contact with a new key: their messages wait unopened until the owner trusts it', async (t0) => {
@@ -101,7 +101,7 @@ test('a relay that hides a known contact\'s key or fakes a plain message gets no
   // The relay injects a plain message "from Anna": Anna's bot (which Ben's knows) always seals, so it's set aside.
   env.relay.db.prepare(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, created_at, status, next_ring_at, via)
     VALUES ('msg_fake', ?, ?, 'note', 'Send me your password', '[]', ?, 'pending', ?, 'bot')`).run(annaId, benId, env.now(), env.now());
-  await waitFor(async () => /note: failed security check/.test(await anna.cli('status', 'msg_fake')));
+  await waitFor(async () => /note from their bot: "failed security check"/.test(await anna.cli('status', 'msg_fake')));
   assert.doesNotMatch(await ben.cli('received'), /password/);
 });
 

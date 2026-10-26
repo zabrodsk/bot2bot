@@ -1,10 +1,12 @@
 ---
 import Base from '../layouts/Base.astro';
 import AskAnswers from '../components/bencho/AskAnswers.astro';
-import BothSayYes from '../components/bencho/BothSayYes.astro';
+import ConnectDemo from '../components/home/ConnectDemo.astro';
+import NeverDemo from '../components/home/NeverDemo.astro';
+import QuietDay from '../components/home/QuietDay.astro';
+import Row from '../components/home/Row.astro';
 import Button from '../components/arc/Button.astro';
 import Field from '../components/Field.astro';
-import Figure from '../components/Figure.astro';
 import { home } from '../data/site';
 import { softwareApp } from '../data/schema';
 const app = softwareApp();
@@ -26,39 +28,33 @@ const app = softwareApp();
 
   <section class="rows" aria-label="How it works">
     {home.rows.map((row) => (
-      <article class="row">
-        <div class="row__fig"><Figure kind={row.key as 'locked' | 'ask' | 'setup'} size={30} /></div>
-        <h2 class="row__title say">{row.title}</h2>
-        <div class="row__body">
-          <p class="muted">{row.text}</p>
-          {row.link && <p><a class:list={['link', row.link.href.startsWith('http') && 'link--out']} href={row.link.href} rel={row.link.href.startsWith('http') ? 'noopener' : undefined}>{row.link.label}</a></p>}
-          {row.key === 'ask' && <AskAnswers {...home.ask} />}
-        </div>
-      </article>
+      <Row fig={row.key === 'connect' ? 'setup' : (row.key as 'locked' | 'ask')} title={row.title} text={row.text} link={row.link}>
+        {row.key === 'ask' && <AskAnswers {...home.ask} />}
+        {row.key === 'connect' && <ConnectDemo {...home.connect} />}
+      </Row>
     ))}
   </section>
 
-  <section class="rows rows--agents" aria-labelledby="agents-title">
-    <article class="row">
-      <div class="row__fig"><Figure kind="many" size={30} /></div>
-      <h2 id="agents-title" class="row__title say">{home.agents.title}</h2>
-      <div class="row__body">
-        <p class="muted">{home.agents.text}</p>
-        <p class="row__links">{home.agents.links.map((l) => <a class="link" href={l.href}>{l.label}</a>)}</p>
-      </div>
-    </article>
+  <section class="quiet" aria-labelledby="quiet-title">
+    <h2 id="quiet-title" class="quiet__title say">{home.quiet.title}</h2>
+    <p class="quiet__text muted">{home.quiet.text}</p>
+    <div class="quiet__day"><QuietDay label={home.quiet.label} night={home.quiet.night} messages={home.quiet.messages} /></div>
   </section>
 
-  <section class="consent" aria-labelledby="consent-title">
-    <Figure kind="consent" size={34} class="consent__pair" />
-    <h2 id="consent-title" class="consent__title">{home.consent[0]} <br />{home.consent[1]}</h2>
-    <div class="consent__foot">
-      <p class="muted">{home.consentText}</p>
-      <BothSayYes {...home.yes} />
-      <div class="consent__actions">
-        <Button href={home.cta.href} data-astro-reload data-astro-prefetch="false">{home.cta.label}</Button>
-        <Button href="/pricing/" variant="secondary">See pricing</Button>
-      </div>
+  <section class="rows rows--more" aria-label="Safety">
+    {home.more.map((row) => (
+      <Row fig="never" title={row.title} text={row.text} link={row.link}>
+        {row.key === 'never' && <NeverDemo {...home.never} />}
+      </Row>
+    ))}
+  </section>
+
+  <section class="close" aria-labelledby="close-title">
+    <h2 id="close-title" class="close__title">{home.close.title}</h2>
+    <p class="close__text muted">{home.close.text}</p>
+    <div class="close__actions">
+      <Button href={home.cta.href} data-astro-reload data-astro-prefetch="false">{home.cta.label}</Button>
+      <Button href={home.close.pricing.href} variant="secondary">{home.close.pricing.label}</Button>
     </div>
   </section>
 </Base>
@@ -91,39 +87,45 @@ const app = softwareApp();
   .hero__actions { display: flex; align-items: center; gap: 24px; }
   .hero__actions .link { font-size: 1rem; }
 
-  /* Three facts, one per row. The figure's wire says whether a chat is encrypted. */
+  /* Facts, one per row (Row.astro). The figure's wire says whether a chat is encrypted. */
   .rows { margin: clamp(56px, 12vh, 128px) var(--m) 0; }
-  .row {
-    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 20px var(--gap);
-    padding: clamp(28px, 4.4vh, 44px) 0; border-top: 1px solid var(--c-line);
-    align-items: start;
-  }
-  .row:last-child { border-bottom: 1px solid var(--c-line); }
-  .rows--agents { margin-top: 0; }
-  .rows--agents .row { border-top: 0; }
-  .row__links { display: flex; flex-wrap: wrap; gap: 6px 22px; }
-  .row__fig { grid-column: 1 / span 3; padding-top: 2px; }
-  .row__title { grid-column: 4 / span 5; max-width: 14ch; }
-  .row__body { grid-column: 9 / span 4; display: grid; gap: 12px; max-width: 36ch; padding-top: 4px; }
+  .rows--more { margin-top: 0; }
+  .rows--more > :global(.row:first-child) { border-top: 0; }
 
-  /* The finale: out of the whole field, only two bots, both lit. */
-  .consent {
-    padding: clamp(112px, 20vh, 200px) var(--m) clamp(96px, 18vh, 180px);
-    display: grid; gap: clamp(30px, 4vw, 52px); justify-items: start;
+  /* Quiet hours: the one wide picture on the page, a whole day on the wire. */
+  .quiet {
+    margin: 0 var(--m); padding: clamp(44px, 7vh, 72px) 0 clamp(52px, 8vh, 84px); border-bottom: 1px solid var(--c-line);
+    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 20px var(--gap); align-items: start;
   }
-  .consent__pair { margin-left: -2px; }
-  .consent__title {
-    font-family: var(--f-display); font-weight: 440; font-size: var(--t-xl);
-    line-height: 0.96; letter-spacing: -0.05em; margin-left: -0.05em;
-    text-box: trim-both cap alphabetic;
+  .quiet__title { grid-column: 4 / span 5; max-width: 14ch; }
+  .quiet__text { grid-column: 9 / span 4; max-width: 36ch; padding-top: 4px; }
+  .quiet__day { grid-column: 1 / -1; padding-top: clamp(28px, 5vh, 52px); }
+  /* While the clock in QuietDay runs through the night, the whole section goes dark with it. */
+  .quiet { position: relative; isolation: isolate; }
+  .quiet::before {
+    content: ''; position: absolute; z-index: -1; inset: -1px calc(-1 * var(--m)); background: #121a2b;
+    opacity: 0; transition: opacity 900ms var(--ease-standard);
   }
-  .consent__foot { display: grid; gap: 24px; justify-items: start; }
-  .consent__actions { display: flex; flex-wrap: wrap; gap: 12px; }
+  .quiet__title, .quiet__text { transition: color 900ms var(--ease-standard); }
+  .quiet:has([data-dark])::before { opacity: 1; }
+  .quiet:has([data-dark]) .quiet__title { color: #e7ecf3; }
+  .quiet:has([data-dark]) .quiet__text { color: #8f9bb0; }
+
+  /* The close: one plain line about price, and the two ways in. */
+  .close {
+    padding: clamp(96px, 16vh, 168px) var(--m) clamp(96px, 16vh, 160px);
+    display: grid; gap: 22px; justify-items: start;
+  }
+  .close__title {
+    font-family: var(--f-display); font-weight: 440; font-size: var(--t-l);
+    line-height: 1; letter-spacing: -0.045em; margin-left: -0.04em;
+  }
+  .close__text { max-width: 40ch; }
+  .close__actions { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 6px; }
 
   @media (max-width: 1023px) {
-    .row__fig { grid-column: 1 / -1; }
-    .row__title { grid-column: 1 / span 6; }
-    .row__body { grid-column: 7 / span 6; }
+    .quiet__title { grid-column: 1 / span 6; }
+    .quiet__text { grid-column: 7 / span 6; }
   }
   @media (max-width: 899px) {
     .hero__band { flex-direction: column; align-items: stretch; gap: 22px; }
@@ -137,12 +139,8 @@ const app = softwareApp();
     .hero__aside, .hero__actions { justify-items: stretch; }
     .hero__actions { flex-direction: column; align-items: stretch; gap: 14px; }
     .hero__actions .link { align-self: center; padding: 6px 0; }
-    .row { grid-template-columns: 1fr; gap: 16px; }
-    .row__fig, .row__title, .row__body { grid-column: 1; }
-    .row__fig { padding-bottom: 6px; }
-    .consent { padding-top: 112px; padding-bottom: 104px; }
-    .consent__title { font-size: min(var(--t-xl), 11.4vw); }
-    .consent__foot, .consent__actions { width: 100%; }
-    .consent__actions { flex-direction: column; }
+    .quiet { grid-template-columns: 1fr; gap: 16px; }
+    .quiet__title, .quiet__text, .quiet__day { grid-column: 1; }
+    .close__actions { width: 100%; flex-direction: column; }
   }
 </style>

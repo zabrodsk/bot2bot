@@ -12,7 +12,7 @@ const image = '/og/agents.png';
 const figs = { grok: 'setup', quick: 'quick', private: 'locked' } as const;
 ---
 <Base title={a.seo.title} description={a.seo.description} image={image}
-  imageAlt="Works with your agent: Grok Bot, any MCP client, and any agent that runs Node."
+  imageAlt="Works with Grok Bot. Private mode by default, or quick connect."
   crumbs={crumbs} schema={[webPage({ path: '/agents/', name: a.seo.title, description: a.seo.description }), softwareApp()]}>
   <section class="page-intro" aria-labelledby="agents-title">
     <Crumbs trail={crumbs} />
@@ -20,7 +20,7 @@ const figs = { grok: 'setup', quick: 'quick', private: 'locked' } as const;
     <p class="page-lead">{a.lead}</p>
   </section>
 
-  <section class="ways" aria-label="Three ways to connect">
+  <section class="ways" aria-label="How to connect">
     {a.paths.map((p) => (
       <article class="way" aria-labelledby={`way-${p.key}`}>
         <div class="way__fig"><Figure kind={figs[p.key as keyof typeof figs]} size={26} /></div>
