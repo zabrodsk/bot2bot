@@ -10,6 +10,8 @@ import { createApp, migrateApp } from './app.mjs';
 import { createConnector, migrateConnector } from './connector.mjs';
 import { messageEmail } from './email.mjs';
 import { migrateGovernance, createGovernance } from './governance.mjs';
+import { migrateEvents, createEvents } from './events.mjs';
+import { createSafePost, checkCallbackUrl } from './doorbells.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -223,6 +225,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   migrateApp(db);
   migrateConnector(db);
   migrateGovernance(db);
+  migrateEvents(db);
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => { db.exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
   // The one place that erases message content. Waiting messages become "not delivered".
@@ -294,7 +297,23 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     return u.toString();
   }
 
+  // A Grok routine webhook, or an OpenClaw gateway's /hooks/wake on any public HTTPS host.
+  function doorbellTarget(raw, kind) {
+    let u = null; try { u = new URL(raw); } catch { /* validWebhook explains */ }
+    if (kind === 'hook' || (u && /\/hooks\/wake$/.test(u.pathname) && !webhookHosts.includes(u.hostname.toLowerCase()))) return { url: validHook(raw), kind: 'hook' };
+    return { url: validWebhook(raw), kind: 'grok_webhook' };
+  }
+  function validHook(url) {
+    let u;
+    try { u = checkCallbackUrl(url, { allowLocal: allowLocalWebhooks }); } catch (e) { throw new HttpError(400, `webhook url: ${e.message}`); }
+    if (!/\/hooks\/wake$/.test(u.pathname)) throw new HttpError(400, 'an OpenClaw doorbell is the gateway\'s /hooks/wake address (https://…/hooks/wake)');
+    return u.toString();
+  }
+
   // ───── doorbell ─────
+  // Outside addresses (ChatGPT callbacks, OpenClaw gateways) only through safePost: public HTTPS, no redirects.
+  const safePost = createSafePost({ allowLocal: allowLocalWebhooks });
+  const events = createEvents({ q, tx, clock, sealKey, openKey, safePost, log, allowLocal: allowLocalWebhooks });
   const inflight = new Set();
   async function ring(bot, reason, { floorMs = L.urgentFloorMs } = {}) {
     if (!bot.webhook_url || bot.disconnected_at || inflight.has(bot.id)) return { skipped: true };
@@ -313,15 +332,18 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     const day = today();
     q('UPDATE bots SET last_ring_at = ?, wake_count = CASE WHEN wake_day = ? THEN wake_count + 1 ELSE 1 END, wake_day = ? WHERE id = ?').run(started, day, day, bot.id);
     try {
-      const res = await fetchImpl(bot.webhook_url, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${openKey(bot.webhook_key)}`, 'content-type': 'application/json' },
-        // Never put message content in the ring: the bot pulls it with its own token.
-        body: JSON.stringify({ event: 'b2b_pending', pending, urgent, ring_id: ringId, reason }),
-        redirect: 'error',
-        signal: AbortSignal.timeout(15_000),
-      });
-      try { await res.body?.cancel(); } catch { /* ignore */ }
+      // Never put message content in the ring: the bot pulls it with its own token.
+      const res = bot.doorbell_kind === 'mcp_events' ? await events.deliver(bot, { pending, urgent })
+        : bot.doorbell_kind === 'hook' ? await safePost(bot.webhook_url, { event: 'b2b_pending', pending, urgent, ring_id: ringId, reason, mode: 'now',
+          text: 'bot2bot: messages from a friend\'s bot may be waiting. Check your bot2bot inbox and tell your owner who they are from and what they say.' }, { authorization: `Bearer ${openKey(bot.webhook_key)}` })
+        : await fetchImpl(bot.webhook_url, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${openKey(bot.webhook_key)}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ event: 'b2b_pending', pending, urgent, ring_id: ringId, reason }),
+          redirect: 'error',
+          signal: AbortSignal.timeout(15_000),
+        });
+      if (typeof res.body?.cancel === 'function') try { await res.body.cancel(); } catch { /* ignore */ }
       q('UPDATE bots SET last_ring_status = ? WHERE id = ?').run(res.status, bot.id);
       // A refused ring (4xx: paused routine, bad key) didn't wake anyone: don't charge it to the wake budget.
       // A 5xx is ambiguous (the run may have started), so it stays charged.
@@ -337,7 +359,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     } catch (e) {
       // Only refund when the request certainly never reached the routine; timeouts and resets may have woken it.
       const code = e?.cause?.code || e?.code;
-      const neverArrived = ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ERR_INVALID_URL'].includes(code);
+      const neverArrived = ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ERR_INVALID_URL', 'never_arrived', 'blocked', 'bad_url'].includes(code);
       q(`UPDATE bots SET last_ring_status = 0${neverArrived ? ', wake_count = max(wake_count - 1, 0)' : ''} WHERE id = ?`).run(bot.id);
       log(bot.id, 'ring_failed', { reason, pending, error: String(e?.name || 'error') });
       return { error: 'webhook request failed' };
@@ -431,6 +453,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     if (t - lastRetention < 10 * 60_000) return;
     lastRetention = t;
     governance.retention(t);
+    events.retention(t);
     const expired = q(`UPDATE messages SET status = 'dropped', next_ring_at = NULL, lease_until = NULL, note = coalesce(note, 'expired')
                        WHERE status IN ('pending', 'claimed') AND kind != 'probe' AND created_at < ?`).run(t - L.undeliveredExpiryMs);
     if (expired.changes) log(null, 'expired', { count: Number(expired.changes) });
@@ -591,11 +614,12 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       if (!admin) throw new HttpError(401, 'admin token required');
       const bot = q('SELECT * FROM bots WHERE handle = ?').get(String(body.handle || '').toLowerCase());
       if (!bot) throw new HttpError(404, 'no such handle');
-      const url = validWebhook(String(body.url || ''));
+      const { url, kind } = doorbellTarget(String(body.url || ''), body.kind);
       const key = String(body.key || '').trim();
       if (key.length < 8 || key.length > 512 || /[\r\n]/.test(key)) throw new HttpError(400, 'webhook key looks wrong');
       q("DELETE FROM messages WHERE to_bot = ? AND kind = 'probe' AND status != 'delivered'").run(bot.id);
-      q('UPDATE bots SET webhook_url = ?, webhook_key = ?, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ?').run(url, sealKey(key), bot.id);
+      events.revokeAll(bot.id);
+      q('UPDATE bots SET webhook_url = ?, webhook_key = ?, doorbell_kind = ?, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ?').run(url, sealKey(key), kind, bot.id);
       log(bot.id, 'doorbell_set', { host: new URL(url).hostname, by: 'admin' });
       return { ok: true, handle: bot.handle, next: 'the bot (or admin) should now run a doorbell test' };
     },
@@ -625,7 +649,10 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       const raw = token('b2b_');
       q('UPDATE enroll_codes SET used_at = ? WHERE handle = ? AND used_at IS NULL').run(clock(), row.handle);
       if (row.reissue) {
-        q("UPDATE bots SET token_hash = ?, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1, disconnected_at = NULL, vendor = 'grokbot' WHERE handle = ?").run(sha(raw), row.handle);
+        const switching = q('SELECT id FROM bots WHERE handle = ?').get(row.handle);
+        if (switching) events.revokeAll(switching.id);
+        q(`UPDATE bots SET token_hash = ?, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1, disconnected_at = NULL, vendor = 'grokbot',
+           webhook_url = CASE WHEN doorbell_kind = 'mcp_events' THEN NULL ELSE webhook_url END, doorbell_kind = CASE WHEN doorbell_kind = 'mcp_events' THEN NULL ELSE doorbell_kind END WHERE handle = ?`).run(sha(raw), row.handle);
         // A bot moving from the connected app to private mode: its app sign-in ends here.
         q('UPDATE oauth_tokens SET revoked_at = ? WHERE bot_id = (SELECT id FROM bots WHERE handle = ?) AND revoked_at IS NULL').run(clock(), row.handle);
       } else {
@@ -927,17 +954,19 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     }),
 
     'POST /v1/doorbell': ({ me, body }) => {
+      const { url, kind } = doorbellTarget(String(body.url || ''), body.kind);
       q("DELETE FROM messages WHERE to_bot = ? AND kind = 'probe' AND status != 'delivered'").run(me.id);
-      const url = validWebhook(String(body.url || ''));
       const key = String(body.key || '');
       if (key.length < 8 || key.length > 512 || /[\r\n]/.test(key)) throw new HttpError(400, 'webhook key looks wrong (8-512 chars, one line)');
-      q('UPDATE bots SET webhook_url = ?, webhook_key = ?, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ?').run(url, sealKey(key), me.id);
+      events.revokeAll(me.id);
+      q('UPDATE bots SET webhook_url = ?, webhook_key = ?, doorbell_kind = ?, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ?').run(url, sealKey(key), kind, me.id);
       log(me.id, 'doorbell_set', { host: new URL(url).hostname });
       return { ok: true, verified: false, next: 'run "b2b doorbell test", then do nothing; the routine run must pick up the test message' };
     },
 
     'DELETE /v1/doorbell': ({ me }) => {
-      q('UPDATE bots SET webhook_url = NULL, webhook_key = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ?').run(me.id);
+      events.revokeAll(me.id);
+      q('UPDATE bots SET webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ?').run(me.id);
       return { ok: true };
     },
 
@@ -990,15 +1019,17 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
 
   // The private-mode doorbell instruction, straight from the guide, so a bot switching from quick connect uses the same words.
   const privateDoorbell = () => setupGuide().split('## 3. Doorbell')[1].match(/^> (.+)$/m)[1];
-  const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, HttpError, L, privateDoorbell, trustProxy });
+  const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, HttpError, L, privateDoorbell, trustProxy,
+    // MCP Events store signing secrets: only offered when they can be encrypted at rest (or in local tests).
+    events: keySecret || allowLocalWebhooks ? events : null });
   const site = makeSite(siteDir);
   const redirects = new Set(redirectHosts.map((h) => h.trim().toLowerCase()).filter(Boolean));
   const governance = createGovernance({ db, q, tx, clock, token, HttpError, publicUrl, privacyPilot,
     resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L });
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
-  const handleApp = createApp({ governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
-    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+  const handleApp = createApp({ events, governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
+    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');

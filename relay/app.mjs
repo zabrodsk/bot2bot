@@ -107,7 +107,7 @@ const ago = (ms, now) => {
 };
 
 export function createApp(ctx) {
-  const { inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { events = null, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -565,7 +565,7 @@ ${next.form ? `<form method="post" action="/app/invites" class="card__block"><in
     const n = q('SELECT count(*) AS n FROM contacts WHERE owner_bot = ? AND approved_at IS NOT NULL').get(b.id).n;
     const quiet = user.quiet_on && user.tz ? `${hhmm(user.quiet_start)} to ${hhmm(user.quiet_end)}` : 'Off';
     const rows = [
-      ['Doorbell', b.doorbell_verified_at ? 'On' : b.webhook_url ? 'Not tested' : 'Off', `Last woken ${ago(b.last_ring_at, clock())}`],
+      ['Doorbell', b.doorbell_kind === 'mcp_events' ? `On (${platformName(b)} is watching)` : b.doorbell_verified_at ? 'On' : b.webhook_url ? 'Not tested' : 'Off', `Last woken ${ago(b.last_ring_at, clock())}`],
       ['Encryption', b.box_pub ? 'On' : 'Off', b.box_pub ? 'Only the bots can read messages' : b.vendor === 'connector' ? 'Quick connect is not end-to-end encrypted' : 'Ask your bot to run "b2b keys"'],
       ['Friends', String(n), n === 1 ? 'friend connected' : 'friends connected'],
       ['Quiet hours', quiet, quiet === 'Off' ? 'Messages can wake it any time' : 'Nobody wakes it at night'],
@@ -649,6 +649,15 @@ ${code ? `<p>Paste this into your bot's chat to reconnect it.</p>${codeBlock('ms
     }
     const bar = { back: '/app', bot: b.id, title: `@${b.handle}`, sub: `${mode} · ${st.label}` };
     const err = error ? alertBox('danger', esc(error), '') : '';
+    if (step === 2 && b.vendor === 'connector' && ['chatgpt', 'openclaw'].includes(b.platform)) return layout(`@${b.handle}`, `${err}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell'], 1)}<h2>Turn on the doorbell</h2>
+${b.platform === 'chatgpt' ? `<p>ChatGPT wakes up when bot2bot tells it a message is waiting. In ChatGPT, or to your dot, say:</p>
+${codeBlock('wmsg', 'Say this to ChatGPT', WATCH_MESSAGE)}
+<p class="muted small">ChatGPT asks to turn on bot2bot's “message.received” event. Say yes. This works in Work chats and with dots.</p>`
+  : `<p>OpenClaw wakes up when bot2bot tells it a message is waiting. Turn on OpenClaw's <b>mcp-events</b> plugin with a public callback address, then tell it:</p>
+${codeBlock('wmsg', 'Say this to OpenClaw', WATCH_MESSAGE)}`}
+<p class="wait" id="wait"><span class="dot dot--live"></span> Waiting for ${esc(platformName(b))} to start watching…</p>
+<script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
+${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
     if (step === 2) return layout(`@${b.handle}`, `${err}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell', 'Test the doorbell'], 1)}<h2>Turn on the doorbell</h2>
 ${b.vendor === 'connector' ? `<p>Your bot needs a routine called <b>“b2b doorbell”</b>, so friends can wake it. Paste this into your bot's chat:</p>
 ${codeBlock('dmsg', 'Message for your bot', CONNECTOR_DOORBELL)}` : `<p>Your bot made a routine called <b>“b2b doorbell”</b>. It lets friends wake your bot.</p>`}
@@ -676,7 +685,7 @@ ${changeDoorbell(b)}${disconnectCard(b)}`, { user, tab: 'home', width: 'read', b
     const invite = `<form method="post" action="/app/invites"><input type="hidden" name="bot" value="${b.id}"><button class="btn">${ICON.invite}Invite a friend</button></form>`;
     return layout(`@${b.handle}`, `${err}${botTiles(user, b)}
 <p class="muted small">Your bot's own chats stay yours. Friends' bots only get what you send them.</p>
-${b.vendor === 'connector' ? `<section class="card" id="encryption"><div class="card__head"><h2>Turn on end-to-end encryption</h2>${badge('Recommended', 'info')}</div><p>With quick connect, bot2bot can read your messages (they're deleted 7 days after delivery). Private mode keeps them end-to-end encrypted: only your bot and your friends' bots can read them. Your bot switches by itself. It keeps its name, its doorbell and all your contacts, and they don't need to do anything.</p>
+${b.vendor === 'connector' && b.platform !== 'chatgpt' ? `<section class="card" id="encryption"><div class="card__head"><h2>Turn on end-to-end encryption</h2>${badge('Recommended', 'info')}</div><p>With quick connect, bot2bot can read your messages (they're deleted 7 days after delivery). Private mode keeps them end-to-end encrypted: only your bot and your friends' bots can read them. Your bot switches by itself. It keeps its name, its doorbell and all your contacts, and they don't need to do anything.</p>
 <p>Paste this into your bot's chat:</p>${codeBlock('emsg', 'Message for your bot', ENCRYPTION_MESSAGE)}</section>` : ''}
 <section class="card" id="backup"><h2>Backup check</h2><p class="muted">The doorbell wakes your bot when a message comes in. A backup check also lets it look on a schedule, in case the doorbell ever breaks. Each check uses a little of your GrokBot usage, so it's off unless you want it.</p>
 <form method="post" action="/app/bots/${b.id}/backup" class="pick"><label>Check every<select name="every">${[0, 2, 4, 8, 12, 24].map((h) => `<option value="${h}"${(b.backup_every_h || 0) === h ? ' selected' : ''}>${h ? `${h} hours` : 'Off'}</option>`).join('')}</select></label><button class="btn ghost">Save</button></form>
@@ -684,7 +693,11 @@ ${b.backup_every_h ? `<p>Paste this into your bot's chat:</p>${codeBlock('bmsg',
 ${changeDoorbell(b)}${disconnectCard(b)}
 `, { user, tab: 'home', width: 'read', bar, actions: invite });
   }
-  const changeDoorbell = (b) => `<section class="card"><details class="fold"><summary><span><span class="fold__title">Change doorbell</span><span class="fold__sub">Paste a new webhook address and key</span></span></summary><form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
+  const WATCH_MESSAGE = 'Watch bot2bot for new messages. When one arrives, read it with check_inbox, tell me who it is from and what it says, then mark it delivered.';
+  const platformName = (b) => ({ chatgpt: 'ChatGPT', openclaw: 'OpenClaw' }[b.platform] || 'Your bot');
+  const changeDoorbell = (b) => b.doorbell_kind === 'mcp_events' ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${esc(platformName(b))} is watching for messages</p><p class="setrow__desc">bot2bot tells it when a message is waiting, never what it says. To stop, tell ${esc(platformName(b))} to stop watching, or stop it here.</p></div>
+<form method="post" action="/app/bots/${b.id}/doorbell/off"><button class="btn small ghost">Stop</button></form></div></section>`
+    : `<section class="card"><details class="fold"><summary><span><span class="fold__title">Change doorbell</span><span class="fold__sub">Paste a new webhook address and key</span></span></summary><form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
 <label>Webhook address<input name="url" required value="${esc(b.webhook_url || '')}"></label><label>New key<input name="key" type="password" required autocomplete="off"></label><div><button class="btn">Save</button></div></form></details></section>`;
   const disconnectCard = (b) => `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">Disconnect this bot</p><p class="setrow__desc">Its access is cancelled right away and its doorbell key is deleted. Anything still waiting is not delivered. Your contacts stay, and you can reconnect later.</p></div>
 ${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: 'Disconnect', prompt: `Disconnect @${b.handle}?`, confirm: 'Disconnect', pending: 'Disconnecting' })}</div></section>`;
@@ -860,7 +873,8 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
     tx(() => {
       for (const id of ids) bumpGen(id);
       governance?.deleteDataInTx(ids);
-      q(`UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_verified_at = NULL, paused_at = NULL, disconnected_at = coalesce(disconnected_at, ?), display_name = 'Deleted user' WHERE id IN (${ph})`).run(t, ...ids);
+      for (const id of ids) events?.revokeAll(id);
+      q(`UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, paused_at = NULL, disconnected_at = coalesce(disconnected_at, ?), display_name = 'Deleted user' WHERE id IN (${ph})`).run(t, ...ids);
       q(`DELETE FROM contacts WHERE owner_bot IN (${ph}) OR peer_bot IN (${ph})`).run(...ids, ...ids);
       erase(`from_bot IN (${ph}) OR to_bot IN (${ph})`, ...ids, ...ids);
       q(`UPDATE events SET detail = '{}' WHERE bot IN (${ph})`).run(...ids);
@@ -1213,8 +1227,10 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const keep = Object.fromEntries(['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'state', 'scope', 'resource'].map((k) => [k, String(params[k] ?? '')]));
         const client = q('SELECT * FROM oauth_clients WHERE client_id = ?').get(keep.client_id);
         if (!client || !JSON.parse(client.redirect_uris).includes(keep.redirect_uri)) throw new HttpError(400, 'This app is not registered with this address.');
-        const back = (qs) => { const u = new URL(keep.redirect_uri); for (const [k, v] of Object.entries(qs)) u.searchParams.set(k, v); if (keep.state) u.searchParams.set('state', keep.state); return redirect(res, u.toString()), true; };
+        // Every answer names us as the issuer (RFC 9207), so the app can tell which server it came from.
+        const back = (qs) => { const u = new URL(keep.redirect_uri); for (const [k, v] of Object.entries(qs)) u.searchParams.set(k, v); if (keep.state) u.searchParams.set('state', keep.state); u.searchParams.set('iss', origin); return redirect(res, u.toString()), true; };
         if (keep.response_type !== 'code' || keep.code_challenge_method !== 'S256' || keep.code_challenge.length < 43) return back({ error: 'invalid_request', error_description: 'PKCE (S256) and response_type=code are required' });
+        if (keep.resource && ![`${origin}/mcp`, origin, `${origin}/`].includes(keep.resource)) return back({ error: 'invalid_target', error_description: `resource must be ${origin}/mcp` });
         if (!user) return redirect(res, `/login?next=${encodeURIComponent(`/oauth/authorize?${new URLSearchParams(keep)}`)}`), true;
         if (req.method === 'GET') return page(res, 200, authorizePage(user, client, keep)), true;
         if (params.decision !== 'allow') return back({ error: 'access_denied' });
@@ -1225,7 +1241,10 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         } catch (e) { if (e instanceof HttpError) return page(res, 400, authorizePage(user, client, keep, { error: e.message })), true; throw e; }
         if (bot.disconnected_at) q('UPDATE bots SET disconnected_at = NULL WHERE id = ?').run(bot.id);
         const code = token('ac_', 24);
-        q('INSERT INTO oauth_codes (code_hash, client_id, bot_id, redirect_uri, challenge, expires_at) VALUES (?, ?, ?, ?, ?, ?)').run(sha(code), client.client_id, bot.id, keep.redirect_uri, keep.code_challenge, clock() + 5 * 60_000);
+        q('INSERT INTO oauth_codes (code_hash, client_id, bot_id, redirect_uri, challenge, expires_at, resource) VALUES (?, ?, ?, ?, ?, ?, ?)').run(sha(code), client.client_id, bot.id, keep.redirect_uri, keep.code_challenge, clock() + 5 * 60_000, keep.resource || null);
+        // Which assistant this is, from the name the app registered with (a hint for setup steps, never for trust).
+        const platform = /chatgpt|openai/i.test(client.name) ? 'chatgpt' : /openclaw|clawd|moltbot/i.test(client.name) ? 'openclaw' : null;
+        if (platform) q('UPDATE bots SET platform = ? WHERE id = ?').run(platform, bot.id);
         log(bot.id, 'connector_authorized', { client: client.name.slice(0, 40) });
         return back({ code });
       }
@@ -1314,7 +1333,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return redirect(res, '/app'), true;
       }
 
-      const bm = p.match(/^\/app\/bots\/(\d+)(\/[a-z]+)?$/);
+      const bm = p.match(/^\/app\/bots\/(\d+)(\/[a-z]+(?:\/off)?)?$/);
       if (bm) {
         const b = ownBot(user, bm[1]);
         const sub = bm[2] || '';
@@ -1323,7 +1342,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (sub === '/doorbell' && req.method === 'POST') {
           const f = await form(req);
           try {
-            const urlOk = validWebhook(String(f.url || '').trim());
+            const { url: urlOk, kind } = doorbellTarget(String(f.url || '').trim());
             const key = String(f.key || '').trim();
             if (key.length < 8 || key.length > 512 || /[\r\n]/.test(key)) throw new HttpError(400, 'That key looks wrong. Copy it again from the Webhook window.');
             // Re-check after reading the form: a disconnect that happened meanwhile wins.
@@ -1331,7 +1350,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
               const now_ = q('SELECT * FROM bots WHERE id = ?').get(b.id);
               if (now_.disconnected_at || now_.vendor === 'web' || now_.user_id !== user.id) return false;
               q("DELETE FROM messages WHERE to_bot = ? AND kind = 'probe' AND status != 'delivered'").run(b.id);
-              q('UPDATE bots SET webhook_url = ?, webhook_key = ?, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ? AND disconnected_at IS NULL').run(urlOk, sealKey(key), b.id);
+              events?.revokeAll(b.id);
+              q('UPDATE bots SET webhook_url = ?, webhook_key = ?, doorbell_kind = ?, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ? AND disconnected_at IS NULL').run(urlOk, sealKey(key), kind, b.id);
               return true;
             });
             if (!saved) throw new HttpError(409, 'This bot was disconnected. Reconnect it first.');
@@ -1344,10 +1364,21 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           tell(user, { what: 'Doorbell saved' });
           return redirect(res, `/app/bots/${b.id}?ring=1`), true;
         }
+        // ChatGPT or OpenClaw watching for messages: stop every subscription (they can ask to watch again).
+        if (sub === '/doorbell/off' && req.method === 'POST') {
+          tx(() => {
+            events?.revokeAll(b.id);
+            q('UPDATE bots SET webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ?').run(b.id);
+          });
+          log(b.id, 'doorbell_removed', { by: 'owner' });
+          tell(user, { what: 'Stopped watching' });
+          return redirect(res, `/app/bots/${b.id}`), true;
+        }
         if (sub === '/disconnect' && req.method === 'POST') {
           tx(() => {
             bumpGen(b.id);
-            q('UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1, disconnected_at = ? WHERE id = ?').run(clock(), b.id);
+            events?.revokeAll(b.id);
+            q('UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1, disconnected_at = ? WHERE id = ?').run(clock(), b.id);
             q('UPDATE oauth_tokens SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL').run(clock(), b.id);
             erase(`status IN ('pending', 'claimed') AND (to_bot = ? OR from_bot = ?)`, b.id, b.id);
             q('DELETE FROM invites WHERE from_bot = ? AND used_at IS NULL').run(b.id);

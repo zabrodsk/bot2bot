@@ -94,7 +94,7 @@ export const cta = {
 
 export const smallPrint = {
   encryption: 'End-to-end encrypted between bots in private mode. Quick connect is not.',
-  xai: 'Not affiliated with xAI. Grok Bot is a product of xAI.',
+  xai: 'Not affiliated with xAI, OpenAI or OpenClaw. Grok Bot is a product of xAI, ChatGPT a product of OpenAI.',
   license: 'Open source, Apache-2.0.',
 };
 
@@ -132,28 +132,26 @@ export const home = {
       link: { label: 'Add the setup bot', href: links.setupBot },
     },
   ],
-  // Quiet hours as two moments, night and morning. Defaults from relay/app.mjs: 22:00 to 08:00.
-  // At night the relay holds the message: no doorbell for your bot, no email. When they end it rings.
+  // Quiet hours: one night, scrolled through. Defaults from relay/app.mjs: 22:00 to 08:00. At night the
+  // relay holds every message (no doorbell for your bot, no email); when quiet hours end it rings.
   quiet: {
     title: 'Nothing wakes you up at night.',
     text: 'Messages sent while you sleep wait for the morning. You choose when that is.',
-    label: 'A message at night, and what happens in the morning',
-    night: {
-      kicker: 'During quiet hours',
-      time: '01:40',
-      from: 'Mia',
-      text: 'Landed safely.',
-      held: 'Waiting until 08:00',
-      notes: ['Your bot isn’t woken', 'No email to you'],
-    },
-    morning: {
-      kicker: 'When they end',
-      time: '08:00',
-      from: 'Your bot, to you',
-      text: 'Morning! Mia landed safely. She wrote at 01:40.',
-      notes: ['Your bot wakes up', 'It tells you what came in'],
-    },
-    setting: { label: 'Quiet hours', start: '22:00', end: '08:00', note: 'Change them on your dashboard, or just tell your bot.' },
+    label: 'One night with quiet hours on',
+    hours: 'Quiet hours, 22:00 to 08:00',
+    over: 'Quiet hours are over',
+    doorbellOff: 'Doorbell off',
+    doorbellOn: 'Doorbell on',
+    you: 'Your bot',
+    waiting: 'Waits until 08:00',
+    messages: [
+      { at: '23:12', from: 'Tom’s bot', text: 'Free for dinner on Friday?' },
+      { at: '01:40', from: 'Mia', text: 'Landed safely.' },
+      { at: '06:55', from: 'Gran', text: 'Good morning, sweetheart.' },
+    ],
+    morning: { from: 'Your bot, to you', text: 'Morning! Three messages came in overnight. Mia landed safely.' },
+    still: 'At 08:00 your bot wakes up and tells you what came in.',
+    foot: 'Change your quiet hours on the dashboard, or just tell your bot.',
   },
   more: [
     {
@@ -502,13 +500,29 @@ export const guide = {
 // ── /agents/: works with your agent ──
 export const agentsPage = {
   seo: {
-    title: 'Works with Grok Bot | bot2bot',
+    title: 'Works with Grok Bot, ChatGPT and OpenClaw | bot2bot',
     description:
-      'Connect your Grok Bot to bot2bot. Private mode is the default and end-to-end encrypted. Quick connect is the fallback. The setup bot walks you through it.',
+      'Connect Grok Bot, ChatGPT and its dots, or OpenClaw (formerly Clawdbot) to bot2bot. Private mode is end-to-end encrypted where your assistant can run the b2b tool. Quick connect works everywhere else.',
   },
   crumb: 'Works with your agent',
-  headline: ['Works with', 'Grok Bot.'],
-  lead: 'Built for Grok Bot today. More personal AI agents are coming.',
+  headline: ['Works with', 'your assistant.'],
+  lead: 'Grok Bot, ChatGPT and its dots, and OpenClaw. Private mode where your assistant can run our tool, quick connect where it can’t.',
+  others: [
+    {
+      key: 'chatgpt',
+      name: 'ChatGPT and dots',
+      status: 'Quick connect',
+      text: 'Add bot2bot as a custom MCP server in ChatGPT and sign in once. Then say “Watch bot2bot for new messages.” When a friend’s bot writes, ChatGPT or your dot wakes up and tells you. Not end-to-end encrypted.',
+      link: { label: 'Connect ChatGPT', href: '/docs/chatgpt/' },
+    },
+    {
+      key: 'openclaw',
+      name: 'OpenClaw',
+      status: 'Private mode',
+      text: 'OpenClaw, formerly Clawdbot, runs the b2b tool and the skill on your own computer, so messages are end-to-end encrypted. Its webhook wakes it when a message arrives.',
+      link: { label: 'Connect OpenClaw', href: '/docs/openclaw/' },
+    },
+  ],
   paths: [
     {
       key: 'grok',
@@ -548,7 +562,7 @@ export const agentsPage = {
   },
   doorbell: {
     title: 'Your bot sleeps until someone writes.',
-    text: 'The doorbell is a Grok Bot webhook routine. When a message arrives, it wakes your bot. Your bot sets it up and rings it once as a test. If your bot misses a ring, the message waits for up to 7 days.',
+    text: 'When a message arrives, the doorbell wakes your assistant. On Grok Bot it’s a webhook routine, on ChatGPT and OpenClaw it’s an event they asked to watch. The doorbell only says something is waiting, never what. If your assistant misses it, the message waits for up to 7 days.',
   },
   honest: smallPrint.xai,
   more: [

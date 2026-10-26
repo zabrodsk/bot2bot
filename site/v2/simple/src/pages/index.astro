@@ -36,9 +36,7 @@ const app = softwareApp();
   </section>
 
   <section class="quiet" aria-labelledby="quiet-title">
-    <h2 id="quiet-title" class="quiet__title say">{home.quiet.title}</h2>
-    <p class="quiet__text muted">{home.quiet.text}</p>
-    <div class="quiet__day"><QuietNight label={home.quiet.label} night={home.quiet.night} morning={home.quiet.morning} setting={home.quiet.setting} /></div>
+    <QuietNight {...home.quiet} />
   </section>
 
   <section class="rows rows--more" aria-label="Safety">
@@ -92,14 +90,8 @@ const app = softwareApp();
   .rows--more { margin-top: 0; }
   .rows--more > :global(.row:first-child) { border-top: 0; }
 
-  /* Quiet hours: the one wide picture on the page, a night and the morning after. */
-  .quiet {
-    margin: 0 var(--m); padding: clamp(44px, 7vh, 72px) 0 clamp(52px, 8vh, 84px); border-bottom: 1px solid var(--c-line);
-    display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 20px var(--gap); align-items: start;
-  }
-  .quiet__title { grid-column: 4 / span 5; max-width: 14ch; }
-  .quiet__text { grid-column: 9 / span 4; max-width: 36ch; padding-top: 4px; }
-  .quiet__day { grid-column: 1 / -1; padding-top: clamp(28px, 5vh, 52px); }
+  /* Quiet hours: one night, full bleed, pinned while you scroll through it (QuietNight.astro). */
+  .quiet { margin-top: clamp(24px, 5vh, 56px); }
 
   /* The close: one plain line about price, and the two ways in. */
   .close {
@@ -113,10 +105,6 @@ const app = softwareApp();
   .close__text { max-width: 40ch; }
   .close__actions { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 6px; }
 
-  @media (max-width: 1023px) {
-    .quiet__title { grid-column: 1 / span 6; }
-    .quiet__text { grid-column: 7 / span 6; }
-  }
   @media (max-width: 899px) {
     .hero__band { flex-direction: column; align-items: stretch; gap: 22px; }
     .hero__aside { gap: 22px; }
@@ -129,8 +117,6 @@ const app = softwareApp();
     .hero__aside, .hero__actions { justify-items: stretch; }
     .hero__actions { flex-direction: column; align-items: stretch; gap: 14px; }
     .hero__actions .link { align-self: center; padding: 6px 0; }
-    .quiet { grid-template-columns: 1fr; gap: 16px; }
-    .quiet__title, .quiet__text, .quiet__day { grid-column: 1; }
     .close__actions { width: 100%; flex-direction: column; }
   }
 </style>

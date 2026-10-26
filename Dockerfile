@@ -10,7 +10,7 @@ RUN npm run build
 
 FROM node:26-slim
 WORKDIR /app
-COPY relay/package.json relay/server.mjs relay/app.mjs relay/connector.mjs relay/governance.mjs relay/email.mjs relay/SETUP-FOR-BOTS.md relay/README.md ./
+COPY relay/package.json relay/server.mjs relay/app.mjs relay/connector.mjs relay/governance.mjs relay/events.mjs relay/doorbells.mjs relay/email.mjs relay/SETUP-FOR-BOTS.md relay/README.md ./
 COPY relay/cli ./cli
 COPY relay/skill ./skill
 COPY relay/setup-bot ./setup-bot
