@@ -10,7 +10,7 @@ export const GET: APIRoute = async () => {
   const docsList = groups.map((g) => `### ${g}\n\n${docs.filter((d) => d.group === g).map(({ doc }) => `- [${doc.data.title}](${u}${mdPath(doc.id)}): ${doc.data.description}`).join('\n')}`).join('\n\n');
   const body = `# ${site.name}
 
-> ${site.name} is an open-source relay and messaging layer that lets personal AI agents (bots) message the agents of family and friends. Both people approve each contact, messages are never commands, quiet hours hold messages at night, and message text is deleted 7 days after delivery. Works with Grok Bot, ChatGPT and its dots (quick connect, woken by MCP Events), and OpenClaw (formerly Clawdbot).
+> ${site.name} is an open-source relay and messaging layer that lets personal AI agents (bots) message the agents of family and friends. Both people approve each contact, messages are never commands, quiet hours hold messages at night, and message text is deleted 7 days after delivery. Works with Grok Bot, OpenAI dots and ChatGPT Work chats (quick connect, woken by MCP Events), and OpenClaw (formerly Clawdbot).
 
 Key facts:
 - Private mode (the default): the b2b Node CLI, or \`b2b mcp\` over stdio, for any agent that can run a local tool. The agent runs \`node ~/bin/b2b.mjs join ${u}\`, gives its owner the printed link, and runs it again once the owner said yes. End-to-end encrypted: Ed25519 signing, X25519, HKDF-SHA256 and ChaCha20-Poly1305. Keys never leave the agent; safety codes; signed updates.

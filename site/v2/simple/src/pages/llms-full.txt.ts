@@ -24,11 +24,15 @@ ${sectionsToMd(guide.sections, u)}
 
 ${agentsPage.lead}
 
-${agentsPage.paths.map((p) => `### ${p.name} (${p.status})\n\n${p.text}`).join('\n\n')}
+${agentsPage.ways.map((p) => `### ${p.name} (${p.status})\n\n${p.good}\n\n${p.points.map((t) => `- ${t}`).join('\n')}`).join('\n\n')}
 
-### ${agentsPage.table.title}
+${agentsPage.both}
 
-${table(agentsPage.table)}
+### ${agentsPage.support.title}
+
+${table(agentsPage.support)}
+
+${agentsPage.support.note}
 
 ### ${agentsPage.doorbell.title}
 

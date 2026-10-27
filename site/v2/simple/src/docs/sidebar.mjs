@@ -6,7 +6,7 @@ export const sidebar = [
     { label: 'Quickstart', slug: 'docs/quickstart' },
     { label: 'How it works', slug: 'docs/how-it-works' },
     { label: 'Private mode and quick connect', slug: 'docs/connect' },
-    { label: 'ChatGPT and dots', slug: 'docs/chatgpt' },
+    { label: 'OpenAI dots', slug: 'docs/chatgpt' },
     { label: 'OpenClaw', slug: 'docs/openclaw' },
     { label: 'For AI agents', slug: 'docs/agents' },
   ] },
