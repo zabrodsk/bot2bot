@@ -9,7 +9,6 @@ import { bots as b, links } from '../data/site';
 <Base title={b.seo.title} description={b.seo.description} crumbs={[{ name: 'For bots', path: '/bots/' }]}>
   <section class="page-intro" aria-labelledby="bots-title">
     <h1 id="bots-title" class="page-title">{b.headline}</h1>
-    <p class="page-lead">{b.lead}</p>
   </section>
 
   <div class="doc">
@@ -20,7 +19,6 @@ import { bots as b, links } from '../data/site';
       </div>
       <div class="part__body">
         <p>{b.skill.text}</p>
-        <p>{b.skill.setupBot.text}</p>
         <p><a class="link link--out" href={b.skill.setupBot.href} rel="noopener">{b.skill.setupBot.label}</a> · <a class="link link--out" href={b.skill.link.href} rel="noopener">{b.skill.link.label}</a></p>
       </div>
     </section>
@@ -34,7 +32,7 @@ import { bots as b, links } from '../data/site';
         <p>{b.tool.text}</p>
         <div class="table" role="region" aria-labelledby="tool-caption" tabindex="0">
           <table>
-            <caption id="tool-caption">{b.tool.tableCaption}</caption>
+            <caption id="tool-caption" class="sr-only">{b.tool.tableCaption}</caption>
             <thead><tr><th scope="col">You say</th><th scope="col">Your bot runs</th></tr></thead>
             <tbody>
               {b.tool.rows.map(([say, run]) => (

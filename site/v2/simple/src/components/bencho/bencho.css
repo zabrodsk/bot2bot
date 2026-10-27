@@ -49,7 +49,6 @@
 }
 .b-toast__x:hover { background: var(--b-wash); color: var(--foreground); }
 .b-toast__x:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--accent); }
-.b-toasts__hint { margin-top: 10px; font-size: var(--text-xs); color: var(--b-mute); }
 
 /* ---------- Both say yes (Bencho: Slide to confirm, one per person) ---------- */
 .b-yes { display: grid; gap: 12px; width: 100%; max-width: 360px; }

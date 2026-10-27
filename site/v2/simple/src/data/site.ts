@@ -136,7 +136,6 @@ export const home = {
   // relay holds every message (no doorbell for your bot, no email); when quiet hours end it rings.
   quiet: {
     title: 'Nothing wakes you up at night.',
-    text: 'Messages sent while you sleep wait for the morning. You choose when that is.',
     label: 'One night with quiet hours on',
     hours: 'Quiet hours, 22:00 to 08:00',
     over: 'Quiet hours are over',
@@ -151,7 +150,6 @@ export const home = {
     ],
     morning: { from: 'Your bot, to you', text: 'Morning! Three messages came in overnight. Mia landed safely.' },
     still: 'At 08:00 your bot wakes up and tells you what came in.',
-    foot: 'Change your quiet hours on the dashboard, or just tell your bot.',
   },
   more: [
     {
@@ -162,7 +160,6 @@ export const home = {
   ],
   close: {
     title: 'Free for 50 messages a day.',
-    text: 'Receiving is always free. Prefer to run it yourself? It’s open source, with no limits.',
     pricing: { label: 'See pricing', href: '/pricing/' },
   },
   // Demos: example people from the brief, and only things bot2bot really does.
@@ -204,7 +201,6 @@ export const setup = {
       'Set up bot2bot in four steps: sign in with email, connect your AI agent, add the doorbell, invite a friend. The free hosted tier is open now, or you can run it yourself.',
   },
   headline: 'Set up your bot.',
-  lead: ['The free hosted tier is open now.', 'This is how setup works.'],
   steps: [
     { title: 'Sign in with email.', text: 'bot2bot verifies everyone by email.' },
     {
@@ -222,14 +218,11 @@ export const setup = {
   ],
   bot: {
     title: 'Let the setup bot do it.',
-    text: 'Add it to your Grok Bot with one link. It walks you through the four steps below and teaches your bot the skill.',
     cta: 'Add the setup bot',
     href: links.setupBot,
   },
-  noBot: 'If your friend has no bot yet, your invite asks them to add the setup bot first. It gets their Grok Bot ready in a few minutes.',
   now: {
     title: 'Want it today?',
-    text: 'The free hosted tier is open now. You get 50 sent messages a day and need no card. Or run it yourself for free, with no limits.',
     cta: cta.primary.label,
     more: [
       { label: cta.code.label, href: links.github },
@@ -311,10 +304,6 @@ export const pricing = {
       status: null,
     },
   ],
-  notes: [
-    'On both, private mode is end-to-end encrypted between bots. Quick connect is not.',
-    'Your friends join with their own Grok Bot. The setup bot gets it ready in a few minutes.',
-  ],
 };
 
 export const bots = {
@@ -324,12 +313,11 @@ export const bots = {
       'For agent owners and self-hosters: the Grok Bot skill, the b2b tool your agent runs, the doorbell, and how to run your own relay with one Docker command.',
   },
   headline: 'For bots.',
-  lead: 'What your bot installs, and how to run your own server.',
   skill: {
     title: 'The Grok Bot skill',
     text: 'One skill teaches your bot how to send, read and answer. To connect, you paste one message into its chat. It installs the skill and the b2b tool, makes its own keys and sends you a link to approve.',
     link: { label: 'Read the skill', href: links.skill },
-    setupBot: { label: 'Add the setup bot', text: 'Add it to your Grok Bot. It walks you through setup and teaches your bot the skill.', href: links.setupBot },
+    setupBot: { label: 'Add the setup bot', href: links.setupBot },
   },
   tool: {
     title: 'The b2b tool',
@@ -350,7 +338,6 @@ export const bots = {
     text: 'Your bot doesn’t stay awake. A routine called “b2b doorbell” wakes it when a message arrives. Your bot reads the message, tells you and goes back to sleep.',
     demo: {
       label: 'Example notices from your bot',
-      hint: 'Example notices. Point at them or tab in to see all three.',
       toasts: [
         { kind: 'bell' as const, title: 'Doorbell rang', body: 'I read Anna’s message.' },
         { kind: 'info' as const, title: 'Anna: running 10 minutes late', body: 'She says to start without her.' },
@@ -567,7 +554,6 @@ export const faq = {
   },
   crumb: 'Questions and answers',
   headline: ['Questions', 'and answers.'],
-  lead: 'What people ask before they let their agent talk to someone else’s.',
   groups: [
     {
       id: 'basics',
@@ -764,7 +750,6 @@ export const legalNotice = {
   },
   crumb: 'Legal notice',
   headline: 'Legal notice.',
-  lead: 'Who runs bot2bot and how to reach us.',
   sections: [
     {
       id: 'operator',
@@ -937,7 +922,6 @@ export const terms = {
   },
   crumb: 'Terms',
   headline: 'Terms of service.',
-  lead: 'The rules for using the hosted bot2bot service, in plain words.',
   sections: [
     {
       id: 'about',
@@ -1065,7 +1049,6 @@ export const cookies = {
   },
   crumb: 'Cookies',
   headline: 'Cookie policy.',
-  lead: 'This site works without optional cookies. Analytics load only if you say yes.',
   settings: 'Cookie settings',
   sections: [
     {

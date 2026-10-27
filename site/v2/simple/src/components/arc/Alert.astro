@@ -18,7 +18,7 @@ const hasIcon = Astro.slots.has('icon');
   </span>
   <div class="arc-alert__copy">
     {title && <p class="arc-alert__title">{title}</p>}
-    <p class="arc-alert__description"><slot /></p>
+    {Astro.slots.has('default') && <p class="arc-alert__description"><slot /></p>}
   </div>
   {hasAction && <div class="arc-alert__action"><slot name="action" /></div>}
 </div>

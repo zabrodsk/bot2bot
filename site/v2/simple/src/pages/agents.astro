@@ -18,7 +18,6 @@ const figs = { quick: 'quick', private: 'locked' } as const;
   <section class="page-intro" aria-labelledby="agents-title">
     <Crumbs trail={crumbs} />
     <h1 id="agents-title" class="page-title">{a.headline[0]} <br />{a.headline[1]}</h1>
-    <p class="page-lead">{a.lead}</p>
     <Logos class="page-logos" size={24} />
   </section>
 
@@ -32,19 +31,16 @@ const figs = { quick: 'quick', private: 'locked' } as const;
         <ul class="way__points">{p.points.map((t) => <li>{t}</li>)}</ul>
       </article>
     ))}
-    <p class="ways__both muted">{a.both}</p>
   </section>
 
   <section class="matrix" aria-labelledby="matrix-title">
     <h2 id="matrix-title" class="say matrix__title">{a.support.title}</h2>
     <CompareTable caption={a.support.caption} head={a.support.head} rows={a.support.rows} own={1} />
-    <p class="muted small">{a.support.note}</p>
   </section>
   <section class="bell" aria-labelledby="bell-title">
     <h2 id="bell-title" class="say bell__title">{a.doorbell.title}</h2>
     <div class="bell__body">
       <p class="muted">{a.doorbell.text}</p>
-      <p class="muted small">{a.honest}</p>
       <ul class="bell__more">{a.more.map((m) => <li><a class="link" href={m.href}>{m.label}</a></li>)}</ul>
       <div><Button href={a.cta.href} data-astro-reload data-astro-prefetch="false">{a.cta.label}</Button></div>
     </div>
@@ -65,7 +61,6 @@ const figs = { quick: 'quick', private: 'locked' } as const;
   .way__name { font-family: var(--f-display); font-weight: 460; font-size: var(--t-m); letter-spacing: -0.03em; line-height: 1.1; }
   .way__good { max-width: 40ch; }
   .way__points { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; color: var(--c-muted); max-width: 44ch; }
-  .ways__both { grid-column: 1 / -1; max-width: 60ch; }
 
   .matrix { margin: clamp(96px, 16vh, 168px) var(--m) 0; display: grid; gap: 32px; }
   .matrix__title { max-width: 16ch; }

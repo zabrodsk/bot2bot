@@ -7,7 +7,7 @@ import { legalUi, updated, type Section } from '../data/site';
 import { webPage } from '../data/schema';
 interface Props {
   path: string;
-  page: { seo: { title: string; description: string }; crumb: string; headline: string; lead: string; sections: Section[] };
+  page: { seo: { title: string; description: string }; crumb: string; headline: string; sections: Section[] };
 }
 const { path, page } = Astro.props;
 const crumbs = [{ name: page.crumb, path }];
@@ -17,7 +17,6 @@ const crumbs = [{ name: page.crumb, path }];
   <section class="page-intro" aria-labelledby="legal-title">
     <Crumbs trail={crumbs} />
     <h1 id="legal-title" class="page-title legal__title">{page.headline}</h1>
-    <p class="page-lead">{page.lead}</p>
     <p class="legal__updated">{legalUi.updated}: <time datetime={updated.iso}>{updated.label}</time></p>
     <slot name="intro" />
   </section>

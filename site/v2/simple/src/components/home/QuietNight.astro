@@ -7,9 +7,9 @@
 import { BOT } from '../../data/bot';
 interface Message { at: string; from: string; text: string }
 interface Props {
-  title: string; text: string; label: string; hours: string; over: string;
+  title: string; label: string; hours: string; over: string;
   doorbellOff: string; doorbellOn: string; you: string; waiting: string;
-  messages: Message[]; morning: { from: string; text: string }; still: string; foot: string;
+  messages: Message[]; morning: { from: string; text: string }; still: string;
 }
 const p = Astro.props;
 
@@ -54,7 +54,6 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
 
   <div class="qs__copy">
     <h2 id="quiet-title" class="qs__title say">{p.title}</h2>
-    <p class="qs__text">{p.text}</p>
   </div>
 
   <div class="qs__clock">
@@ -108,7 +107,7 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
   </div>
 
   <p class="qs__foot">
-    <span class="qs__still">{p.still} </span>{p.foot}
+    <span class="qs__still">{p.still}</span>
   </p>
 </div>
 
@@ -152,7 +151,6 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
   /* Words. Everything that sits on the sky follows --qs-fg, which flips at dawn. */
   .qs__copy { left: var(--m); top: clamp(48px, 9vh, 96px); width: min(34rem, 44vw); display: grid; gap: 18px; }
   .qs__title { color: var(--qs-fg); max-width: 13ch; }
-  .qs__text { color: var(--qs-muted); max-width: 34ch; }
   .qs__clock { right: var(--m); top: clamp(36px, 7vh, 80px); text-align: right; }
   .qs__time {
     font-family: var(--f-display); font-weight: 440; font-size: clamp(5.5rem, 2rem + 13vw, 15.5rem);

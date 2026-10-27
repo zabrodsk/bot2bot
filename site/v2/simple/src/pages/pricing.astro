@@ -9,7 +9,6 @@ import { softwareApp } from '../data/schema';
 <Base title={p.seo.title} description={p.seo.description} crumbs={[{ name: 'Pricing', path: '/pricing/' }]} schema={[softwareApp()]}>
   <section class="page-intro" aria-labelledby="price-title">
     <h1 id="price-title" class="page-title">{p.headline}</h1>
-    <p class="page-lead">{p.lead}</p>
   </section>
 
   <section class="plans" aria-label="Plans">
@@ -27,16 +26,11 @@ import { softwareApp } from '../data/schema';
       </article>
     ))}
   </section>
-
-  <section class="notes" aria-label="On every plan">
-    <ul>{p.notes.map((n) => <li>{n}</li>)}</ul>
-    <p><a class="link" href="/security/">How the encryption works</a></p>
-  </section>
 </Base>
 
 <style>
   .plans {
-    margin: clamp(64px, 11vh, 120px) var(--m) 0;
+    margin: clamp(64px, 11vh, 120px) var(--m) clamp(96px, 16vh, 160px);
     display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap); max-width: 1040px;
   }
   .plan {
@@ -58,16 +52,6 @@ import { softwareApp } from '../data/schema';
   .plan__foot { padding-top: 20px; min-height: 70px; }
   /* Not open yet: a quiet badge where the button will be. */
   .plan__status { display: flex; align-items: center; min-height: 50px; }
-
-  .notes {
-    margin: clamp(72px, 12vh, 128px) var(--m) clamp(96px, 16vh, 160px);
-    display: grid; gap: 18px; max-width: 64ch;
-  }
-  .notes ul { list-style: none; padding: 0; display: grid; gap: 6px; }
-  .notes li { padding-left: 18px; position: relative; color: var(--c-muted); font-size: 1rem; }
-  .notes li::before {
-    content: ''; position: absolute; left: 0; top: 0.7em; width: 6px; height: 6px; border-radius: 50%; background: var(--c-ink);
-  }
 
   @media (max-width: 899px) {
     .plans { grid-template-columns: 1fr; gap: 56px; }

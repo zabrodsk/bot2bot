@@ -49,7 +49,6 @@ const app = softwareApp();
 
   <section class="close" aria-labelledby="close-title">
     <h2 id="close-title" class="close__title">{home.close.title}</h2>
-    <p class="close__text muted">{home.close.text}</p>
     <div class="close__actions">
       <Button href={home.cta.href} data-astro-reload data-astro-prefetch="false">{home.cta.label}</Button>
       <Button href={home.close.pricing.href} variant="secondary">{home.close.pricing.label}</Button>
@@ -102,7 +101,6 @@ const app = softwareApp();
     font-family: var(--f-display); font-weight: 440; font-size: var(--t-l);
     line-height: 1; letter-spacing: -0.045em; margin-left: -0.04em;
   }
-  .close__text { max-width: 40ch; }
   .close__actions { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 6px; }
 
   @media (max-width: 899px) {

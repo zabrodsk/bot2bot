@@ -3,8 +3,8 @@
 // MIT, see ../arc/LICENSE.md. Three notices, newest in front; point at it or tab in and it fans out into a list.
 // Dismiss one and it slides away while the next rises in at the front.
 export interface Toast { kind: 'bell' | 'success' | 'info'; title: string; body: string }
-interface Props { toasts: Toast[]; hint: string; label: string }
-const { toasts, hint, label } = Astro.props;
+interface Props { toasts: Toast[]; label: string }
+const { toasts, label } = Astro.props;
 const icons = {
   bell: '<path d="M10.27 21a2 2 0 0 0 3.46 0"/><path d="M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.41 13.96 18 12.5 18 8A6 6 0 0 0 6 8c0 4.5-1.41 5.96-2.74 7.33"/>',
   success: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
@@ -13,7 +13,6 @@ const icons = {
 ---
 <div class="b-toasts-wrap">
   <div class="b-toasts" role="region" aria-label={label} data-b-toasts data-pool={JSON.stringify(toasts)} data-icons={JSON.stringify(icons)}></div>
-  <p class="b-toasts__hint">{hint}</p>
 </div>
 
 <script>

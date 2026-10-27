@@ -3,7 +3,6 @@ import Base from '../layouts/Base.astro';
 import Button from '../components/arc/Button.astro';
 import Alert from '../components/arc/Alert.astro';
 import Bot from '../components/Bot.astro';
-import Figure from '../components/Figure.astro';
 import { setup, cta } from '../data/site';
 // Each step shows the bot one state further along: asleep, connected, can be woken, paired.
 const states = ['asleep', 'awake', 'lit'] as const;
@@ -11,10 +10,8 @@ const states = ['asleep', 'awake', 'lit'] as const;
 <Base title={setup.seo.title} description={setup.seo.description} crumbs={[{ name: 'Setup', path: '/start/' }]}>
   <section class="page-intro" aria-labelledby="setup-title">
     <h1 id="setup-title" class="page-title">{setup.headline}</h1>
-    <p class="page-lead">{setup.lead[0]} <br />{setup.lead[1]}</p>
     <Alert class="setupbot" title={setup.bot.title}>
       <Bot slot="icon" state="awake" size={20} />
-      {setup.bot.text}
       <Button slot="action" href={setup.bot.href} external>{setup.bot.cta}</Button>
     </Alert>
   </section>
@@ -34,16 +31,11 @@ const states = ['asleep', 'awake', 'lit'] as const;
         </li>
       ))}
     </ol>
-    <Alert class="nobot" tone="neutral">
-      <Figure slot="icon" kind="setup" size={24} />
-      {setup.noBot}
-    </Alert>
   </section>
 
   <section class="now" aria-labelledby="now-title">
     <div class="now__head">
       <h2 id="now-title" class="say">{setup.now.title}</h2>
-      <p class="muted">{setup.now.text}</p>
     </div>
     <div class="now__actions">
       <Button href={cta.primary.href} data-astro-reload data-astro-prefetch="false">{setup.now.cta}</Button>
@@ -89,7 +81,6 @@ const states = ['asleep', 'awake', 'lit'] as const;
   .step__text { color: var(--c-muted); font-size: 1rem; line-height: 1.55; max-width: 30ch; }
 
   /* The honest footnote to step 4 (an Arc alert), with its own figure: a dashed wire to a browser. */
-  .steps :global(.nobot) { margin-top: clamp(40px, 7vh, 64px); max-width: 760px; align-items: center; }
 
   .now {
     margin: clamp(80px, 14vh, 140px) var(--m) clamp(80px, 14vh, 140px); padding-top: 34px;
@@ -116,7 +107,6 @@ const states = ['asleep', 'awake', 'lit'] as const;
     .step__pair :global(.bot) { width: 22px; height: auto; }
     .step__link { width: 10px; margin: 0 2px; }
     .step__n { display: inline; margin: 0 8px 0 0; }
-    .steps :global(.nobot) { flex-direction: column; align-items: flex-start; gap: 14px; }
     .now :global(.arc-button) { width: 100%; }
     .now__actions { justify-items: stretch; }
     .now__more { flex-direction: column; }
