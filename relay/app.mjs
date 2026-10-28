@@ -114,7 +114,7 @@ const ago = (ms, now) => {
 };
 
 export function createApp(ctx) {
-  const { events = null, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { events = null, renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -760,7 +760,11 @@ ${changeDoorbell(b)}${disconnectCard(b)}
 <label>Webhook address<input name="url" required value="${esc(b.webhook_url || '')}"></label><label>New key<input name="key" type="password" required autocomplete="off"></label><div><button class="btn">Save</button></div></form></details></section>`;
   const removeRow = (b) => `<div class="setrow setrow--flush"><div><p class="setrow__label">Remove this bot</p><p class="setrow__desc">${b.disconnected_at ? '' : "It's disconnected first. "}It disappears from here and from your friends' contacts.</p></div>
 ${confirmMorph({ action: `/app/bots/${b.id}/remove`, label: 'Remove', prompt: `Remove @${b.handle}?`, confirm: 'Remove', pending: 'Removing' })}</div>`;
-  const disconnectCard = (b) => `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">Disconnect this bot</p><p class="setrow__desc">Its access is cancelled right away and its doorbell key is deleted. Anything still waiting is not delivered. Your contacts stay, and you can reconnect later.</p></div>
+  // The bot's name (its @handle). Its keys stay, so friends' bots keep trusting it under the new name.
+  const nameCard = (b, error = '') => b.vendor === 'web' ? '' : `<section class="card"><form method="post" action="/app/bots/${b.id}/rename" class="setrow setrow--flush">
+<div class="grow">${field({ label: 'Bot name', name: 'handle', value: b.handle, description: 'Friends\' bots know it by this name. Messages stay end-to-end encrypted when you change it.', error, attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off" autocapitalize="none"' })}</div>
+<button class="btn small ghost">Rename</button></form></section>`;
+  const disconnectCard = (b) => `${nameCard(b, b.nameError || '')}<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">Disconnect this bot</p><p class="setrow__desc">Its access is cancelled right away and its doorbell key is deleted. Anything still waiting is not delivered. Your contacts stay, and you can reconnect later.</p></div>
 ${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: 'Disconnect', prompt: `Disconnect @${b.handle}?`, confirm: 'Disconnect', pending: 'Disconnecting' })}</div>
 ${removeRow(b)}</section>`;
 
@@ -1463,6 +1467,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           // Any setup code made before now (an upgrade or an earlier reconnect) stops working too.
           q('UPDATE enroll_codes SET used_at = ?, plain_code = NULL WHERE handle = ? AND used_at IS NULL').run(clock(), b.handle);
         };
+        if (sub === '/rename' && req.method === 'POST') {
+          const f = await form(req);
+          let r;
+          try { r = renameBot(b, f.handle); }
+          catch (e) { if (e instanceof HttpError && e.status < 500) return page(res, e.status, botPage(user, { ...b, nameError: e.message })), true; throw e; }
+          if (r.from !== r.to) tell(user, { what: `Renamed to ${r.to}`, undo: f.undo === '1' ? null : undoForm(`/app/bots/${b.id}/rename`, { handle: b.handle }) });
+          return redirect(res, `/app/bots/${b.id}`), true;
+        }
         if (sub === '/disconnect' && req.method === 'POST') {
           tx(disconnectInTx);
           log(b.id, 'disconnected', { by: 'owner' });
@@ -2393,12 +2405,12 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .umenu__panel{position:absolute;right:0;top:calc(100% + 8px);z-index:60;width:15.5rem;padding:4px;border:.5px solid var(--border);border-radius:10px;background:var(--surface-raised);box-shadow:var(--shadow-floating);line-height:1.3;transform-origin:top right;animation:menu-in var(--duration-fast) var(--ease-standard)}
 .umenu__head{display:flex;align-items:center;gap:10px;padding:8px}.umenu__id{display:grid;gap:2px;min-width:0;flex:1}
 .umenu__row{display:flex;align-items:center;gap:6px;min-width:0}.umenu__fullname{min-width:0;overflow:hidden;font-size:13px;font-weight:500;text-overflow:ellipsis;white-space:nowrap}
-.umenu__plan.umenu__plan--infinite{position:relative;isolation:isolate;overflow:visible;display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 8px 0 7px;border:0;border-radius:999px;color:#fff;font-weight:500;letter-spacing:.01em;text-shadow:0 1px 1px rgb(0 0 0/.3);background:linear-gradient(90deg,#ff3b30,#ff9500,#ffcc00,#34c759,#00c7be,#007aff,#5856d6,#af52de,#ff2d92,#ff3b30) 0 0/96px 100% repeat-x;box-shadow:inset 0 0 0 .5px rgb(255 255 255/.35);animation:infinite-pill 4s linear infinite}
-.umenu__plan.umenu__plan--infinite::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;background:inherit;animation:inherit;filter:blur(8px) saturate(1.5);opacity:.75}
-.umenu__plan.umenu__plan--infinite::after{content:"";position:absolute;inset:0;border-radius:inherit;background:linear-gradient(110deg,transparent 30%,rgb(255 255 255/.55) 50%,transparent 70%) -150% 0/250% 100% no-repeat;animation:infinite-shine 3.2s ease-in-out infinite;pointer-events:none}
-.umenu__plan--infinite .inf{font-size:13px;line-height:1;margin-top:-1px}
-@keyframes infinite-pill{to{background-position:96px 0}}@keyframes infinite-shine{0%,35%{background-position:-150% 0}75%,100%{background-position:250% 0}}
-@media (prefers-reduced-motion:reduce){.umenu__plan.umenu__plan--infinite,.umenu__plan.umenu__plan--infinite::before,.umenu__plan.umenu__plan--infinite::after{animation:none}}
+.umenu__plan.umenu__plan--infinite{position:relative;isolation:isolate;display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 10px 0 9px;border:0;border-radius:999px;color:#f5f7fb;font-weight:500;letter-spacing:.02em;background:linear-gradient(90deg,#ff5f6d,#ffb347,#ffe66d,#5be7a9,#4fc3f7,#7c83fd,#c77dff,#ff5f6d) 0 0/120px 100% repeat-x;box-shadow:0 1px 2px rgb(15 20 30/.25);animation:infinite-flow 9s linear infinite}
+.umenu__plan.umenu__plan--infinite::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;background:inherit;animation:inherit;filter:blur(7px);opacity:.5}
+.umenu__plan.umenu__plan--infinite::after{content:"";position:absolute;inset:1px;z-index:-1;border-radius:inherit;background:radial-gradient(120% 140% at 50% 0%,#232b3b,#121722)}
+.umenu__plan--infinite .inf{font-size:13px;line-height:1;margin-top:-1px;background:linear-gradient(90deg,#ff5f6d,#ffb347,#ffe66d,#5be7a9,#4fc3f7,#7c83fd,#c77dff,#ff5f6d) 0 0/120px 100% repeat-x;-webkit-background-clip:text;background-clip:text;color:transparent;animation:inherit}
+@keyframes infinite-flow{to{background-position:120px 0}}
+@media (prefers-reduced-motion:reduce){.umenu__plan.umenu__plan--infinite,.umenu__plan.umenu__plan--infinite::before,.umenu__plan--infinite .inf{animation:none}}
 h2 .umenu__plan{display:inline-block;vertical-align:2px;margin-left:6px}
 .umenu__plan{flex:none;height:17px;padding:0 5px;border:.5px solid color-mix(in oklab,var(--foreground) 9%,transparent);border-radius:4px;background:color-mix(in oklab,var(--foreground) 4%,transparent);color:var(--text-secondary);font-size:11px;font-weight:500;line-height:16px}
 .umenu__email{overflow:hidden;font-size:12px;color:var(--text-muted);text-overflow:ellipsis;white-space:nowrap}

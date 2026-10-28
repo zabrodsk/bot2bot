@@ -629,24 +629,12 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       log(null, 'enroll_code', { handle });
       return { code, handle, expires_at: iso(clock() + L.codeTtlMs) };
     },
-    // Renames a bot. Its keys stay, so its own tool (0.19.1+) takes the new name and its contacts' tools move their
-    // pin to it. Older tools would set its messages aside, so the bot and every contact with keys must be on 0.19.1+.
     'POST /admin/rename': ({ body, admin }) => {
       if (!admin) throw new HttpError(401, 'admin token required');
-      const from = String(body.from || '').replace(/^@/, '').toLowerCase(), to = String(body.to || '').replace(/^@/, '').toLowerCase();
+      const from = String(body.from || '').replace(/^@/, '').toLowerCase();
       const b = q('SELECT * FROM bots WHERE handle = ?').get(from);
       if (!b) throw new HttpError(404, 'no bot with that handle');
-      if (!HANDLE_RE.test(to)) throw new HttpError(400, 'handle must be 2-32 chars: a-z 0-9 _ -');
-      if (q('SELECT 1 FROM bots WHERE handle = ?').get(to)) throw new HttpError(409, 'that handle is taken');
-      const behind = [b, ...q('SELECT b.* FROM contacts c JOIN bots b ON b.id = c.owner_bot WHERE c.peer_bot = ?').all(b.id)]
-        .filter((x) => x.box_pub && x.vendor !== 'connector' && newerVersion('0.19.1', x.tool_version || SILENT_TOOL)).map((x) => `@${x.handle} (${x.tool_version || 'older than 0.19'})`);
-      if (behind.length && !body.force) throw new HttpError(409, `not yet: these bots need b2b 0.19.1 first (they update when their doorbell next runs): ${behind.join(', ')}`);
-      tx(() => {
-        q('UPDATE bots SET handle = ? WHERE id = ?').run(to, b.id);
-        q('UPDATE enroll_codes SET handle = ? WHERE handle = ? AND used_at IS NULL').run(to, from);
-      });
-      log(b.id, 'renamed', { from, to });
-      return { ok: true, from: `@${from}`, to: `@${to}` };
+      return renameBot(b, body.to, { force: !!body.force });
     },
     // Infinite plan: no limit, for good, given by the operator (family, friends). {email, off: true} takes it back.
     'POST /admin/infinite': ({ body, admin }) => {
@@ -1081,6 +1069,23 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   let latestTool;
   const toolInfo = () => ({ latest: (latestTool ??= cliSource().match(/^const VERSION = '([\d.]+)';$/m)?.[1] ?? null), min: minTool });
   const toolTooOld = (v) => newerVersion(minTool, v || SILENT_TOOL);
+  // Renames a bot. Its keys stay, so its own tool (0.19.1+) takes the new name and its contacts' tools move their
+  // pin to it. Older tools would set its messages aside, so the bot and every contact with keys must be on 0.19.1+.
+  function renameBot(b, toRaw, { force = false } = {}) {
+    const from = b.handle, to = String(toRaw || '').replace(/^@/, '').trim().toLowerCase();
+    if (to === from) return { ok: true, from: `@${from}`, to: `@${to}` };
+    if (!HANDLE_RE.test(to)) throw new HttpError(400, 'A bot name is 2 to 32 lowercase letters, numbers, - or _.');
+    if (q('SELECT 1 FROM bots WHERE handle = ?').get(to)) throw new HttpError(409, `@${to} is taken.`);
+    const behind = [b, ...q('SELECT b.* FROM contacts c JOIN bots b ON b.id = c.owner_bot WHERE c.peer_bot = ?').all(b.id)]
+      .filter((x) => x.box_pub && x.vendor !== 'connector' && newerVersion('0.19.1', x.tool_version || SILENT_TOOL)).map((x) => `@${x.handle}`);
+    if (behind.length && !force) throw new HttpError(409, `Not yet: ${behind.join(', ')} ${behind.length === 1 ? 'needs' : 'need'} the newest bot2bot tool first. Bots get it by themselves the next time they check messages.`);
+    tx(() => {
+      q('UPDATE bots SET handle = ? WHERE id = ?').run(to, b.id);
+      q('UPDATE enroll_codes SET handle = ? WHERE handle = ? AND used_at IS NULL').run(to, from);
+    });
+    log(b.id, 'renamed', { from, to });
+    return { ok: true, from: `@${from}`, to: `@${to}` };
+  }
   const updateFirst = () => `this b2b tool is too old for this relay. Update it with: node ~/bin/b2b.mjs update (it checks the signature), then run the same command again. If that fails, reinstall it: mkdir -p ~/bin && curl -fsSL ${publicUrl}/cli/b2b.mjs -o ~/bin/b2b.mjs`;
 
   function match(method, path) {
@@ -1107,7 +1112,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
   const handleApp = createApp({ events, governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
-    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, renameBot, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');
