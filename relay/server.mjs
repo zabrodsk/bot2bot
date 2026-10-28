@@ -47,6 +47,7 @@ export const LIMITS = {
   choiceMax: 40,
   webNotifyEveryMs: 15 * 60_000, // at most one "you have a message" email per person per 15 min
   sealedMax: 48_000,             // an end-to-end encrypted message, as the relay sees it
+  removedGraceMs: 3_600_000,     // a removed bot can be brought back for an hour, then it's gone
 };
 
 const sha = (s) => createHash('sha256').update(String(s)).digest('hex');
@@ -184,6 +185,7 @@ export function openDb(path) {
   addColumn('contacts', 'privacy_on', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('contacts', 'gen', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('bots', 'tool_version', 'TEXT');
+  addColumn('bots', 'removed_at', 'INTEGER');
   return db;
 }
 
@@ -482,6 +484,16 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     q('DELETE FROM login_codes WHERE expires_at < ?').run(t - 86_400_000);
     q('DELETE FROM join_requests WHERE expires_at < ?').run(t - 86_400_000);
     q('DELETE FROM oauth_clients WHERE created_at < ? AND client_id NOT IN (SELECT client_id FROM oauth_tokens) AND client_id NOT IN (SELECT client_id FROM oauth_codes WHERE used_at IS NULL)').run(t - 7 * 86_400_000);
+    // A bot its owner removed an hour ago leaves for good: off its friends' contact lists, and its name is free again.
+    for (const b of q("SELECT id, handle FROM bots WHERE removed_at IS NOT NULL AND removed_at < ? AND instr(handle, '~') = 0").all(t - L.removedGraceMs)) {
+      tx(() => {
+        for (const c of q('SELECT peer_bot FROM contacts WHERE owner_bot = ?').all(b.id)) { bumpPair(b.id, c.peer_bot); dropBetween(b.id, c.peer_bot); }
+        governance.deleteDataInTx([b.id]);
+        q('DELETE FROM contacts WHERE owner_bot = ? OR peer_bot = ?').run(b.id, b.id);
+        q('UPDATE bots SET handle = ? WHERE id = ?').run(`${b.handle}~${b.id}`, b.id);
+      });
+      log(b.id, 'removed_for_good', {});
+    }
   }
   // Called after an owner approves, unblocks or resumes, so held messages go out now.
   function release(botId) {

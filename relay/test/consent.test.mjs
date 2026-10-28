@@ -171,6 +171,43 @@ test('pause holds everything, resume delivers; disconnect cancels the bot, recon
   assert.match(await mia.cli('contacts'), /Ben/);
 });
 
+test('removing a bot: gone from the dashboard, Undo brings it back, an hour later its friends lose it and its name is free', async (t0) => {
+  const env = await setup(t0);
+  const ben = await owner(env, 'ben7@example.com', 'ben7');
+  const mia = await owner(env, 'mia7@example.com', 'mia7');
+  t0.after(() => { ben.close(); mia.close(); });
+  await connect(env, ben, mia, 'Ben');
+  const contacts = () => env.relay.db.prepare('SELECT count(*) AS n FROM contacts WHERE owner_bot = ? OR peer_bot = ?').get(mia.botId, mia.botId).n;
+
+  // A connected bot is disconnected first, then it's off the dashboard.
+  assert.match((await mia.b(`/app/bots/${mia.botId}`)).text, /Remove this bot/);
+  const gone = await mia.b(`/app/bots/${mia.botId}/remove`, { method: 'POST' });
+  assert.equal(gone.status, 303);
+  await assert.rejects(mia.cli('whoami'), /401/);
+  const home = (await mia.b('/app')).text;
+  assert.match(home, /Removed @mia7/);
+  assert.match(home, /\/app\/bots\/\d+\/restore/);
+  assert.doesNotMatch(home, new RegExp(`href="/app/bots/${mia.botId}"`), 'no row for it');
+  assert.equal((await mia.b(`/app/bots/${mia.botId}`)).status, 404);
+  assert.equal(contacts(), 2, 'friends keep it during the undo hour');
+
+  // Undo brings it back, still disconnected; removing again works.
+  await mia.b(`/app/bots/${mia.botId}/restore`, { method: 'POST' });
+  assert.match((await mia.b(`/app/bots/${mia.botId}`)).text, /Reconnect this bot[\s\S]*Remove this bot/);
+  await mia.b(`/app/bots/${mia.botId}/remove`, { method: 'POST' });
+
+  // An hour later: off Ben's contacts, the name is free, and Undo can't bring it back.
+  env.advance(61 * 60_000);
+  await waitFor(() => contacts() === 0);
+  assert.doesNotMatch((await ben.b('/app')).text, /@mia7/);
+  assert.equal((await mia.b(`/app/bots/${mia.botId}/restore`, { method: 'POST' })).status, 410);
+  const res = await mia.b('/app/bots', { method: 'POST', form: { handle: 'mia7' } });
+  assert.notEqual(res.status, 400, 'the name can be used again');
+  assert.match((await mia.b('/app')).text, /join with code/);
+  // The export still lists it, as removed.
+  assert.match((await mia.b('/app/account/export')).text, /"removed_at"/);
+});
+
 test('blocking from the dashboard drops queued messages and refuses new ones', async (t0) => {
   const env = await setup(t0);
   const ben = await owner(env, 'ben4@example.com', 'ben4');

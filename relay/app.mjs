@@ -233,8 +233,9 @@ export function createApp(ctx) {
   }
 
   // ───── data helpers ─────
-  const myBots = (u) => q('SELECT * FROM bots WHERE user_id = ? ORDER BY created_at').all(u.id);
-  const ownBot = (u, id) => { const b = q('SELECT * FROM bots WHERE id = ?').get(Number(id)); if (!b || b.user_id !== u.id) throw new HttpError(404, 'Bot not found'); return b; };
+  // Removed bots are gone from the dashboard; export and account deletion still see them until they leave for good.
+  const myBots = (u, { all = false } = {}) => q(`SELECT * FROM bots WHERE user_id = ?${all ? '' : ' AND removed_at IS NULL'} ORDER BY created_at`).all(u.id);
+  const ownBot = (u, id, { removed = false } = {}) => { const b = q('SELECT * FROM bots WHERE id = ?').get(Number(id)); if (!b || b.user_id !== u.id || (!!b.removed_at !== removed)) throw new HttpError(404, 'Bot not found'); return b; };
   const pendingCode = (u) => q('SELECT * FROM enroll_codes WHERE user_id = ? AND used_at IS NULL AND expires_at > ? ORDER BY expires_at DESC').get(u.id, clock());
   const setupMessage = (code) => `Please set yourself up for ${product}. Read the guide with: curl -fsSL ${origin}/setup
 Then install the tool and join with code ${code}. Add the "b2b messaging" skill from ${origin}/skill. Make a routine called "b2b doorbell" with a webhook trigger, using the instruction from the guide. Don't print any keys or tokens in this chat.`;
@@ -660,7 +661,8 @@ ${code ? `<p>Paste this into your bot's chat. When it joins, it takes over as @$
       const code = q('SELECT plain_code FROM enroll_codes WHERE user_id = ? AND handle = ? AND reissue = 1 AND used_at IS NULL AND expires_at > ?').get(user.id, b.handle, clock());
       return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>Reconnect this bot</h2>${badge('Disconnected')}</div>
 ${code ? `<p>Paste this into your bot's chat to reconnect it.</p>${codeBlock('msg', 'Message for your bot', setupMessage(code.plain_code))}`
-  : `<p>This bot can't send or receive. Reconnecting gives it a new key; the old one stays cancelled.</p><form method="post" action="/app/bots/${b.id}/reconnect"><button class="btn">Reconnect</button></form>`}</section>`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: `@${b.handle}`, sub: 'Disconnected' } });
+  : `<p>This bot can't send or receive. Reconnecting gives it a new key; the old one stays cancelled.</p><form method="post" action="/app/bots/${b.id}/reconnect"><button class="btn">Reconnect</button></form>`}</section>
+<section class="card">${removeRow(b)}</section>`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: `@${b.handle}`, sub: 'Disconnected' } });
     }
     const bar = { back: '/app', bot: b.id, title: `@${b.handle}`, sub: `${mode} · ${st.label}` };
     const err = error ? alertBox('danger', esc(error), '') : '';
@@ -714,8 +716,11 @@ ${changeDoorbell(b)}${disconnectCard(b)}
 <form method="post" action="/app/bots/${b.id}/doorbell/off"><button class="btn small ghost">Stop</button></form></div></section>`
     : `<section class="card"><details class="fold"><summary><span><span class="fold__title">Change doorbell</span><span class="fold__sub">Paste a new webhook address and key</span></span></summary><form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
 <label>Webhook address<input name="url" required value="${esc(b.webhook_url || '')}"></label><label>New key<input name="key" type="password" required autocomplete="off"></label><div><button class="btn">Save</button></div></form></details></section>`;
+  const removeRow = (b) => `<div class="setrow setrow--flush"><div><p class="setrow__label">Remove this bot</p><p class="setrow__desc">${b.disconnected_at ? '' : "It's disconnected first. "}It disappears from here and from your friends' contacts.</p></div>
+${confirmMorph({ action: `/app/bots/${b.id}/remove`, label: 'Remove', prompt: `Remove @${b.handle}?`, confirm: 'Remove', pending: 'Removing' })}</div>`;
   const disconnectCard = (b) => `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">Disconnect this bot</p><p class="setrow__desc">Its access is cancelled right away and its doorbell key is deleted. Anything still waiting is not delivered. Your contacts stay, and you can reconnect later.</p></div>
-${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: 'Disconnect', prompt: `Disconnect @${b.handle}?`, confirm: 'Disconnect', pending: 'Disconnecting' })}</div></section>`;
+${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: 'Disconnect', prompt: `Disconnect @${b.handle}?`, confirm: 'Disconnect', pending: 'Disconnecting' })}</div>
+${removeRow(b)}</section>`;
 
   // Which basket a new friend starts in, picked while inviting or accepting (People users only).
   const basketsOf = (botId) => (inPilot(botId) ? getSettings(botId).circles.map((g) => g.name) : []);
@@ -864,13 +869,13 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
   }
 
   function exportData(user) {
-    const bots = myBots(user);
+    const bots = myBots(user, { all: true });
     const ids = bots.map((b) => b.id);
     const ph = ids.map(() => '?').join(',') || 'NULL';
     return {
       exported_at: iso(clock()),
       account: { name: user.name, email: user.email, created_at: iso(user.created_at), email_verified_at: iso(user.email_verified_at), photo: user.photo ? `data:image/jpeg;base64,${Buffer.from(user.photo).toString('base64')}` : null, robot: user.avatar || null },
-      bots: bots.map((b) => ({ handle: b.handle, created_at: iso(b.created_at), doorbell: !!b.webhook_url, paused: !!b.paused_at, disconnected_at: iso(b.disconnected_at) })),
+      bots: bots.map((b) => ({ handle: b.handle, created_at: iso(b.created_at), doorbell: !!b.webhook_url, paused: !!b.paused_at, disconnected_at: iso(b.disconnected_at), removed_at: iso(b.removed_at) })),
       contacts: q(`SELECT ob.handle AS bot, c.alias, b.handle, u.name, c.blocked, c.approved_at, c.created_at FROM contacts c JOIN bots b ON b.id = c.peer_bot JOIN bots ob ON ob.id = c.owner_bot
                    LEFT JOIN users u ON u.id = b.user_id WHERE c.owner_bot IN (${ph})`).all(...ids)
         .map((c) => ({ bot: `@${c.bot}`, alias: c.alias, handle: `@${c.handle}`, name: c.name, blocked: !!c.blocked, approved: !!c.approved_at, since: iso(c.created_at) })),
@@ -884,7 +889,7 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
   }
 
   function deleteAccount(user) {
-    const ids = myBots(user).map((b) => b.id);
+    const ids = myBots(user, { all: true }).map((b) => b.id);
     const ph = ids.map(() => '?').join(',') || 'NULL';
     const t = clock();
     tx(() => {
@@ -1352,8 +1357,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
 
       const bm = p.match(/^\/app\/bots\/(\d+)(\/[a-z]+(?:\/off)?)?$/);
       if (bm) {
-        const b = ownBot(user, bm[1]);
         const sub = bm[2] || '';
+        const b = ownBot(user, bm[1], { removed: sub === '/restore' });
         if (!sub && req.method === 'GET') return page(res, 200, botPage(user, b)), true;
         if (sub === '/state' && req.method === 'GET') return json(res, 200, { verified: !!b.doorbell_verified_at, last_ring_status: b.last_ring_status }), true;
         if (sub === '/doorbell' && req.method === 'POST') {
@@ -1391,19 +1396,38 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           tell(user, { what: 'Stopped watching' });
           return redirect(res, `/app/bots/${b.id}`), true;
         }
+        const disconnectInTx = () => {
+          bumpGen(b.id);
+          events?.revokeAll(b.id);
+          q('UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1, disconnected_at = ? WHERE id = ?').run(clock(), b.id);
+          q('UPDATE oauth_tokens SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL').run(clock(), b.id);
+          erase(`status IN ('pending', 'claimed') AND (to_bot = ? OR from_bot = ?)`, b.id, b.id);
+          q('DELETE FROM invites WHERE from_bot = ? AND used_at IS NULL').run(b.id);
+          // Any setup code made before now (an upgrade or an earlier reconnect) stops working too.
+          q('UPDATE enroll_codes SET used_at = ?, plain_code = NULL WHERE handle = ? AND used_at IS NULL').run(clock(), b.handle);
+        };
         if (sub === '/disconnect' && req.method === 'POST') {
-          tx(() => {
-            bumpGen(b.id);
-            events?.revokeAll(b.id);
-            q('UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1, disconnected_at = ? WHERE id = ?').run(clock(), b.id);
-            q('UPDATE oauth_tokens SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL').run(clock(), b.id);
-            erase(`status IN ('pending', 'claimed') AND (to_bot = ? OR from_bot = ?)`, b.id, b.id);
-            q('DELETE FROM invites WHERE from_bot = ? AND used_at IS NULL').run(b.id);
-            // Any setup code made before now (an upgrade or an earlier reconnect) stops working too.
-            q('UPDATE enroll_codes SET used_at = ?, plain_code = NULL WHERE handle = ? AND used_at IS NULL').run(clock(), b.handle);
-          });
+          tx(disconnectInTx);
           log(b.id, 'disconnected', { by: 'owner' });
           tell(user, { what: `Disconnected @${b.handle}`, undo: undoForm(`/app/bots/${b.id}/reconnect`, {}, 'Reconnect') });
+          return redirect(res, `/app/bots/${b.id}`), true;
+        }
+        // Remove: disconnected first if it isn't yet, then gone from the dashboard. An hour later it leaves its
+        // friends' contact lists and its name is free again (server retention); until then Undo brings it back.
+        if (sub === '/remove' && req.method === 'POST') {
+          tx(() => {
+            if (!b.disconnected_at) disconnectInTx();
+            q('UPDATE bots SET removed_at = ? WHERE id = ?').run(clock(), b.id);
+          });
+          log(b.id, 'removed', { by: 'owner' });
+          tell(user, { what: `Removed @${b.handle}`, undo: undoForm(`/app/bots/${b.id}/restore`, {}) });
+          return redirect(res, '/app'), true;
+        }
+        if (sub === '/restore' && req.method === 'POST') {
+          if (b.handle.includes('~')) throw new HttpError(410, 'This bot is gone for good.');
+          q('UPDATE bots SET removed_at = NULL WHERE id = ?').run(b.id);
+          log(b.id, 'restored', { by: 'owner' });
+          tell(user, { what: `@${b.handle} is back, disconnected` });
           return redirect(res, `/app/bots/${b.id}`), true;
         }
         if (sub === '/reconnect' && req.method === 'POST') {
@@ -2456,7 +2480,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 .group{display:grid;gap:10px}.group>h2{margin:0;padding-left:4px}
 .card--rows{padding:0 20px}
 .setrow{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 0}.setrow+.setrow{border-top:1px solid var(--border-subtle)}
-.setrow p{margin:0}.setrow--flush{padding:0}.quietform .row3{margin:18px 0 14px}.card__block{margin:16px 0}.stack>.btn.small{justify-self:start}.setrow__label{font-weight:500}.setrow__desc{color:var(--text-secondary);font-size:var(--text-sm)}
+.setrow p{margin:0}.setrow--flush{padding:0}.setrow--flush+.setrow--flush{margin-top:16px;padding-top:16px}.quietform .row3{margin:18px 0 14px}.card__block{margin:16px 0}.stack>.btn.small{justify-self:start}.setrow__label{font-weight:500}.setrow__desc{color:var(--text-secondary);font-size:var(--text-sm)}
 .fold>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;list-style:none}.fold>summary::-webkit-details-marker{display:none}
 .fold>summary::after{content:"";width:8px;height:8px;margin-right:4px;border:1.75px solid var(--text-muted);border-top:0;border-left:0;transform:rotate(45deg);transition:transform var(--duration-standard) var(--ease-standard);flex:none}
 .fold[open]>summary::after{transform:rotate(-135deg)}.fold[open]>summary{margin-bottom:14px}
