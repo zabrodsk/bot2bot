@@ -59,6 +59,7 @@ export function migrateApp(db) {
   // Audit fixes (0.9.1): login links work only in the browser that asked; per-IP mail limits.
   addColumn('login_codes', 'browser_hash', 'TEXT');
   addColumn('login_codes', 'ip_hash', 'TEXT');
+  addColumn('login_codes', 'next', 'TEXT');
   // End-to-end encryption (0.10): each bot's public keys; sealed messages the relay can't read; a sender-made tag
   // that lets retries be recognised without seeing the text; whether two owners compared safety codes.
   addColumn('bots', 'sign_pub', 'TEXT');
@@ -202,7 +203,7 @@ export function createApp(ctx) {
 
   // ───── login ─────
   const clientIp = (req) => (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket?.remoteAddress || '';
-  async function sendLogin(email, req, res) {
+  async function sendLogin(email, req, res, next = '') {
     const hour = clock() - 3_600_000;
     const ipHash = sha(`ip:${clientIp(req)}`);
     if (q('SELECT count(*) AS n FROM login_codes WHERE created_at > ?').get(hour).n >= L.loginEmailsPerHour) throw new HttpError(429, 'Too many sign-ins right now. Try again in a few minutes.');
@@ -214,7 +215,7 @@ export function createApp(ctx) {
     // The link only works in this browser (a cookie nonce), so nobody can send you a link to their account.
     const nonce = token('n_', 18);
     res.setHeader('set-cookie', `b2b_login=${nonce}; Path=/login; HttpOnly; SameSite=Lax; Max-Age=${LOGIN_TTL_MS / 1000}${secure ? '; Secure' : ''}`);
-    q('INSERT INTO login_codes (email, code_hash, link_hash, created_at, expires_at, browser_hash, ip_hash) VALUES (?, ?, ?, ?, ?, ?, ?)').run(email, sha(code), sha(link), clock(), clock() + LOGIN_TTL_MS, sha(nonce), ipHash);
+    q('INSERT INTO login_codes (email, code_hash, link_hash, created_at, expires_at, browser_hash, ip_hash, next) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(email, sha(code), sha(link), clock(), clock() + LOGIN_TTL_MS, sha(nonce), ipHash, String(next || '').slice(0, 500));
     const url = `${origin}/login/link?t=${link}`;
     await mailer({ to: email, ...loginEmail({ product, code, url, minutes: LOGIN_TTL_MS / 60_000, home: origin, logo: site ? `${origin}/icon-192.png` : '' }) });
     return devLogin ? code : null;
@@ -678,7 +679,7 @@ ${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
     if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b)}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell', 'Test the doorbell'], 1)}<h2>Turn on the doorbell</h2>
 ${b.vendor === 'connector' ? `<p>Your bot needs a routine called <b>“b2b doorbell”</b>, so friends can wake it. Paste this into your bot's chat:</p>
 ${codeBlock('dmsg', 'Message for your bot', CONNECTOR_DOORBELL)}` : `<p>Your bot made a routine called <b>“b2b doorbell”</b>. It lets friends wake your bot.</p>`}
-<ol class="howto"><li>In the GrokBot app, open your bot's details and find <b>Routines</b>.</li><li>Right-click <b>b2b doorbell</b> and choose <b>Webhook</b>.</li><li>Copy the address and the key into the boxes below.</li></ol>
+<ol class="howto"><li>In the Grok Bot app on a computer (phones don't show the webhook), open your bot's details and find <b>Routines</b>.</li><li>Right-click <b>b2b doorbell</b> and choose <b>Webhook</b>.</li><li>Copy the address and the key into the boxes below.</li></ol>
 <form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
 <label>Webhook address<input name="url" required placeholder="https://api2.cursor.sh/automations/webhook/…" autocomplete="off"></label>
 <label>Key<input name="key" type="password" required autocomplete="off" placeholder="Paste the key"></label>
@@ -1209,7 +1210,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const f = await form(req);
         const email = String(f.email || '').trim().toLowerCase();
         if (!EMAIL_RE.test(email)) return page(res, 400, loginPage({ email, error: 'That email address looks wrong.', next: f.next })), true;
-        try { const devCode = await sendLogin(email, req, res); return page(res, 200, loginPage({ email, sent: true, next: f.next, devCode })), true; }
+        try { const devCode = await sendLogin(email, req, res, f.next); return page(res, 200, loginPage({ email, sent: true, next: f.next, devCode })), true; }
         catch (e) { if (e instanceof HttpError) return page(res, e.status, loginPage({ email, error: e.message, next: f.next })), true; throw e; }
       }
       if (p === '/login/verify' && req.method === 'POST') {
@@ -1242,7 +1243,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (req.method !== 'POST') return page(res, 200, layout('Log in', `<section class="card narrow center"><h1>Continue to ${esc(product)}</h1>
 <form method="post" action="/login/link"><input type="hidden" name="t" value="${esc(t)}"><button class="btn">Log in</button></form></section>`)), true;
         q('UPDATE login_codes SET used_at = ? WHERE id = ?').run(clock(), row.id);
-        return finishLogin(res, row.email, '/app'), true;
+        // Back to where they were going (a bot's approve link, an invite), like the 6-digit code does.
+        return finishLogin(res, row.email, row.next || '/app'), true;
       }
       if (p === '/logout' && req.method === 'POST') {
         const t = cookies(req).b2b_session; if (t) q('DELETE FROM sessions WHERE token_hash = ?').run(sha(t));

@@ -162,3 +162,11 @@ test('a login code sent twice from the same browser logs in again instead of say
   for (let i = 0; i < 5; i++) assert.match((await b('/login/verify', { method: 'POST', form: { email: 'aunt@example.com', code: wrong } })).text, /Wrong code/);
   assert.match((await b('/login/verify', { method: 'POST', form: { email: 'aunt@example.com', code: right } })).text, /Too many wrong tries/);
 });
+
+test('the email link takes you back to where you were going, like the code does', async (t0) => {
+  const env = await setup(t0);
+  const b = browser(env.url);
+  await b('/login', { method: 'POST', form: { email: 'uncle2@example.com', next: '/app/link/ABCD-EFGH' } });
+  const t = env.mail.at(-1).text.match(/\/login\/link\?t=([\w-]+)/)[1];
+  assert.equal((await b('/login/link', { method: 'POST', form: { t } })).location, '/app/link/ABCD-EFGH');
+});
