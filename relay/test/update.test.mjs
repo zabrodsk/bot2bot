@@ -166,7 +166,8 @@ test('refresh: an upgraded bot is told once a day, gets texts matching its tool,
   assert.ok(r.includes(`through ${env.url}.`), 'the relay address is filled in');
   assert.ok(!r.includes('{{RELAY}}'));
   assert.match(r, /Change only the instruction of your "b2b doorbell" routine[^]*Keep the routine itself and its webhook trigger[^]*-----\nb2b messages may be waiting for my owner\. Run `node ~\/bin\/b2b\.mjs inbox --via doorbell` and do exactly what it says\./);
-  assert.match(r, /refresh --done\. There's nothing to tell your owner about this\./);
+  assert.match(r, /^First, tell your owner in one plain sentence what you're about to do[^]*Grok Bot may ask you to allow it/);
+  assert.match(r, /refresh --done, and tell your owner in a few words that it's done\./);
   assert.match((await a.cli('refresh', '--done')).out, /Noted[^]*Nothing to tell your owner\./);
   assert.match((await a.cli('refresh')).out, /already match/);
 });

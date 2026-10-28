@@ -453,10 +453,11 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     // Throttled: try again when the 15-minute window ends; everything waiting goes in that one email.
     if (owner.last_notified_at && t - owner.last_notified_at < L.webNotifyEveryMs) { setDue(owner.last_notified_at + L.webNotifyEveryMs); return; }
     const names = [...new Set(due.map((m) => m.name || m.display_name))];
-    const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+    const cs = owner.lang === 'cs';
+    const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} ${cs ? 'a' : 'and'} ${names.at(-1)}`;
     inflight.add(bot.id);
     try {
-      await mailer({ to: owner.email, ...messageEmail({ product: productName, who, inboxUrl: `${publicUrl}/app/inbox`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '' }) });
+      await mailer({ to: owner.email, ...messageEmail({ product: productName, who, inboxUrl: `${publicUrl}/app/inbox`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', lang: owner.lang }) });
       q('UPDATE users SET last_notified_at = ? WHERE id = ?').run(t, owner.id);
       q("UPDATE messages SET next_ring_at = NULL, first_rung_at = coalesce(first_rung_at, ?), ring_count = ring_count + 1 WHERE to_bot = ? AND status = 'pending' AND next_ring_at <= ?").run(t, bot.id, t);
       log(bot.id, 'web_notified', { messages: due.length });

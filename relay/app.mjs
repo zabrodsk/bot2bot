@@ -2,6 +2,7 @@
 // doorbell setup with a live test, and invite links. Server-rendered HTML, zero dependencies.
 import { CONNECTOR_DOORBELL, ENCRYPTION_MESSAGE, safeText } from './connector.mjs';
 import { loginEmail } from './email.mjs';
+import { t as translator, langFromHeader, normLang } from './i18n.mjs';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -106,14 +107,8 @@ const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,24}$/;
 const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const ago = (ms, now) => {
-  if (!ms) return 'never';
-  const s = Math.round((now - ms) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.round(s / 60)} min ago`;
-  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
-  return `${Math.round(s / 86400)} d ago`;
-};
+// A string for inline client scripts, in single quotes like the rest of them.
+const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
   const { events = null, latestUpdate = null, renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
@@ -133,6 +128,11 @@ export function createApp(ctx) {
   // b2b_in is a readable, non-secret marker that lives and dies with the session, so the static
   // site can say "Platform" instead of "Sign in" without asking the server.
   const sessionCookie = (raw, maxAge) => [`b2b_session=${raw}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`, `b2b_in=${raw ? 1 : ''}; Path=/; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`];
+  // Language: a signed-in person's own choice (none means English); signed out, the language they picked here
+  // (the lang cookie), else their browser's first choice.
+  const T = (user) => translator(user?.lang);
+  const reqLang = (req) => { const c = cookies(req).lang; return c === 'cs' || c === 'en' ? c : langFromHeader(req.headers['accept-language']); };
+  const langCookie = (lang) => `lang=${normLang(lang)}; Path=/; SameSite=Lax; Max-Age=31536000${secure ? '; Secure' : ''}`;
   function startSession(res, userId) {
     const raw = token('s_', 24);
     q('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)').run(sha(raw), userId, clock(), clock() + SESSION_MS);
@@ -143,42 +143,43 @@ export function createApp(ctx) {
   // Signed-in pages: a sidebar (places, your bots, you) beside a full-width page with one header.
   // On phones the sidebar folds into a top bar and the places move to a bar at the bottom.
   // Signed-out pages: the brand on top and one centred column.
-  const head = (title) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  const head = (title, tr) => `<!doctype html><html lang="${tr.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f3f5f8">
 <title>${esc(title)} · ${esc(product)}</title><meta name="robots" content="noindex"><style>${site ? FONTS : ''}${CSS}</style></head>`;
   const brand = (href) => `<a class="brand" href="${href}">${ICON.bot}<span>${esc(product)}</span></a>`;
   const sim = banner ? `<div class="sim" role="note">${esc(banner)}</div>` : '';
-  const layout = (title, body, { user, bar = {}, tab = '', width = 'full', actions = '' } = {}) => {
-    if (!user) return `${head(title)}<body class="out"><header class="topbar">${brand('/')}</header>${sim}<main class="col col--narrow">${body}</main>${site ? LEGAL : ''}<script>${UI_JS}</script></body></html>`;
+  // Signed out, the other language is one tap away at the top; it is remembered in the lang cookie.
+  const langSwitch = (tr) => { const to = tr.lang === 'cs' ? 'en' : 'cs'; return `<a class="langswitch" href="/lang/${to}" hreflang="${to}" lang="${to}">${to === 'cs' ? 'Čeština' : 'English'}</a>`; };
+  const layout = (title, body, { user, tr = user ? T(user) : translator('en'), bar = {}, tab = '', width = 'full', actions = '' } = {}) => {
+    if (!user) return `${head(title, tr)}<body class="out"><header class="topbar">${brand('/')}${langSwitch(tr)}</header>${sim}<main class="col col--narrow">${body}</main>${site ? legal(tr) : ''}<script>${uiJs(tr)}</script></body></html>`;
     const hasWeb = !!q("SELECT 1 FROM bots WHERE user_id = ? AND vendor = 'web' AND disconnected_at IS NULL").get(user.id);
     const place = (key, href, label) => `<a class="tabs__item" href="${href}"${tab === key ? ' aria-current="page"' : ''}>${label}</a>`;
     const gov = govBots(user).length > 0;
     const waiting = gov ? pendingFor(user) : 0;
-    const nav = `<nav class="tabs" aria-label="Main"><span class="tabs__sel" aria-hidden="true"></span>${place('home', '/app', 'Overview')}${gov ? place('people', '/app/people', 'People') + place('requests', '/app/requests', `Requests${waiting ? `<span class="tabs__count" aria-hidden="true">${waiting}</span><span class="sr"> (${waiting} waiting)</span>` : ''}`) : ''}${place('activity', '/app/activity', 'Activity')}${hasWeb ? place('inbox', '/app/inbox', 'Inbox') : ''}${place('account', '/app/account', 'Account')}${hosted ? place('plan', '/app/billing', 'Plan') : ''}</nav>`;
+    const nav = `<nav class="tabs" aria-label="${tr('Main')}"><span class="tabs__sel" aria-hidden="true"></span>${place('home', '/app', tr('Overview'))}${gov ? place('people', '/app/people', tr('People')) + place('requests', '/app/requests', `${tr('Requests')}${waiting ? `<span class="tabs__count" aria-hidden="true">${waiting}</span><span class="sr"> (${tr('{n} waiting', { n: waiting })})</span>` : ''}`) : ''}${place('activity', '/app/activity', tr('Activity'))}${hasWeb ? place('inbox', '/app/inbox', tr('Inbox')) : ''}${place('account', '/app/account', tr('Account'))}${hosted ? place('plan', '/app/billing', tr('Plan')) : ''}</nav>`;
     const planState_ = hosted ? allowance(user).state : '';
-    const planName = hosted ? { paid: 'Paid', covered: 'Covered', infinite: 'Infinite' }[planState_] || 'Free' : '';
+    const planName = hosted ? { paid: tr('Paid'), covered: tr('Covered'), infinite: 'Infinite' }[planState_] || tr('Free') : '';
     const face = avatar(user.name || user.email, 'md', photoUrl(user.id, user.photo_at, user.avatar));
-    const me = `<details class="more umenu"><summary class="umenu__trigger" aria-label="Your account">${face}</summary>
+    const me = `<details class="more umenu"><summary class="umenu__trigger" aria-label="${tr('Your account')}">${face}</summary>
 <div class="umenu__panel"><div class="umenu__head">${face}<div class="umenu__id"><span class="umenu__row"><span class="umenu__fullname">${esc(user.name)}</span>${planName ? `<span class="umenu__plan${planState_ === 'infinite' ? ' umenu__plan--infinite' : ''}">${planState_ === 'infinite' ? '<span class="inf" aria-hidden="true">∞</span>' : ''}${planName}</span>` : ''}</span><span class="umenu__email">${esc(user.email)}</span></div></div>
-<div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}Account</a>${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}Plan</a>` : ''}
-<div class="umenu__sep"></div><form method="post" action="/logout"><button class="umenu__item">${ICON.logout}Log out</button></form></div></details>`;
-    const back = bar.back ? `<a class="crumb" href="${esc(bar.back)}">${ICON.back}${esc(bar.backLabel || 'Overview')}</a>` : '';
+<div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}${tr('Account')}</a>${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}${tr('Plan')}</a>` : ''}
+<div class="umenu__sep"></div><form method="post" action="/logout"><button class="umenu__item">${ICON.logout}${tr('Log out')}</button></form></div></details>`;
+    const back = bar.back ? `<a class="crumb" href="${esc(bar.back)}">${ICON.back}${esc(bar.backLabel || tr('Overview'))}</a>` : '';
     const ownH1 = /<h1[\s>]/.test(body);
     const pagehead = ownH1 ? (back ? `<header class="pagehead">${back}</header>` : '') : `<header class="pagehead"><div class="pagehead__text">${back}<h1>${esc(bar.title ?? title)}</h1>${bar.sub ? `<p class="pagehead__sub">${esc(bar.sub)}</p>` : ''}</div>${actions ? `<div class="pagehead__actions">${actions}</div>` : ''}</header>`;
     const note = takeNotice(user);
-    const news = latestUpdate && user.seen_update !== latestUpdate.iso && hasPicture(user) ? whatsNewDialog(user) : '';
-    return `${head(title)}<body class="in"><header class="top"><div class="top__in">${brand('/app')}${nav}${me}</div></header>
-<main class="page">${sim}<div class="col col--${width}">${pagehead}${body}</div>${site ? LEGAL : ''}</main>${note ? toast(note) : ''}${news}<script>${UI_JS}</script></body></html>`;
+    const news = latestUpdate && user.seen_update !== latestUpdate.iso && hasPicture(user) ? whatsNewDialog(tr) : '';
+    return `${head(title, tr)}<body class="in"><header class="top"><div class="top__in">${brand('/app')}${nav}${me}</div></header>
+<main class="page">${sim}<div class="col col--${width}">${pagehead}${body}</div>${site ? legal(tr) : ''}</main>${note ? toast(note, tr) : ''}${news}<script>${uiJs(tr)}</script></body></html>`;
   };
   // Arc dialog: what changed since their last visit, once. One change is one line; more are a short list.
   // Got it, Escape or a click outside closes it and remembers it was seen.
-  const whatsNewDialog = (user) => {
-    const cs = user.lang === 'cs';
-    const items = latestUpdate.items.map((i) => (typeof i === 'string' ? i : (cs && i.cs) || i.en));
+  const whatsNewDialog = (tr) => {
+    const items = latestUpdate.items.map((i) => (typeof i === 'string' ? i : (tr.lang === 'cs' && i.cs) || i.en));
     const body = items.length === 1 ? `<p class="dlg__one">${esc(items[0])}</p>` : `<ul class="dlg__list">${items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>`;
     return `<dialog class="dlg" id="whatsnew" aria-labelledby="wn-h"><form method="post" action="/app/whatsnew" class="dlg__in"><input type="hidden" name="id" value="${esc(latestUpdate.iso)}">
-<h2 id="wn-h" class="dlg__title">${cs ? 'Co je nového' : 'What&#39;s new'}</h2>${body}
-<div class="dlg__foot"><a class="link" href="/changelog/">${cs ? 'Všechny změny' : 'See all changes'}</a><button class="btn" autofocus>${cs ? 'Rozumím' : 'Got it'}</button></div></form></dialog>
+<h2 id="wn-h" class="dlg__title">${tr('What&#39;s new')}</h2>${body}
+<div class="dlg__foot"><a class="link" href="/changelog/">${tr('See all changes')}</a><button class="btn" autofocus>${tr('Got it')}</button></div></form></dialog>
 <script>(()=>{const d=document.getElementById('whatsnew');if(!d||!d.showModal)return;const f=d.querySelector('form');let done=false;
 const seen=()=>{if(done)return;done=true;fetch('/app/whatsnew',{method:'POST',body:new URLSearchParams(new FormData(f)),keepalive:true}).catch(()=>{});};
 f.addEventListener('submit',(e)=>{e.preventDefault();seen();d.close();});d.addEventListener('close',seen);
@@ -188,7 +189,7 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});d.showModal();})()
   const art = (name, cls = '') => ART.has(name) ? `<div class="art ${cls}"><img src="/art/${name}.jpg" alt="" width="${name === 'asleep' ? 800 : name === 'home' ? 1536 : 1200}" height="${name === 'asleep' ? 800 : name === 'home' ? 864 : 800}" decoding="async"></div>` : '';
   const setupBot = setupBotUrl;
   // With the landing site on this server, its legal pages are one link away from every dashboard page.
-  const LEGAL = '<footer class="legal"><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a><a href="/cookies/">Cookies</a><a href="/legal/">Legal notice</a><a href="/changelog/">What&#39;s new</a></footer>';
+  const legal = (tr) => `<footer class="legal"><a href="/privacy/">${tr('Privacy')}</a><a href="/terms/">${tr('Terms')}</a><a href="/cookies/">${tr('Cookies')}</a><a href="/legal/">${tr('Legal notice')}</a><a href="/changelog/">${tr('What&#39;s new')}</a></footer>`;
   const page = (res, status, html, headers = {}) => { res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin', ...headers }); res.end(html); };
   const redirect = (res, to) => { res.writeHead(303, { location: to, 'cache-control': 'no-store' }); res.end(); };
   const json = (res, status, data) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); };
@@ -202,10 +203,10 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});d.showModal();})()
   };
   const takeNotice = (user) => { const n = notices.get(user.id); notices.delete(user.id); return n && clock() - n.at < 120_000 ? n : null; };
   // An undo is the same form posted back with the earlier values; undo=1 keeps an undo from offering another.
-  const undoForm = (action, fields, label = 'Undo') => ({ action, fields, label });
-  const toast = (n) => {
+  const undoForm = (action, fields, label = '') => ({ action, fields, label });
+  const toast = (n, tr) => {
     const hidden = (o) => Object.entries(o).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v ?? '')}">`).join('');
-    const undo = n.undo ? `<form method="post" action="${esc(n.undo.action)}">${hidden({ ...n.undo.fields, undo: '1' })}<button class="toast__undo">${esc(n.undo.label)}</button></form>` : '';
+    const undo = n.undo ? `<form method="post" action="${esc(n.undo.action)}">${hidden({ ...n.undo.fields, undo: '1' })}<button class="toast__undo">${esc(n.undo.label || tr('Undo'))}</button></form>` : '';
     return `<div class="toast${undo ? ' toast--undo' : ''}" role="status">${ICON.check}<span class="toast__what">${esc(n.what)}</span>${undo}</div>`;
   };
 
@@ -243,15 +244,19 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});d.showModal();})()
     res.setHeader('set-cookie', `b2b_login=${nonce}; Path=/login; HttpOnly; SameSite=Lax; Max-Age=${LOGIN_TTL_MS / 1000}${secure ? '; Secure' : ''}`);
     q('INSERT INTO login_codes (email, code_hash, link_hash, created_at, expires_at, browser_hash, ip_hash, next) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(email, sha(code), sha(link), clock(), clock() + LOGIN_TTL_MS, sha(nonce), ipHash, String(next || '').slice(0, 500));
     const url = `${origin}/login/link?t=${link}`;
-    await mailer({ to: email, ...loginEmail({ product, code, url, minutes: LOGIN_TTL_MS / 60_000, home: origin, logo: site ? `${origin}/icon-192.png` : '' }) });
+    // In the language they chose for their account, else the language of the page they asked from.
+    const known = q('SELECT lang FROM users WHERE email = ?').get(email);
+    const lang = known?.lang ? normLang(known.lang) : reqLang(req);
+    await mailer({ to: email, ...loginEmail({ product, code, url, minutes: LOGIN_TTL_MS / 60_000, home: origin, logo: site ? `${origin}/icon-192.png` : '', lang }) });
     return devLogin ? code : null;
   }
-  function finishLogin(res, email, next, tz) {
+  function finishLogin(res, email, next, tz, lang) {
     let user = q('SELECT * FROM users WHERE email = ?').get(email);
     if (!user) {
       const nm = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).slice(0, 40);
       // New people start with nothing to catch up on: the "What's new" note is for those who were here before.
-      q('INSERT INTO users (email, name, created_at, email_verified_at, seen_update) VALUES (?, ?, ?, ?, ?)').run(email, nm, clock(), clock(), latestUpdate?.iso ?? null);
+      // Their language is the one they signed up in (English is stored as none).
+      q('INSERT INTO users (email, name, created_at, email_verified_at, seen_update, lang) VALUES (?, ?, ?, ?, ?, ?)').run(email, nm, clock(), clock(), latestUpdate?.iso ?? null, lang === 'cs' ? 'cs' : null);
       user = q('SELECT * FROM users WHERE email = ?').get(email);
       log(null, 'user_created', { user: user.id });
     }
@@ -267,10 +272,10 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});d.showModal();})()
   const pendingCode = (u) => q('SELECT * FROM enroll_codes WHERE user_id = ? AND used_at IS NULL AND expires_at > ? ORDER BY expires_at DESC').get(u.id, clock());
   const setupMessage = (code) => `Please set yourself up for ${product}. Read the guide with: curl -fsSL ${origin}/setup
 Then install the tool and join with code ${code}. Add the "b2b messaging" skill from ${origin}/skill. Make a routine called "b2b doorbell" with a webhook trigger, using the instruction from the guide. Don't print any keys or tokens in this chat.`;
-  const botStatus = (b) => b.disconnected_at ? { key: 'off', label: 'Disconnected' }
-    : b.paused_at ? { key: 'paused', label: 'Paused' }
-    : b.vendor === 'web' ? { key: 'ready', label: 'Web inbox' }
-    : !b.webhook_url ? { key: 'needs_doorbell', label: 'Doorbell off' } : b.doorbell_verified_at ? { key: 'ready', label: 'Ready' } : { key: 'needs_test', label: 'Doorbell not tested' };
+  const botStatus = (b, tr) => b.disconnected_at ? { key: 'off', label: tr('Disconnected') }
+    : b.paused_at ? { key: 'paused', label: tr('Paused') }
+    : b.vendor === 'web' ? { key: 'ready', label: tr('Web inbox') }
+    : !b.webhook_url ? { key: 'needs_doorbell', label: tr('Doorbell off') } : b.doorbell_verified_at ? { key: 'ready', label: tr('Ready') } : { key: 'needs_test', label: tr('Doorbell not tested') };
   // Arc badge tones: success for ready, warning for a step that's missing, info for paused.
   const toneOf = (key) => key === 'ready' ? 'success' : key === 'needs_doorbell' || key === 'needs_test' ? 'warning' : key === 'paused' ? 'info' : 'neutral';
   // Arc input: a labelled single-line field with optional helper copy and an error row (role=alert, aria-invalid).
@@ -309,27 +314,31 @@ Then install the tool and join with code ${code}. Add the "b2b messaging" skill 
   // Arc presence dot: shape and colour change together, so a bot's state never rests on colour alone.
   const presence = (key) => `<span class="pdot" data-status="${key === 'ready' ? 'available' : key === 'needs_doorbell' || key === 'needs_test' ? 'away' : 'offline'}" aria-hidden="true"></span>`;
   // Arc code block with a copy button: every message you paste into your bot.
-  const codeBlock = (id, title, text) => `<div class="code"><div class="code__head"><span class="code__title">${ICON.chat}${esc(title)}</span><button type="button" class="copybtn" data-copy="#${id}"><span class="copybtn__icon">${ICON.copy}${ICON.check}</span><span class="copybtn__label">Copy</span></button></div><pre class="code__pre" id="${id}">${esc(text)}</pre></div>`;
+  const codeBlock = (id, title, text, tr) => `<div class="code"><div class="code__head"><span class="code__title">${ICON.chat}${esc(title)}</span><button type="button" class="copybtn" data-copy="#${id}"><span class="copybtn__icon">${ICON.copy}${ICON.check}</span><span class="copybtn__label">${tr('Copy')}</span></button></div><pre class="code__pre" id="${id}">${esc(text)}</pre></div>`;
   // Arc stepper: done, current and next steps on one connected track.
-  const stepper = (steps, current, dir = 'h') => `<ol class="stepper stepper--${dir}">${steps.map((label, i) => {
+  const stepper = (steps, current, dir, tr) => `<ol class="stepper stepper--${dir}">${steps.map((label, i) => {
     const st = i < current ? 'complete' : i === current ? 'current' : 'upcoming';
-    return `<li class="step" data-status="${st}"${st === 'current' ? ' aria-current="step"' : ''}><span class="step__marker">${st === 'current' ? '<span class="step__ring"></span>' : ''}<span class="step__disc">${st === 'complete' ? ICON.check : i + 1}</span></span><span class="step__label">${esc(label)}${st === 'complete' ? '<span class="sr"> (done)</span>' : ''}</span>${i < steps.length - 1 ? `<span class="step__conn"><span class="step__fill"${i < current ? ' data-on' : ''}></span></span>` : ''}</li>`;
+    return `<li class="step" data-status="${st}"${st === 'current' ? ' aria-current="step"' : ''}><span class="step__marker">${st === 'current' ? '<span class="step__ring"></span>' : ''}<span class="step__disc">${st === 'complete' ? ICON.check : i + 1}</span></span><span class="step__label">${esc(label)}${st === 'complete' ? `<span class="sr"> (${tr('done')})</span>` : ''}</span>${i < steps.length - 1 ? `<span class="step__conn"><span class="step__fill"${i < current ? ' data-on' : ''}></span></span>` : ''}</li>`;
   }).join('')}</ol>`;
   // Arc confirm morph: the button turns into its own question, so a destructive tap needs a second, deliberate one.
-  const confirmMorph = ({ action, fields = '', label, icon = '', prompt, confirm, pending, tone = 'danger' }) => `<form method="post" action="${action}" class="cm" data-tone="${tone}" data-state="idle">${fields}<div class="cm__surface">
+  const confirmMorph = ({ action, fields = '', label, icon = '', prompt, confirm, pending, tone = 'danger', tr }) => `<form method="post" action="${action}" class="cm" data-tone="${tone}" data-state="idle">${fields}<div class="cm__surface">
 <div class="cm__face" data-face="idle"><button type="button" class="cm__trigger">${icon}${esc(label)}</button></div>
-<div class="cm__face" data-face="ask" role="group" aria-label="${esc(prompt)}" hidden><span class="cm__prompt">${esc(prompt)}</span><button type="button" class="cm__secondary">Cancel</button><button class="cm__confirm">${esc(confirm)}</button></div>
+<div class="cm__face" data-face="ask" role="group" aria-label="${esc(prompt)}" hidden><span class="cm__prompt">${esc(prompt)}</span><button type="button" class="cm__secondary">${tr('Cancel')}</button><button class="cm__confirm">${esc(confirm)}</button></div>
 <div class="cm__face" data-face="pending" hidden><span class="cm__status"><span class="cm__spin" aria-hidden="true"></span>${esc(pending)}</span></div></div></form>`;
   // Arc usage meter: how much of the free allowance is used, and how close it is to the limit.
-  const usageMeter = (a, { compact = false } = {}) => {
+  // The free period in words ("today", "this month"), and how often the allowance comes ("a day", "a month").
+  const periodWord = (tr) => (B.freePeriod === 'day' ? tr('today') : tr('this month'));
+  const perWord = (tr) => (B.freePeriod === 'day' ? tr('a day') : tr('a month'));
+  const usageMeter = (a, { compact = false, tr }) => {
     const used = Math.min(a.used, a.limit), left = Math.max(0, a.left);
     const status = left <= 0 ? 'over' : used / a.limit >= 0.9 ? 'near' : 'ok';
-    const bar = `<div class="meter__bar" role="img" aria-label="${left} of ${a.limit} free messages left ${esc(B.periodWord)}"><div class="meter__track"><div class="meter__fill" style="width:${(used / a.limit * 100).toFixed(1)}%"></div></div></div>`;
+    const label = tr('{left} of {limit} free messages left {period}', { left, limit: a.limit, period: esc(periodWord(tr)) });
+    const bar = `<div class="meter__bar" role="img" aria-label="${label}"><div class="meter__track"><div class="meter__fill" style="width:${(used / a.limit * 100).toFixed(1)}%"></div></div></div>`;
     // The compact meter is one line and a thin bar; it only shows a badge when the allowance runs low.
-    if (compact) return `<div class="meter meter--compact" role="group" aria-labelledby="meter-t"><div class="meter__top"><span class="meter__title" id="meter-t">Free messages</span>${status === 'ok' ? '' : `<span class="meter__badge" data-status="${status}"><span class="meter__icon">${ICON.alert}</span>${status === 'over' ? 'Used up' : 'Almost used up'}</span>`}<span class="meter__caption"><b>${left}</b> left of ${a.limit} ${esc(B.periodWord)}</span></div>${bar}</div>`;
-    return `<div class="meter" role="group" aria-labelledby="meter-t"><div class="meter__top"><span class="meter__title" id="meter-t">Free messages</span><span class="meter__badge" data-status="${status}">${status === 'ok' ? '' : `<span class="meter__icon">${ICON.alert}</span>`}${status === 'over' ? 'Used up' : status === 'near' ? 'Almost used up' : `${used} sent`}</span></div>
-<p class="meter__total"><span class="meter__amount">${left}</span><span class="meter__caption">left of ${a.limit} ${esc(B.periodWord)}</span></p>
-<div class="meter__bar" role="img" aria-label="${left} of ${a.limit} free messages left ${esc(B.periodWord)}"><div class="meter__track"><div class="meter__fill" style="width:${(used / a.limit * 100).toFixed(1)}%"></div></div></div></div>`;
+    if (compact) return `<div class="meter meter--compact" role="group" aria-labelledby="meter-t"><div class="meter__top"><span class="meter__title" id="meter-t">${tr('Free messages')}</span>${status === 'ok' ? '' : `<span class="meter__badge" data-status="${status}"><span class="meter__icon">${ICON.alert}</span>${status === 'over' ? tr('Used up') : tr('Almost used up')}</span>`}<span class="meter__caption">${tr('<b>{left}</b> left of {limit} {period}', { left, limit: a.limit, period: esc(periodWord(tr)) })}</span></div>${bar}</div>`;
+    return `<div class="meter" role="group" aria-labelledby="meter-t"><div class="meter__top"><span class="meter__title" id="meter-t">${tr('Free messages')}</span><span class="meter__badge" data-status="${status}">${status === 'ok' ? '' : `<span class="meter__icon">${ICON.alert}</span>`}${status === 'over' ? tr('Used up') : status === 'near' ? tr('Almost used up') : tr('{n} sent', { n: used })}</span></div>
+<p class="meter__total"><span class="meter__amount">${left}</span><span class="meter__caption">${tr('left of {limit} {period}', { limit: a.limit, period: esc(periodWord(tr)) })}</span></p>
+${bar}</div>`;
   };
   const liveBots = (u) => myBots(u).filter((b) => !b.disconnected_at);
   const webBots = (u) => liveBots(u).filter((b) => b.vendor === 'web');
@@ -355,22 +364,23 @@ Then install the tool and join with code ${code}. Add the "b2b messaging" skill 
   }
   // Consent for a connected app (OAuth). The app gets one bot of this person's, nothing else.
   function authorizePage(user, client, params, { error = '' } = {}) {
+    const tr = T(user);
     const bots = myBots(user).filter((b) => b.vendor === 'connector');
     const hidden = Object.entries(params).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
     const suggested = suggestHandle(user);
     // A disconnected bot waiting to come back is the likely choice; otherwise a new bot, so nobody hands an
     // existing bot to an app by accident. Apps name themselves (Grok Bot signs in as "Cursor"), so that's small print.
     const back = bots.find((b) => b.disconnected_at);
-    return layout('Connect', `<section class="card">
-<p class="muted small">Requested by the app "${esc(client.name)}".</p>
-${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
-<p>Your bot will be able to send and receive messages with people you connect with, as one ${esc(product)} bot. It can't see your account or anyone else's bots.</p>
-<p class="muted small">Connected-app chats are not end-to-end encrypted: we pass the text on and delete it 7 days after delivery. For end-to-end encryption, set your bot up in private mode instead.</p>
+    return layout(tr('Connect'), `<section class="card">
+<p class="muted small">${tr('Requested by the app "{name}".', { name: esc(client.name) })}</p>
+${error ? `<p class="error" role="alert">${esc(tr.msg(error))}</p>` : ''}
+<p>${tr("Your bot will be able to send and receive messages with people you connect with, as one {product} bot. It can't see your account or anyone else's bots.", { product: esc(product) })}</p>
+<p class="muted small">${tr('Connected-app chats are not end-to-end encrypted: we pass the text on and delete it 7 days after delivery. For end-to-end encryption, set your bot up in private mode instead.')}</p>
 <form method="post" action="/oauth/authorize" class="stack">${hidden}
-${bots.length ? `<label>Which bot<select name="bot" id="pick"><option value="new"${back ? '' : ' selected'}>A new bot</option>${bots.map((b) => `<option value="${b.id}"${b === back ? ' selected' : ''}>@${esc(b.handle)}${b.disconnected_at ? ' (reconnect)' : ''}</option>`).join('')}</select></label>` : '<input type="hidden" name="bot" value="new">'}
-<label id="newname"${back ? ' hidden' : ''}>Name for the new bot<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
-<button class="btn" name="decision" value="allow">Connect</button><button class="link" name="decision" value="deny">Cancel</button></form></section>
-${bots.length ? `<script>const p=document.getElementById('pick'),n=document.getElementById('newname');p.addEventListener('change',()=>{n.hidden=p.value!=='new';});</script>` : ''}`, { user, width: 'narrow', bar: { title: `Connect your bot to ${product}` } });
+${bots.length ? `<label>${tr('Which bot')}<select name="bot" id="pick"><option value="new"${back ? '' : ' selected'}>${tr('A new bot')}</option>${bots.map((b) => `<option value="${b.id}"${b === back ? ' selected' : ''}>@${esc(b.handle)}${b.disconnected_at ? ` (${tr('reconnect')})` : ''}</option>`).join('')}</select></label>` : '<input type="hidden" name="bot" value="new">'}
+<label id="newname"${back ? ' hidden' : ''}>${tr('Name for the new bot')}<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
+<button class="btn" name="decision" value="allow">${tr('Connect')}</button><button class="link" name="decision" value="deny">${tr('Cancel')}</button></form></section>
+${bots.length ? `<script>const p=document.getElementById('pick'),n=document.getElementById('newname');p.addEventListener('change',()=>{n.hidden=p.value!=='new';});</script>` : ''}`, { user, width: 'narrow', bar: { title: tr('Connect your bot to {product}', { product }) } });
   }
   const quickMessage = `Add the custom MCP connector ${origin}/mcp (name: bot2bot) and sign me in. Then call its whoami tool and do the next step it gives you.`;
   // Private mode is the default: one message, no code to copy. The bot makes its own keys and gives its owner
@@ -387,53 +397,54 @@ Give me the link it prints so I can approve you, then run the same join command 
     return { b, c };
   };
   const person = (c) => `${esc(c.name || '@' + c.handle)}`;
-  const verifiedPill = (v) => (v ? badge('Email verified', 'success') : badge('Not verified'));
+  const verifiedPill = (v, tr) => (v ? badge(tr('Email verified'), 'success') : badge(tr('Not verified')));
   // Arc alert: icon, title, description, and the one action that resolves it.
   const alertBox = (tone, title, desc, action = '') => `<section class="alert alert--${tone}" role="${tone === 'danger' ? 'alert' : 'status'}"><span class="alert__icon">${ICON.alert}</span><div class="alert__copy"><h2 class="alert__title">${title}</h2>${desc ? `<p class="alert__desc">${desc}</p>` : ''}</div>${action ? `<div class="alert__action">${action}</div>` : ''}</section>`;
 
   // ───── pages ─────
-  function landing(user) {
-    return layout('Bot to bot', `<section class="hero"><h1>Let your AI bot message your friends' bots.</h1>
-<p class="lead">Free and open source. Works with GrokBot today.</p>
-<a class="btn" href="${user ? '/app' : '/login'}">${user ? 'Open your dashboard' : 'Get started'}</a>${hosted ? '<p><a class="link" href="/pricing">Pricing</a></p>' : ''}</section>`, { user, bar: { title: product } });
+  function landing(user, tr) {
+    return layout(tr('Bot to bot'), `<section class="hero"><h1>${tr("Let your AI bot message your friends' bots.")}</h1>
+<p class="lead">${tr('Free and open source. Works with GrokBot today.')}</p>
+<a class="btn" href="${user ? '/app' : '/login'}">${user ? tr('Open your dashboard') : tr('Get started')}</a>${hosted ? `<p><a class="link" href="/pricing">${tr('Pricing')}</a></p>` : ''}</section>`, { user, tr, bar: { title: product } });
   }
 
   // ───── plans ─────
-  const dateStr = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
-  function pricingPage(user) {
-    return layout('Pricing', `${user ? '' : '<section class="hero"><h1>Free to start</h1></section>'}
+  function pricingPage(user, tr) {
+    return layout(tr('Pricing'), `${user ? '' : `<section class="hero"><h1>${tr('Free to start')}</h1></section>`}
 <section class="grid3 tiers">
-<div class="card"><h2>Run it yourself</h2><p class="price">Free</p><ul class="ticks"><li>Open source, everything included</li><li>Your own server</li><li>No limits from us</li></ul><a class="btn ghost" href="#">Get the code</a></div>
-<div class="card"><h2>We run it</h2><p class="price">Free</p><ul class="ticks"><li>${B.freeMessages} sent messages ${B.perWord}</li><li>Receiving is always free</li><li>No card</li></ul><a class="btn ghost" href="${user ? '/app' : '/login'}">${user ? 'Dashboard' : 'Start free'}</a></div>
-<div class="card attention"><h2>Family</h2><p class="price">${esc(B.priceLabel)}</p><ul class="ticks"><li>No limit</li><li>Covers you and ${B.householdSize - 1} people</li><li>One payment, nothing renews by itself</li></ul>${B.stripeKey && B.priceId ? `<a class="btn" href="${user ? '/app/billing' : '/login'}">${user ? 'See my plan' : 'Start free'}</a>` : '<p>' + badge('Coming soon') + '</p>'}</div>
-</section><p class="quiet small muted">Private mode is end-to-end encrypted between bots on every plan; quick connect is not. Friends who use the web inbox are always free; their chats are not end-to-end encrypted.</p>`, { user, bar: { title: 'Free to start' } });
+<div class="card"><h2>${tr('Run it yourself')}</h2><p class="price">${tr('Free')}</p><ul class="ticks"><li>${tr('Open source, everything included')}</li><li>${tr('Your own server')}</li><li>${tr('No limits from us')}</li></ul><a class="btn ghost" href="#">${tr('Get the code')}</a></div>
+<div class="card"><h2>${tr('We run it')}</h2><p class="price">${tr('Free')}</p><ul class="ticks"><li>${tr('{n} sent messages {per}', { n: B.freeMessages, per: perWord(tr) })}</li><li>${tr('Receiving is always free')}</li><li>${tr('No card')}</li></ul><a class="btn ghost" href="${user ? '/app' : '/login'}">${user ? tr('Dashboard') : tr('Start free')}</a></div>
+<div class="card attention"><h2>${tr('Family')}</h2><p class="price">${esc(tr.msg(B.priceLabel))}</p><ul class="ticks"><li>${tr('No limit')}</li><li>${tr('Covers you and {n} people', { n: B.householdSize - 1 })}</li><li>${tr('One payment, nothing renews by itself')}</li></ul>${B.stripeKey && B.priceId ? `<a class="btn" href="${user ? '/app/billing' : '/login'}">${user ? tr('See my plan') : tr('Start free')}</a>` : '<p>' + badge(tr('Coming soon')) + '</p>'}</div>
+</section><p class="quiet small muted">${tr('Private mode is end-to-end encrypted between bots on every plan; quick connect is not. Friends who use the web inbox are always free; their chats are not end-to-end encrypted.')}</p>`, { user, tr, bar: { title: tr('Free to start') } });
   }
   // The free plan: one line under the overview title, plus an alert once the messages are used up.
-  function planState(user) {
+  function planState(user, tr) {
     if (!hosted || !liveBots(user).some((b) => b.vendor !== 'web')) return { alert: '', meter: '' };
     const a = allowance(user);
     if (!a.limited) return { alert: '', meter: '' };
-    const alert = a.left > 0 ? '' : alertBox('warning', `You've used your ${a.limit} free messages ${B.periodWord}`,
-      `Your bot can't send until ${B.freePeriod === 'day' ? 'tomorrow (midnight UTC)' : dateStr(a.resets)}. Receiving still works. ${esc(B.priceLabel)} removes the limit for you and ${B.householdSize - 1} others.`,
-      '<a class="btn small" href="/app/billing">Remove the limit</a>');
-    return { alert, meter: `<a class="card card--meter" href="/app/billing">${usageMeter(a, { compact: true })}</a>` };
+    const alert = a.left > 0 ? '' : alertBox('warning', tr("You've used your {n} free messages {period}", { n: a.limit, period: periodWord(tr) }),
+      tr("Your bot can't send until {when}. Receiving still works. {price} removes the limit for you and {n} others.", { when: B.freePeriod === 'day' ? tr('tomorrow (midnight UTC)') : tr.date(a.resets), price: esc(tr.msg(B.priceLabel)), n: B.householdSize - 1 }),
+      `<a class="btn small" href="/app/billing">${tr('Remove the limit')}</a>`);
+    return { alert, meter: `<a class="card card--meter" href="/app/billing">${usageMeter(a, { compact: true, tr })}</a>` };
   }
   function billingPage(user, { error = '', paid = false } = {}) {
+    const tr = T(user);
     const c = allowance(user);
     const members = q('SELECT email FROM household_members WHERE payer_user_id = ? ORDER BY added_at').all(user.id);
     const canPay = !!(B.stripeKey && B.priceId);
-    const status = c.state === 'infinite' ? 'No limit, for good. Send as much as you like.'
-      : c.state === 'paid' ? `Paid until ${dateStr(c.until)}.`
-      : c.state === 'covered' ? `Covered by ${esc(c.payer)} until ${dateStr(c.until)}.`
-      : `Free plan: ${c.used} of ${c.limit} messages sent ${B.periodWord}. It starts again ${B.freePeriod === 'day' ? 'at midnight UTC' : `on ${dateStr(c.resets)}`}. Receiving is never limited.`;
-    return layout('Plan', `<section class="card"><h2>Your plan${c.state === 'infinite' ? ' <span class="umenu__plan umenu__plan--infinite"><span class="inf" aria-hidden="true">∞</span>Infinite</span>' : ''}</h2>${paid ? '<p class="okmsg" role="status">Thanks! Payment received.</p>' : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
-${c.limited ? `<div class="card__block">${usageMeter(c)}</div>` : ''}<p>${status}</p>
-${c.state === 'covered' || c.state === 'infinite' ? '' : canPay ? `<form method="post" action="/app/billing/checkout"><button class="btn">${c.state === 'paid' ? 'Add another year' : `Pay ${esc(B.priceLabel)}`}</button></form><p class="muted small">${c.state === 'paid' ? '' : 'No monthly limit for you and your household. '}One payment a year. No subscription, nothing renews by itself.</p>`
-  : '<p class="muted small">The paid plan is coming soon.</p>'}</section>
-<section class="card"><h2>Your household</h2><p>A paid plan covers you and up to ${B.householdSize - 1} people. Add the email they sign in with. They never see your conversations.</p>
-${members.map((m) => `<div class="row"><span>${esc(m.email)}</span><form method="post" action="/app/billing/members" class="more"><input type="hidden" name="remove" value="${esc(m.email)}"><button class="link danger">Remove</button></form></div>`).join('')}
-${members.length < B.householdSize - 1 ? `<form method="post" action="/app/billing/members" class="stack"><label>Email<input name="email" type="email" required autocomplete="off"></label><button class="btn small ghost">Add to my household</button></form>` : ''}
-${c.state !== 'paid' && members.length ? '<p class="muted small">They have no limit once you have paid.</p>' : ''}</section>`, { user, tab: 'plan', width: 'read', bar: { title: 'Plan', sub: 'What you can send and who your plan covers' } });
+    const price = esc(tr.msg(B.priceLabel));
+    const status = c.state === 'infinite' ? tr('No limit, for good. Send as much as you like.')
+      : c.state === 'paid' ? tr('Paid until {date}.', { date: tr.date(c.until) })
+      : c.state === 'covered' ? tr('Covered by {payer} until {date}.', { payer: esc(c.payer), date: tr.date(c.until) })
+      : tr('Free plan: {used} of {limit} messages sent {period}. It starts again {when}. Receiving is never limited.', { used: c.used, limit: c.limit, period: periodWord(tr), when: B.freePeriod === 'day' ? tr('at midnight UTC') : tr('on {date}', { date: tr.date(c.resets) }) });
+    return layout(tr('Plan'), `<section class="card"><h2>${tr('Your plan')}${c.state === 'infinite' ? ' <span class="umenu__plan umenu__plan--infinite"><span class="inf" aria-hidden="true">∞</span>Infinite</span>' : ''}</h2>${paid ? `<p class="okmsg" role="status">${tr('Thanks! Payment received.')}</p>` : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
+${c.limited ? `<div class="card__block">${usageMeter(c, { tr })}</div>` : ''}<p>${status}</p>
+${c.state === 'covered' || c.state === 'infinite' ? '' : canPay ? `<form method="post" action="/app/billing/checkout"><button class="btn">${c.state === 'paid' ? tr('Add another year') : tr('Pay {price}', { price })}</button></form><p class="muted small">${c.state === 'paid' ? '' : `${tr('No monthly limit for you and your household.')} `}${tr('One payment a year. No subscription, nothing renews by itself.')}</p>`
+  : `<p class="muted small">${tr('The paid plan is coming soon.')}</p>`}</section>
+<section class="card"><h2>${tr('Your household')}</h2><p>${tr('A paid plan covers you and up to {n} people. Add the email they sign in with. They never see your conversations.', { n: B.householdSize - 1 })}</p>
+${members.map((m) => `<div class="row"><span>${esc(m.email)}</span><form method="post" action="/app/billing/members" class="more"><input type="hidden" name="remove" value="${esc(m.email)}"><button class="link danger">${tr('Remove')}</button></form></div>`).join('')}
+${members.length < B.householdSize - 1 ? `<form method="post" action="/app/billing/members" class="stack"><label>${tr('Email')}<input name="email" type="email" required autocomplete="off"></label><button class="btn small ghost">${tr('Add to my household')}</button></form>` : ''}
+${c.state !== 'paid' && members.length ? `<p class="muted small">${tr('They have no limit once you have paid.')}</p>` : ''}</section>`, { user, tab: 'plan', width: 'read', bar: { title: tr('Plan'), sub: tr('What you can send and who your plan covers') } });
   }
   // Stripe sends this after a payment. We check its signature before trusting anything in it.
   function verifyStripe(raw, header) {
@@ -446,35 +457,35 @@ ${c.state !== 'paid' && members.length ? '<p class="muted small">They have no li
     return sigs.some((sg) => sg.length === want.length && timingSafeEqual(Buffer.from(sg), Buffer.from(want)));
   }
 
-  function loginPage({ email = '', sent = false, error = '', next = '', devCode = null } = {}) {
-    return layout('Log in', `<section class="card narrow"><h1>${sent ? 'Check your email' : 'Log in or sign up'}</h1>
-${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
-${sent ? `<p>We sent a 6-digit code to <b>${esc(email)}</b>. Type it below, or click the link in the email.</p><p class="muted small">Wrong address? <a class="link" href="/login${next ? `?next=${encodeURIComponent(next)}` : ''}">Use a different email</a>.</p>
-${devCode ? `<p class="dev">Dev mode: your code is <b>${esc(devCode)}</b></p>` : ''}
+  function loginPage(tr, { email = '', sent = false, error = '', next = '', devCode = null } = {}) {
+    return layout(tr('Log in'), `<section class="card narrow"><h1>${sent ? tr('Check your email') : tr('Log in or sign up')}</h1>
+${error ? `<p class="error" role="alert">${esc(tr.msg(error))}</p>` : ''}
+${sent ? `<p>${tr('We sent a 6-digit code to <b>{email}</b>. Type it below, or click the link in the email.', { email: esc(email) })}</p><p class="muted small">${tr('Wrong address? <a class="link" href="{href}">Use a different email</a>.', { href: `/login${next ? `?next=${encodeURIComponent(next)}` : ''}` })}</p>
+${devCode ? `<p class="dev">${tr('Dev mode: your code is <b>{code}</b>', { code: esc(devCode) })}</p>` : ''}
 <form method="post" action="/login/verify" class="stack"><input type="hidden" name="email" value="${esc(email)}"><input type="hidden" name="next" value="${esc(next)}"><input type="hidden" name="tz" id="tz">
-<div class="otp" role="group" aria-label="6-digit code"><input type="hidden" name="code">${[0, 1, 2, 3, 4, 5].map((i) => `<input class="otp__slot" inputmode="numeric" aria-label="Digit ${i + 1} of 6"${i ? ' autocomplete="off"' : ' autocomplete="one-time-code" autofocus'}>`).join('')}</div>
-<noscript><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required aria-label="6-digit code"></noscript>
-<button class="btn" data-busy><span class="btn__label">Log in</span><span class="btn__spin" aria-hidden="true"></span></button></form><script>try{document.getElementById('tz').value=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){}</script>`
-    : `<p>No password. We email you a code.</p><form method="post" action="/login" class="stack"><input type="hidden" name="next" value="${esc(next)}">
-<label>Email<input name="email" type="email" autocomplete="email" required autofocus value="${esc(email)}"></label><button class="btn">Email me a code</button></form>${site ? '<p class="muted small">By signing up you agree to the <a class="link" href="/terms/">terms</a>. Here’s how we handle <a class="link" href="/privacy/">your data</a>.</p>' : ''}`}
-</section>`);
+<div class="otp" role="group" aria-label="${tr('6-digit code')}"><input type="hidden" name="code">${[0, 1, 2, 3, 4, 5].map((i) => `<input class="otp__slot" inputmode="numeric" aria-label="${tr('Digit {n} of 6', { n: i + 1 })}"${i ? ' autocomplete="off"' : ' autocomplete="one-time-code" autofocus'}>`).join('')}</div>
+<noscript><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required aria-label="${tr('6-digit code')}"></noscript>
+<button class="btn" data-busy><span class="btn__label">${tr('Log in')}</span><span class="btn__spin" aria-hidden="true"></span></button></form><script>try{document.getElementById('tz').value=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){}</script>`
+    : `<p>${tr('No password. We email you a code.')}</p><form method="post" action="/login" class="stack"><input type="hidden" name="next" value="${esc(next)}">
+<label>${tr('Email')}<input name="email" type="email" autocomplete="email" required autofocus value="${esc(email)}"></label><button class="btn">${tr('Email me a code')}</button></form>${site ? `<p class="muted small">${tr('By signing up you agree to the <a class="link" href="/terms/">terms</a>. Here’s how we handle <a class="link" href="/privacy/">your data</a>.')}</p>` : ''}`}
+</section>`, { tr });
   }
 
   // No bot yet: the setup bot first (it does everything with you), doing it yourself second.
-  function setupChoices({ message = privateMessage, quick = quickMessage, invite = null } = {}) {
-    return `<section class="card"><div class="way"><div class="way__head"><h2>Add the setup bot</h2>${badge('Easiest', 'info')}</div>
-<p class="muted">A Grok Bot that sets everything up with you: sign-in, your bot, the doorbell and a test.${invite ? ` Tell it you have an invite from ${invite}.` : ''}</p>
-<a class="btn blue wide" href="${esc(setupBot)}" target="_blank" rel="noopener">Add the setup bot${ICON.out}</a></div>
-<div class="way"><details class="diy"><summary>Or paste one message into your bot</summary>
-<p class="muted" style="margin-top:10px">Paste this into your bot's chat in Grok Bot. It installs a small tool, makes its own keys and gives you a link to approve it. Only the bots can read your messages.</p>
-${codeBlock('pm', 'Message for your bot', message)}
-<details class="diy"><summary class="muted small">Bot can't run commands? Quick connect</summary>
-<p class="muted small" style="margin-top:8px">It adds ${esc(product)} as an app and asks you to sign in once. Quick connect is not end-to-end encrypted: your bot hands us the text, and we delete it 7 days after delivery.</p>
-${codeBlock('qc', 'Message for your bot', quick)}</details></details></div></section>`;
+  function setupChoices(tr, { message = privateMessage, quick = quickMessage, invite = null } = {}) {
+    return `<section class="card"><div class="way"><div class="way__head"><h2>${tr('Add the setup bot')}</h2>${badge(tr('Easiest'), 'info')}</div>
+<p class="muted">${tr('A Grok Bot that sets everything up with you: sign-in, your bot, the doorbell and a test.')}${invite ? ` ${tr('Tell it you have an invite from {who}.', { who: invite })}` : ''}</p>
+<a class="btn blue wide" href="${esc(setupBot)}" target="_blank" rel="noopener">${tr('Add the setup bot')}${ICON.out}</a></div>
+<div class="way"><details class="diy"><summary>${tr('Or paste one message into your bot')}</summary>
+<p class="muted" style="margin-top:10px">${tr("Paste this into your bot's chat in Grok Bot. It installs a small tool, makes its own keys and gives you a link to approve it. Only the bots can read your messages.")}</p>
+${codeBlock('pm', tr('Message for your bot'), message, tr)}
+<details class="diy"><summary class="muted small">${tr("Bot can't run commands? Quick connect")}</summary>
+<p class="muted small" style="margin-top:8px">${tr('It adds {product} as an app and asks you to sign in once. Quick connect is not end-to-end encrypted: your bot hands us the text, and we delete it 7 days after delivery.', { product: esc(product) })}</p>
+${codeBlock('qc', tr('Message for your bot'), quick, tr)}</details></details></div></section>`;
   }
 
   // Messages, newest first, as an Arc data table. The overview shows a few, the activity page shows 30.
-  function activityTable(user, limit) {
+  function activityTable(user, limit, tr) {
     const bots = myBots(user);
     const now = clock();
     const ids = bots.map((b) => b.id);
@@ -484,25 +495,26 @@ ${codeBlock('qc', 'Message for your bot', quick)}</details></details></div></sec
     const mine = new Set(ids);
     const row = (m) => {
       const out = mine.has(m.from_bot);
-      const label = m.replied_at ? 'Replied' : m.status === 'delivered' ? (out ? 'Passed on' : 'Received') : m.status === 'dropped' ? 'Not delivered' : 'Waiting';
-      const text = m.body_purged_at ? 'Text deleted after 7 days' : m.sealed ? 'End-to-end encrypted' : String(m.text).slice(0, 140);
-      return `<li class="line" data-dir="${out ? 'out' : 'in'}"><span class="line__main"><span class="line__title"><span class="handle">@${esc(m.from_handle)}</span> → <span class="handle">@${esc(m.to_handle)}</span></span><span class="line__sub">${m.kind === 'ask' ? 'Question · ' : ''}${esc(text)} · ${label}</span></span><span class="line__end">${esc(ago(m.created_at, now))}</span></li>`;
+      const label = m.replied_at ? tr('Replied') : m.status === 'delivered' ? (out ? tr('Passed on') : tr('Received')) : m.status === 'dropped' ? tr('Not delivered') : tr('Waiting');
+      const text = m.body_purged_at ? tr('Text deleted after 7 days') : m.sealed ? tr('End-to-end encrypted') : String(m.text).slice(0, 140);
+      return `<li class="line" data-dir="${out ? 'out' : 'in'}"><span class="line__main"><span class="line__title"><span class="handle">@${esc(m.from_handle)}</span> → <span class="handle">@${esc(m.to_handle)}</span></span><span class="line__sub">${m.kind === 'ask' ? `${tr('Question')} · ` : ''}${esc(text)} · ${label}</span></span><span class="line__end">${esc(tr.ago(m.created_at, now))}</span></li>`;
     };
     const sealed = rows.some((m) => m.sealed && !m.body_purged_at);
-    return { n: rows.length, html: `<ul class="list">${rows.map(row).join('')}</ul>${sealed ? '<p class="card__foot">End-to-end encrypted messages show no text here. Only the bots can read them.</p>' : ''}` };
+    return { n: rows.length, html: `<ul class="list">${rows.map(row).join('')}</ul>${sealed ? `<p class="card__foot">${tr('End-to-end encrypted messages show no text here. Only the bots can read them.')}</p>` : ''}` };
   }
   const emptyState = (icon, title, text, action = '') => `<div class="empty"><span class="empty__icon">${ICON[icon]}</span><h3>${title}</h3><p>${text}</p>${action ? `<div class="empty__action">${action}</div>` : ''}</div>`;
-  const REFRESH_NOTE = `<p class="note">${ICON.refresh}Updated just now · refreshes every 30 s</p>`;
+  const refreshNote = (tr) => `<p class="note">${ICON.refresh}${tr('Updated just now · refreshes every 30 s')}</p>`;
 
   function dashboard(user) {
+    const tr = T(user);
     const bots = myBots(user);
     const now = clock();
     if (!bots.length) {
       const code = pendingCode(user);
-      if (code) return layout('Set up', `${art('setup', 'small')}<section class="card"><h2>Connect your bot</h2>${waitingForBot({ plain: code.plain_code })}</section>`, { user, tab: 'home', width: 'read', bar: { title: 'Connect your bot', sub: 'Private mode' } });
-      return layout('Set up', `${art('setup', 'small')}${setupChoices()}
-<p class="wait" id="wait" style="justify-content:center"><span class="dot dot--live"></span> Waiting for your bot…</p>
-<script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`, { user, tab: 'home', width: 'read', bar: { title: 'Connect your Grok Bot', sub: 'Takes a few minutes' } });
+      if (code) return layout(tr('Set up'), `${art('setup', 'small')}<section class="card"><h2>${tr('Connect your bot')}</h2>${waitingForBot(tr, { plain: code.plain_code })}</section>`, { user, tab: 'home', width: 'read', bar: { title: tr('Connect your bot'), sub: tr('Private mode') } });
+      return layout(tr('Set up'), `${art('setup', 'small')}${setupChoices(tr)}
+<p class="wait" id="wait" style="justify-content:center"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p>
+<script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`, { user, tab: 'home', width: 'read', bar: { title: tr('Connect your Grok Bot'), sub: tr('Takes a few minutes') } });
     }
     const botIds = bots.map((b) => b.id);
     const ph = botIds.map(() => '?').join(',');
@@ -518,63 +530,63 @@ ${codeBlock('qc', 'Message for your bot', quick)}</details></details></div></sec
     const paused = live.some((b) => b.paused_at);
     const multi = live.length > 1;
     const pending = pendingCode(user);
-    const plan = planState(user);
+    const plan = planState(user, tr);
     const waiting = pendingFor(user);
     // Honest labels: only bot-to-bot chats with keys on both sides are end-to-end encrypted.
-    const lock = (c) => c.vendor === 'web' || c.my_vendor === 'web' ? 'Web inbox · not end-to-end encrypted'
-      : c.vendor === 'connector' || c.my_vendor === 'connector' ? 'Connected app · not end-to-end encrypted'
-      : c.box_pub && c.my_box ? (c.codes_compared_at ? 'Encrypted · codes compared' : 'End-to-end encrypted')
-      : 'Not encrypted yet';
+    const lock = (c) => c.vendor === 'web' || c.my_vendor === 'web' ? tr('Web inbox · not end-to-end encrypted')
+      : c.vendor === 'connector' || c.my_vendor === 'connector' ? tr('Connected app · not end-to-end encrypted')
+      : c.box_pub && c.my_box ? (c.codes_compared_at ? tr('Encrypted · codes compared') : tr('End-to-end encrypted'))
+      : tr('Not encrypted yet');
     // What each side's bot may answer without asking its person first, said about the people.
     const asks = (c, ids) => {
       const mine = JSON.parse(c.can_ask || '[]'), theirs = JSON.parse(c.they_let_me_ask || '[]');
       if (!mine.length && !theirs.length) return '';
-      return `<div class="asks">${mine.length ? `<div><span class="muted">${esc(c.alias)} can ask about</span> ${mine.map((t) => `<span class="topic">${esc(t)}<form method="post" action="/app/contacts/disallow" class="inline">${ids}<input type="hidden" name="topic" value="${esc(t)}"><button class="x" aria-label="Stop letting ${esc(c.alias)} ask about ${esc(t)}" title="Stop">×</button></form></span>`).join(' ')}</div>` : ''}
-${theirs.length ? `<div><span class="muted">You can ask ${esc(c.alias)} about</span> ${theirs.map((t) => `<span class="topic">${esc(t)}</span>`).join(' ')}</div>` : ''}</div>`;
+      return `<div class="asks">${mine.length ? `<div><span class="muted">${tr('{name} can ask about', { name: esc(c.alias) })}</span> ${mine.map((t) => `<span class="topic">${esc(t)}<form method="post" action="/app/contacts/disallow" class="inline">${ids}<input type="hidden" name="topic" value="${esc(t)}"><button class="x" aria-label="${tr('Stop letting {name} ask about {topic}', { name: esc(c.alias), topic: esc(t) })}" title="${tr('Stop')}">×</button></form></span>`).join(' ')}</div>` : ''}
+${theirs.length ? `<div><span class="muted">${tr('You can ask {name} about', { name: esc(c.alias) })}</span> ${theirs.map((t) => `<span class="topic">${esc(t)}</span>`).join(' ')}</div>` : ''}</div>`;
     };
     const aiBots = live.filter((b) => b.vendor !== 'web');
-    const ready = aiBots.filter((b) => botStatus(b).key === 'ready').length;
+    const ready = aiBots.filter((b) => botStatus(b, tr).key === 'ready').length;
     const botRow = (b) => {
-      const st = botStatus(b);
-      const label = b.vendor === 'web' ? 'Web inbox' : st.key === 'ready' ? (b.last_ring_at ? 'Ready' : 'Ready, asleep') : st.label;
-      const mode = b.vendor === 'web' ? 'Read in your browser' : b.vendor === 'connector' ? 'Quick connect' : 'Private mode';
+      const st = botStatus(b, tr);
+      const label = b.vendor === 'web' ? tr('Web inbox') : st.key === 'ready' ? (b.last_ring_at ? tr('Ready') : tr('Ready, asleep')) : st.label;
+      const mode = b.vendor === 'web' ? tr('Read in your browser') : b.vendor === 'connector' ? tr('Quick connect') : tr('Private mode');
       return `<li><a class="line line--link" href="${b.vendor === 'web' && !b.disconnected_at ? '/app/inbox' : `/app/bots/${b.id}`}">${presence(st.key)}
 <span class="line__main"><span class="line__title handle">@${esc(b.handle)}</span><span class="line__sub">${label} · ${mode}</span></span>${ICON.chev}</a></li>`;
     };
     const friendRow = (c) => {
       const ids = `<input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}">`;
-      const state = c.blocked ? 'Blocked' : !c.their_ok ? 'Waiting for them' : 'Connected';
+      const state = c.blocked ? tr('Blocked') : !c.their_ok ? tr('Waiting for them') : tr('Connected');
       const id = `f-${c.owner_bot}-${c.peer_bot}`;
       const topics = asks(c, ids);
       // Pilot owners manage this per basket on People. Outside it, existing protection stays visible so it can be turned off.
       const asksFirst = !inPilot(user) && !!c.privacy_on;
-      const basketRow = inPilot(user) && c.my_vendor !== 'web' ? `<div><dt>Basket</dt><dd>${c.circle_name ? `<span class="hand basket-word">${esc(c.circle_name)}</span>` : 'Not sorted yet'}${effectiveMode(c) === 'asks' ? ' · asks you first' : ''} · <a href="/app/people/${c.owner_bot}/${c.peer_bot}">Change</a></dd></div>` : '';
+      const basketRow = inPilot(user) && c.my_vendor !== 'web' ? `<div><dt>${tr('Basket')}</dt><dd>${c.circle_name ? `<span class="hand basket-word">${esc(c.circle_name)}</span>` : tr('Not sorted yet')}${effectiveMode(c) === 'asks' ? ` · ${tr('asks you first')}` : ''} · <a href="/app/people/${c.owner_bot}/${c.peer_bot}">${tr('Change')}</a></dd></div>` : '';
       const askFirst = asksFirst ? `<form method="post" action="/app/contacts/privacy" class="setrow setrow--flush acc__setting">${ids}
-<div><p class="setrow__label" id="${id}-ask">Ask me before my bot writes to ${esc(c.alias)}</p><p class="setrow__desc">Your bot can't send them anything until you say yes. Approving from here comes next.</p></div>
-<label class="switch"><input type="checkbox" role="switch" name="on" value="1" aria-labelledby="${id}-ask" data-autosave${asksFirst ? ' checked' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label><noscript><button class="btn small ghost">Save</button></noscript></form>` : '';
+<div><p class="setrow__label" id="${id}-ask">${tr('Ask me before my bot writes to {name}', { name: esc(c.alias) })}</p><p class="setrow__desc">${tr("Your bot can't send them anything until you say yes. Approving from here comes next.")}</p></div>
+<label class="switch"><input type="checkbox" role="switch" name="on" value="1" aria-labelledby="${id}-ask" data-autosave${asksFirst ? ' checked' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label><noscript><button class="btn small ghost">${tr('Save')}</button></noscript></form>` : '';
       return `<li class="acc" data-open="false"><button type="button" class="acc__head" aria-expanded="false" aria-controls="${id}">${avatar(c.alias, 'md', c.their_ok && !c.they_blocked ? photoUrl(c.peer_user, c.photo_at, c.avatar) : '')}
-<span class="line__main"><span class="line__title item__title">${esc(c.alias)}</span><span class="line__sub">${state} · ${c.last_at ? `last message ${esc(ago(c.last_at, now))}` : 'no messages yet'}</span></span>${ICON.chevDown}</button>
+<span class="line__main"><span class="line__title item__title">${esc(c.alias)}</span><span class="line__sub">${state} · ${c.last_at ? tr('last message {ago}', { ago: esc(tr.ago(c.last_at, now)) }) : tr('no messages yet')}</span></span>${ICON.chevDown}</button>
 <div class="acc__panel" id="${id}" role="region" aria-label="${esc(c.alias)}" inert><div class="acc__inner"><div class="acc__body">
-<dl class="kv"><div><dt>Their bot</dt><dd><span class="handle">@${esc(c.handle)}</span>${c.name && c.name.toLowerCase() !== c.alias.toLowerCase() ? ` · ${esc(c.name)}` : ''}</dd></div>
-<div><dt>Email</dt><dd>${c.email_verified_at ? 'Verified' : 'Not verified'}</dd></div>
-<div><dt>Encryption</dt><dd>${esc(lock(c))}</dd></div>${multi ? `<div><dt>Your bot</dt><dd><span class="handle">@${esc(c.my_handle)}</span></dd></div>` : ''}
-${basketRow}${topics ? `<div><dt>Topics</dt><dd>${topics}</dd></div>` : ''}</dl>
-${askFirst}<div class="acc__actions"><form method="post" action="/app/contacts/block">${ids}${c.blocked ? '<input type="hidden" name="unblock" value="1"><button class="btn small ghost">Unblock</button>' : '<button class="btn small ghost">Block</button>'}</form>
-${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: 'Remove', prompt: `Remove ${c.alias}?`, confirm: 'Remove', pending: 'Removing' })}</div>
+<dl class="kv"><div><dt>${tr('Their bot')}</dt><dd><span class="handle">@${esc(c.handle)}</span>${c.name && c.name.toLowerCase() !== c.alias.toLowerCase() ? ` · ${esc(c.name)}` : ''}</dd></div>
+<div><dt>${tr('Email')}</dt><dd>${c.email_verified_at ? tr('Verified') : tr('Not verified')}</dd></div>
+<div><dt>${tr('Encryption')}</dt><dd>${esc(lock(c))}</dd></div>${multi ? `<div><dt>${tr('Your bot')}</dt><dd><span class="handle">@${esc(c.my_handle)}</span></dd></div>` : ''}
+${basketRow}${topics ? `<div><dt>${tr('Topics')}</dt><dd>${topics}</dd></div>` : ''}</dl>
+${askFirst}<div class="acc__actions"><form method="post" action="/app/contacts/block">${ids}${c.blocked ? `<input type="hidden" name="unblock" value="1"><button class="btn small ghost">${tr('Unblock')}</button>` : `<button class="btn small ghost">${tr('Block')}</button>`}</form>
+${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: tr('Remove'), prompt: tr('Remove {name}?', { name: c.alias }), confirm: tr('Remove'), pending: tr('Removing'), tr })}</div>
 </div></div></div></li>`;
     };
-    const inviteForm = (cls) => live.length ? `<form method="post" action="/app/invites"><input type="hidden" name="bot" value="${live[0].id}"><button class="btn${cls ? ` ${cls}` : ''}" data-busy><span class="btn__label">${ICON.invite}Invite a friend</span><span class="btn__spin" aria-hidden="true"></span></button></form>` : '';
-    const sub = paused ? 'Everything is paused' : [`${ready ? `${ready} bot${ready > 1 ? 's' : ''} ready` : 'Setting up'}`, `${settled.length} friend${settled.length === 1 ? '' : 's'}`].join(' · ');
+    const inviteForm = (cls) => live.length ? `<form method="post" action="/app/invites"><input type="hidden" name="bot" value="${live[0].id}"><button class="btn${cls ? ` ${cls}` : ''}" data-busy><span class="btn__label">${ICON.invite}${tr('Invite a friend')}</span><span class="btn__spin" aria-hidden="true"></span></button></form>` : '';
+    const sub = paused ? tr('Everything is paused') : [`${ready ? tr.n(ready, '{n} bot ready|{n} bots ready') : tr('Setting up')}`, tr.n(settled.length, '{n} friend|{n} friends')].join(' · ');
     const alerts = [
-      paused ? alertBox('info', 'Everything is paused', "Your bot won't be woken and can't send. Messages from friends wait here for up to 7 days.", '<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">Resume</button></form>') : '',
+      paused ? alertBox('info', tr('Everything is paused'), tr("Your bot won't be woken and can't send. Messages from friends wait here for up to 7 days."), `<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">${tr('Resume')}</button></form>`) : '',
       plan.alert,
-      ...aiBots.filter((b) => toolOf(b)?.old).map((b) => alertBox('warning', `@${esc(b.handle)} runs an old bot2bot tool`, 'One message to your bot fixes it. After that, it updates itself.', `<a class="btn small" href="/app/bots/${b.id}#update">Show the message</a>`)),
-      waiting ? alertBox('info', waiting === 1 ? 'Your bot needs your okay' : `Your bot needs your okay on ${waiting} things`, 'A reply or a change is waiting for you.', '<a class="btn small" href="/app/requests">See what it is</a>') : '',
-      pending ? `<section class="card"><div class="card__head"><h2>Connect @${esc(pending.handle)}</h2>${badge('Private mode', 'info')}</div>${waitingForBot({ plain: pending.plain_code }, bots.length)}</section>` : '',
-      ...requests.map((c) => alertBox('warning', `Did you mean to connect with ${person(c)}?`,
-        `Your bot <span class="handle">@${esc(c.my_handle)}</span> paired with <b>${person(c)}</b> (<span class="handle">@${esc(c.handle)}</span>) ${verifiedPill(c.email_verified_at)}. Nothing can be sent either way until you say yes.`,
-        `<form method="post" action="/app/contacts/approve"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small">Yes, connect</button></form>
-<form method="post" action="/app/contacts/remove"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small ghost">No, remove</button></form>`)),
+      ...aiBots.filter((b) => toolOf(b)?.old).map((b) => alertBox('warning', tr('@{handle} runs an old bot2bot tool', { handle: esc(b.handle) }), tr('One message to your bot fixes it. After that, it updates itself.'), `<a class="btn small" href="/app/bots/${b.id}#update">${tr('Show the message')}</a>`)),
+      waiting ? alertBox('info', waiting === 1 ? tr('Your bot needs your okay') : tr('Your bot needs your okay on {n} things', { n: waiting }), tr('A reply or a change is waiting for you.'), `<a class="btn small" href="/app/requests">${tr('See what it is')}</a>`) : '',
+      pending ? `<section class="card"><div class="card__head"><h2>${tr('Connect @{handle}', { handle: esc(pending.handle) })}</h2>${badge(tr('Private mode'), 'info')}</div>${waitingForBot(tr, { plain: pending.plain_code }, bots.length)}</section>` : '',
+      ...requests.map((c) => alertBox('warning', tr('Did you mean to connect with {name}?', { name: person(c) }),
+        tr('Your bot {mine} paired with <b>{name}</b> ({theirs}) {verified}. Nothing can be sent either way until you say yes.', { mine: `<span class="handle">@${esc(c.my_handle)}</span>`, name: person(c), theirs: `<span class="handle">@${esc(c.handle)}</span>`, verified: verifiedPill(c.email_verified_at, tr) }),
+        `<form method="post" action="/app/contacts/approve"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small">${tr('Yes, connect')}</button></form>
+<form method="post" action="/app/contacts/remove"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small ghost">${tr('No, remove')}</button></form>`)),
     ].filter(Boolean).join('');
     const first = (user.name || '').trim().split(/\s+/)[0];
     // Invites saved from here that nobody has used yet (opening Invite a friend and going back lists nothing): who they're for (the note), where they'll go, how long left.
@@ -582,61 +594,63 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: 'Remove', p
       AND i.by_owner = 1 AND i.plain_code IS NOT NULL AND i.saved_at IS NOT NULL AND i.used_at IS NULL AND i.expires_at > ? ORDER BY i.created_at DESC`).all(...live.map((b) => b.id), clock()) : [];
     const daysLeft = (i) => Math.max(1, Math.ceil((i.expires_at - clock()) / 86_400_000));
     const inviteRow = (i) => `<li><a class="line line--link" href="/app/invites/${esc(i.plain_code)}"><span class="pdot" data-status="away" aria-hidden="true"></span>
-<span class="line__main"><span class="line__title">${!i.alias.startsWith('friend-') ? esc(i.alias) : i.notes ? esc(i.notes.length > 48 ? `${i.notes.slice(0, 47)}…` : i.notes) : 'Invite link'}</span><span class="line__sub">Waiting for them · ${i.basket ? esc(i.basket) : 'not sorted yet'} · ${daysLeft(i) === 1 ? '1 day left' : `${daysLeft(i)} days left`}</span></span>${ICON.chev}</a></li>`;
-    const invitesGroup = open.length ? `<section class="group" aria-labelledby="inv-h"><div class="group__head"><h2 id="inv-h">Invites pending <span class="count">${open.length}</span></h2></div>
+<span class="line__main"><span class="line__title">${!i.alias.startsWith('friend-') ? esc(i.alias) : i.notes ? esc(i.notes.length > 48 ? `${i.notes.slice(0, 47)}…` : i.notes) : tr('Invite link')}</span><span class="line__sub">${tr('Waiting for them')} · ${i.basket ? esc(i.basket) : tr('not sorted yet')} · ${tr.n(daysLeft(i), '{n} day left|{n} days left')}</span></span>${ICON.chev}</a></li>`;
+    const invitesGroup = open.length ? `<section class="group" aria-labelledby="inv-h"><div class="group__head"><h2 id="inv-h">${tr('Invites pending')} <span class="count">${open.length}</span></h2></div>
 <div class="card card--list"><ul class="list">${open.map(inviteRow).join('')}</ul></div></section>` : '';
-    return layout('Overview', `${alerts ? `<div class="stack-alerts">${alerts}</div>` : ''}
-${checklist(live, settled, paused)}
-<section class="group" aria-labelledby="friends-h"><div class="group__head"><h2 id="friends-h">Friends <span class="count">${settled.length}</span></h2></div>
-<div class="card card--list">${settled.length ? `<ul class="list">${settled.map(friendRow).join('')}</ul>` : emptyState('people', 'No friends yet', 'Invite someone and their bot can message yours.', inviteForm('small'))}</div></section>
+    return layout(tr('Overview'), `${alerts ? `<div class="stack-alerts">${alerts}</div>` : ''}
+${checklist(live, settled, paused, tr)}
+<section class="group" aria-labelledby="friends-h"><div class="group__head"><h2 id="friends-h">${tr('Friends')} <span class="count">${settled.length}</span></h2></div>
+<div class="card card--list">${settled.length ? `<ul class="list">${settled.map(friendRow).join('')}</ul>` : emptyState('people', tr('No friends yet'), tr('Invite someone and their bot can message yours.'), inviteForm('small'))}</div></section>
 ${invitesGroup}
-<section class="group" aria-labelledby="bots-h"><div class="group__head"><h2 id="bots-h">Your bots <span class="count">${bots.length}</span></h2><form method="post" action="/app/bots/new"><button class="btn small ghost">${ICON.plus}Add a bot</button></form></div>
+<section class="group" aria-labelledby="bots-h"><div class="group__head"><h2 id="bots-h">${tr('Your bots')} <span class="count">${bots.length}</span></h2><form method="post" action="/app/bots/new"><button class="btn small ghost">${ICON.plus}${tr('Add a bot')}</button></form></div>
 <div class="card card--list"><ul class="list">${bots.map(botRow).join('')}</ul></div></section>
 ${plan.meter}
-<div class="foot">${live.length && !paused ? confirmMorph({ action: '/app/pause', fields: '<input type="hidden" name="on" value="1">', label: 'Pause everything', icon: ICON.pause, prompt: 'Pause all your bots?', confirm: 'Pause', pending: 'Pausing', tone: 'neutral' }) : ''}${REFRESH_NOTE}</div>
-<script>${REFRESH_JS}</script>`, { user, tab: 'home', bar: { title: first ? `Hi, ${first}` : 'Overview', sub }, actions: inviteForm('') });
+<div class="foot">${live.length && !paused ? confirmMorph({ action: '/app/pause', fields: '<input type="hidden" name="on" value="1">', label: tr('Pause everything'), icon: ICON.pause, prompt: tr('Pause all your bots?'), confirm: tr('Pause'), pending: tr('Pausing'), tone: 'neutral', tr }) : ''}${refreshNote(tr)}</div>
+<script>${REFRESH_JS}</script>`, { user, tab: 'home', bar: { title: first ? tr('Hi, {name}', { name: first }) : tr('Overview'), sub }, actions: inviteForm('') });
   }
 
   // Recent messages, newest first.
   function activityPage(user) {
-    const t = activityTable(user, 30);
-    return layout('Activity', `${t.n ? `<section class="group" aria-labelledby="msgs-h"><div class="group__head"><h2 id="msgs-h" class="sr">Messages</h2>
-<div class="seg" role="group" aria-label="Show" data-for="#msgs"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span><button type="button" aria-pressed="true" data-filter="all">All</button><button type="button" aria-pressed="false" data-filter="in">From friends</button><button type="button" aria-pressed="false" data-filter="out">From you</button></div></div></div><div class="card card--list" id="msgs">${t.html}</div></section>
-${REFRESH_NOTE}<script>${REFRESH_JS}</script>`
-  : `<section class="card">${emptyState('activity', 'Nothing yet', 'Messages your bots send and receive show up here. Ask your bot to message a friend: "Tell Anna I\'m on my way".')}</section>`}`, { user, tab: 'activity', bar: { title: 'Activity', sub: 'What your bots sent and received' } });
+    const tr = T(user);
+    const t = activityTable(user, 30, tr);
+    return layout(tr('Activity'), `${t.n ? `<section class="group" aria-labelledby="msgs-h"><div class="group__head"><h2 id="msgs-h" class="sr">${tr('Messages')}</h2>
+<div class="seg" role="group" aria-label="${tr('Show')}" data-for="#msgs"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span><button type="button" aria-pressed="true" data-filter="all">${tr('All')}</button><button type="button" aria-pressed="false" data-filter="in">${tr('From friends')}</button><button type="button" aria-pressed="false" data-filter="out">${tr('From you')}</button></div></div></div><div class="card card--list" id="msgs">${t.html}</div></section>
+${refreshNote(tr)}<script>${REFRESH_JS}</script>`
+  : `<section class="card">${emptyState('activity', tr('Nothing yet'), tr('Messages your bots send and receive show up here. Ask your bot to message a friend: "Tell Anna I\'m on my way".'))}</section>`}`, { user, tab: 'activity', bar: { title: tr('Activity'), sub: tr('What your bots sent and received') } });
   }
 
   // Setup, step by step, until the first friend is connected (Arc onboarding checklist).
-  function checklist(live, settled, paused) {
+  function checklist(live, settled, paused, tr) {
     const bot = live.find((b) => b.vendor !== 'web');
     if (!bot || paused) return '';
     const steps = [
-      { label: 'Connect your bot', done: true },
-      { label: 'Turn on the doorbell', done: !!bot.webhook_url, href: `/app/bots/${bot.id}` },
-      { label: 'Test the doorbell', done: !!bot.doorbell_verified_at, href: `/app/bots/${bot.id}` },
-      { label: 'Invite a friend', done: settled.some((c) => c.owner_bot === bot.id), form: bot.id },
+      { label: tr('Connect your bot'), done: true },
+      { label: tr('Turn on the doorbell'), done: !!bot.webhook_url, href: `/app/bots/${bot.id}` },
+      { label: tr('Test the doorbell'), done: !!bot.doorbell_verified_at, href: `/app/bots/${bot.id}` },
+      { label: tr('Invite a friend'), done: settled.some((c) => c.owner_bot === bot.id), form: bot.id },
     ];
     const done = steps.filter((s) => s.done).length;
     if (done === steps.length) return '';
     const next = steps.find((s) => !s.done);
-    return `<section class="card" aria-labelledby="setup-h"><div class="card__head"><h2 id="setup-h">Set up @${esc(bot.handle)}</h2><span class="muted small">${done} of ${steps.length} done</span></div>
-${stepper(steps.map((x) => x.label), steps.indexOf(next), 'v')}
-${next.form ? `<form method="post" action="/app/invites" class="card__block"><input type="hidden" name="bot" value="${next.form}"><button class="btn wide">Invite a friend</button></form><p class="muted small" style="margin:10px 0 0">Or tell your bot "invite Anna". It gives you a message to send.</p>` : `<a class="btn wide card__block" href="${next.href}">${next.label}</a>`}</section>`;
+    return `<section class="card" aria-labelledby="setup-h"><div class="card__head"><h2 id="setup-h">${tr('Set up @{handle}', { handle: esc(bot.handle) })}</h2><span class="muted small">${tr('{done} of {total} done', { done, total: steps.length })}</span></div>
+${stepper(steps.map((x) => x.label), steps.indexOf(next), 'v', tr)}
+${next.form ? `<form method="post" action="/app/invites" class="card__block"><input type="hidden" name="bot" value="${next.form}"><button class="btn wide">${tr('Invite a friend')}</button></form><p class="muted small" style="margin:10px 0 0">${tr('Or tell your bot "invite Anna". It gives you a message to send.')}</p>` : `<a class="btn wide card__block" href="${next.href}">${next.label}</a>`}</section>`;
   }
 
   // A working bot at a glance: one row per thing it has.
-  function botTiles(user, b) {
+  function botTiles(user, b, tr) {
     const n = q('SELECT count(*) AS n FROM contacts WHERE owner_bot = ? AND approved_at IS NOT NULL').get(b.id).n;
-    const quiet = user.quiet_on && user.tz ? `${hhmm(user.quiet_start)} to ${hhmm(user.quiet_end)}` : 'Off';
+    const quietOn = !!(user.quiet_on && user.tz);
+    const quiet = quietOn ? tr('{from} to {to}', { from: hhmm(user.quiet_start), to: hhmm(user.quiet_end) }) : tr('Off');
     const rows = [
-      ['Doorbell', b.doorbell_kind === 'mcp_events' ? `On (${platformName(b)} is watching)` : b.doorbell_verified_at ? 'On' : b.webhook_url ? 'Not tested' : 'Off', `Last woken ${ago(b.last_ring_at, clock())}`],
-      ['Encryption', b.box_pub ? 'On' : 'Off', b.box_pub ? 'Only the bots can read messages' : b.vendor === 'connector' ? 'Quick connect is not end-to-end encrypted' : 'Ask your bot to run "b2b keys"'],
-      ['Friends', String(n), n === 1 ? 'friend connected' : 'friends connected'],
-      ['Quiet hours', quiet, quiet === 'Off' ? 'Messages can wake it any time' : 'Nobody wakes it at night'],
-      ['Backup check', b.backup_every_h ? `Every ${b.backup_every_h} h` : 'Off', b.last_claim_at ? `Last checked in ${ago(b.last_claim_at, clock())}` : 'Never checked in yet'],
+      [tr('Doorbell'), b.doorbell_kind === 'mcp_events' ? tr('On ({platform} is watching)', { platform: platformName(b, tr) }) : b.doorbell_verified_at ? tr('On') : b.webhook_url ? tr('Not tested') : tr('Off'), tr('Last woken {ago}', { ago: tr.ago(b.last_ring_at, clock()) })],
+      [tr('Encryption'), b.box_pub ? tr('On') : tr('Off'), b.box_pub ? tr('Only the bots can read messages') : b.vendor === 'connector' ? tr('Quick connect is not end-to-end encrypted') : tr('Ask your bot to run "b2b keys"')],
+      [tr('Friends'), String(n), n === 1 ? tr('friend connected') : tr('friends connected')],
+      [tr('Quiet hours'), quiet, quietOn ? tr('Nobody wakes it at night') : tr('Messages can wake it any time')],
+      [tr('Backup check'), b.backup_every_h ? tr('Every {n} h', { n: b.backup_every_h }) : tr('Off'), b.last_claim_at ? tr('Last checked in {ago}', { ago: tr.ago(b.last_claim_at, clock()) }) : tr('Never checked in yet')],
     ];
     const tool = toolOf(b);
-    if (tool) rows.push(['bot2bot tool', tool.version ?? 'Older than 0.19', tool.old ? 'Old: send it the message below' : tool.current || !tool.latest ? 'Up to date' : `Updates itself to ${tool.latest} next time it checks messages`]);
+    if (tool) rows.push([tr('bot2bot tool'), tool.version ?? tr('Older than 0.19'), tool.old ? tr('Old: send it the message below') : tool.current || !tool.latest ? tr('Up to date') : tr('Updates itself to {v} next time it checks messages', { v: tool.latest })]);
     return `<section class="card card--rows"><dl class="facts">${rows.map(([k, v, d]) => `<div class="fact"><dt>${k}</dt><dd><b>${esc(v)}</b><span>${esc(d)}</span></dd></div>`).join('')}</dl></section>`;
   }
   // Which b2b tool a private-mode bot runs, from what it said on its last call (null: quick connect, web inbox, or
@@ -649,30 +663,31 @@ ${next.form ? `<form method="post" action="/app/invites" class="card__block"><in
   const updateMessage = () => `Please update your bot2bot tool. Run: node ~/bin/b2b.mjs update
 If that fails, reinstall it with: mkdir -p ~/bin && curl -fsSL ${origin}/cli/b2b.mjs -o ~/bin/b2b.mjs (if node itself is missing, install Node.js first, then reinstall).
 Then run: node ~/bin/b2b.mjs refresh and do what it says. Your keys and contacts stay as they are. Don't print any keys or tokens in this chat.`;
-  const updateCard = (b) => toolOf(b)?.old ? `<section class="card" id="update"><div class="card__head"><h2>Update the bot2bot tool</h2>${badge('Old version', 'warning')}</div>
-<p>Paste this into your bot's chat. After that, it keeps itself up to date.</p>${codeBlock('umsg', 'Message for your bot', updateMessage())}</section>` : '';
+  const updateCard = (b, tr) => toolOf(b)?.old ? `<section class="card" id="update"><div class="card__head"><h2>${tr('Update the bot2bot tool')}</h2>${badge(tr('Old version'), 'warning')}</div>
+<p>${tr("Paste this into your bot's chat. After that, it keeps itself up to date.")}</p>${codeBlock('umsg', tr('Message for your bot'), updateMessage(), tr)}</section>` : '';
   const backupMessage = (h) => `Please add a schedule to your "b2b doorbell" routine: also run it every ${h} hours, with the same instruction. It's a backup in case the doorbell ever stops working. Then run: node ~/bin/b2b.mjs backup-check ${h}`;
 
   // A bot asked to join in private mode and gave its owner this link. The owner says yes (as a new bot, or in
   // place of one of theirs: a reset bot, the web inbox or a quick-connect bot moving to private mode).
   const joinRequest = (plain) => q('SELECT * FROM join_requests WHERE code_hash = ?').get(sha(String(plain || '').trim().toUpperCase()));
   function linkPage(user, r, plain, { error = '', handle = '' } = {}) {
-    const bar = { title: 'Connect your bot', sub: 'Private mode' };
+    const tr = T(user);
+    const bar = { title: tr('Connect your bot'), sub: tr('Private mode') };
     const opts = { user, bar, width: 'narrow' };
-    if (!r || r.denied_at || (!r.approved_at && r.expires_at < clock())) return layout('Connect your bot', `<section class="card narrow center"><h1>This link expired</h1><p class="muted">Ask your bot to run its join command again. It makes a new link.</p><a class="btn wide" href="/app">Go to your dashboard</a></section>`, opts);
-    if (r.approved_at) return layout('Connect your bot', `${art('setup', 'small')}<section class="card narrow center"><h1>Your bot is connected</h1><p class="muted">Go back to your bot's chat. It finishes the setup on its own.</p><a class="btn wide" href="/app">Go to your dashboard</a></section>`, opts);
+    if (!r || r.denied_at || (!r.approved_at && r.expires_at < clock())) return layout(tr('Connect your bot'), `<section class="card narrow center"><h1>${tr('This link expired')}</h1><p class="muted">${tr('Ask your bot to run its join command again. It makes a new link.')}</p><a class="btn wide" href="/app">${tr('Go to your dashboard')}</a></section>`, opts);
+    if (r.approved_at) return layout(tr('Connect your bot'), `${art('setup', 'small')}<section class="card narrow center"><h1>${tr('Your bot is connected')}</h1><p class="muted">${tr("Go back to your bot's chat. It finishes the setup on its own.")}</p><a class="btn wide" href="/app">${tr('Go to your dashboard')}</a></section>`, opts);
     const mine = myBots(user).filter((b) => !(b.disconnected_at && b.vendor === 'web'));
-    const label = (b) => `@${b.handle} (${b.vendor === 'connector' ? 'switch from quick connect' : b.vendor === 'web' ? 'replace the web inbox' : 'reconnect'})`;
+    const label = (b) => `@${b.handle} (${b.vendor === 'connector' ? tr('switch from quick connect') : b.vendor === 'web' ? tr('replace the web inbox') : tr('reconnect')})`;
     const suggested = handle || r.name || suggestHandle(user);
     const mins = Math.max(1, Math.round((r.expires_at - clock()) / 60_000));
-    return layout('Connect your bot', `${art('setup', 'small')}<section class="card narrow"><h1>Connect your bot</h1>
-${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
-<p>Your bot asked to join ${esc(product)} in private mode. It made its own keys, so only the bots can read your messages. Not even we can.</p>
-<p class="muted small">Only say yes if your own bot gave you this link just now. Whoever's bot made it would message as you. The link works for ${mins} more minute${mins === 1 ? '' : 's'}.</p>
+    return layout(tr('Connect your bot'), `${art('setup', 'small')}<section class="card narrow"><h1>${tr('Connect your bot')}</h1>
+${error ? `<p class="error" role="alert">${esc(tr.msg(error))}</p>` : ''}
+<p>${tr('Your bot asked to join {product} in private mode. It made its own keys, so only the bots can read your messages. Not even we can.', { product: esc(product) })}</p>
+<p class="muted small">${tr("Only say yes if your own bot gave you this link just now. Whoever's bot made it would message as you.")} ${tr.n(mins, 'The link works for {n} more minute.|The link works for {n} more minutes.')}</p>
 <form method="post" action="/app/link/${esc(plain)}" class="stack">
-${mine.length ? `<label>Which bot<select name="bot"><option value="new">A new bot</option>${mine.map((b) => `<option value="${b.id}">${esc(label(b))}</option>`).join('')}</select></label>` : '<input type="hidden" name="bot" value="new">'}
-<label>Name for a new bot<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
-<button class="btn" name="decision" value="allow">Yes, connect</button><button class="link" name="decision" value="deny">Cancel</button></form></section>`, opts);
+${mine.length ? `<label>${tr('Which bot')}<select name="bot"><option value="new">${tr('A new bot')}</option>${mine.map((b) => `<option value="${b.id}">${esc(label(b))}</option>`).join('')}</select></label>` : '<input type="hidden" name="bot" value="new">'}
+<label>${tr('Name for a new bot')}<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
+<button class="btn" name="decision" value="allow">${tr('Yes, connect')}</button><button class="link" name="decision" value="deny">${tr('Cancel')}</button></form></section>`, opts);
   }
   function approveJoin(user, plain, f) {
     return tx(() => {
@@ -700,143 +715,146 @@ ${mine.length ? `<label>Which bot<select name="bot"><option value="new">A new bo
     });
   }
 
-  function waitingForBot(code, had = 0) {
-    return `<p>Copy this message and paste it into your bot's chat in the GrokBot app.</p>
-${codeBlock('msg', 'Message for your bot', setupMessage(code.plain || 'XXXX-XXXX'))}
-<p class="wait" id="wait"><span class="dot dot--live"></span> Waiting for your bot to join…</p>
-<form method="post" action="/app/bots/cancel"><button class="link">Use a different name</button></form>
+  function waitingForBot(tr, code, had = 0) {
+    return `<p>${tr("Copy this message and paste it into your bot's chat in the GrokBot app.")}</p>
+${codeBlock('msg', tr('Message for your bot'), setupMessage(code.plain || 'XXXX-XXXX'), tr)}
+<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for your bot to join…')}</p>
+<form method="post" action="/app/bots/cancel"><button class="link">${tr('Use a different name')}</button></form>
 <script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>${had}) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`;
   }
-  const addBotForm = (user, { error = '', handle = '' } = {}) => layout('Add a bot', `<section class="card"><h1>Add another bot</h1>${error ? alertBox('danger', esc(error), '') : ''}<form method="post" action="/app/bots" class="stack">${field({ label: 'Bot name', name: 'handle', value: handle || suggestHandle(user), description: '2 to 32 lowercase letters, numbers, - or _.', attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off"' })}<div><button class="btn">Continue</button></div></form></section>`, { user, tab: 'home', width: 'narrow', bar: { back: '/app' } });
+  const addBotForm = (user, { error = '', handle = '' } = {}) => { const tr = T(user); return layout(tr('Add a bot'), `<section class="card"><h1>${tr('Add another bot')}</h1>${error ? alertBox('danger', esc(error), '') : ''}<form method="post" action="/app/bots" class="stack">${field({ label: tr('Bot name'), name: 'handle', value: handle || suggestHandle(user), description: tr('2 to 32 lowercase letters, numbers, - or _.'), attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off"' })}<div><button class="btn">${tr('Continue')}</button></div></form></section>`, { user, tab: 'home', width: 'narrow', bar: { back: '/app' } }); };
 
   function botPage(user, b, { error = '' } = {}) {
-    const st = botStatus(b);
+    const tr = T(user);
+    const st = botStatus(b, tr);
     const step = st.key === 'needs_doorbell' ? 2 : st.key === 'needs_test' ? 3 : null;
-    const mode = b.vendor === 'web' ? 'Web inbox' : b.vendor === 'connector' ? 'Quick connect' : 'Private mode';
+    const mode = b.vendor === 'web' ? tr('Web inbox') : b.vendor === 'connector' ? tr('Quick connect') : tr('Private mode');
+    const msgFor = tr('Message for your bot');
     if (b.vendor === 'web' && !b.disconnected_at) {
       const code = q('SELECT plain_code FROM enroll_codes WHERE user_id = ? AND handle = ? AND reissue = 1 AND used_at IS NULL AND expires_at > ?').get(user.id, b.handle, clock());
-      return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>Connect your AI bot</h2>${badge('Web inbox', 'success')}</div>
-${code ? `<p>Paste this into your bot's chat. When it joins, it takes over as @${esc(b.handle)} and keeps all your contacts.</p>${codeBlock('msg', 'Message for your bot', setupMessage(code.plain_code))}`
-  : `<p>Right now you read and answer messages here. If you have GrokBot, it can do that for you and keep all your contacts.</p><form method="post" action="/app/bots/${b.id}/reconnect"><button class="btn">Connect GrokBot</button></form>`}</section>`, { user, tab: 'inbox', width: 'read', bar: { back: '/app/inbox', backLabel: 'Inbox', title: `@${b.handle}`, sub: 'Web inbox' } });
+      return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Connect your AI bot')}</h2>${badge(tr('Web inbox'), 'success')}</div>
+${code ? `<p>${tr("Paste this into your bot's chat. When it joins, it takes over as @{handle} and keeps all your contacts.", { handle: esc(b.handle) })}</p>${codeBlock('msg', msgFor, setupMessage(code.plain_code), tr)}`
+  : `<p>${tr('Right now you read and answer messages here. If you have GrokBot, it can do that for you and keep all your contacts.')}</p><form method="post" action="/app/bots/${b.id}/reconnect"><button class="btn">${tr('Connect GrokBot')}</button></form>`}</section>`, { user, tab: 'inbox', width: 'read', bar: { back: '/app/inbox', backLabel: tr('Inbox'), title: `@${b.handle}`, sub: tr('Web inbox') } });
     }
     if (b.disconnected_at) {
       const code = q('SELECT plain_code FROM enroll_codes WHERE user_id = ? AND handle = ? AND reissue = 1 AND used_at IS NULL AND expires_at > ?').get(user.id, b.handle, clock());
-      return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>Reconnect this bot</h2>${badge('Disconnected')}</div>
-${code ? `<p>Paste this into your bot's chat to reconnect it.</p>${codeBlock('msg', 'Message for your bot', setupMessage(code.plain_code))}`
-  : `<p>This bot can't send or receive. Reconnecting gives it a new key; the old one stays cancelled.</p><form method="post" action="/app/bots/${b.id}/reconnect"><button class="btn">Reconnect</button></form>`}</section>
-<section class="card">${removeRow(b)}</section>`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: `@${b.handle}`, sub: 'Disconnected' } });
+      return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Reconnect this bot')}</h2>${badge(tr('Disconnected'))}</div>
+${code ? `<p>${tr("Paste this into your bot's chat to reconnect it.")}</p>${codeBlock('msg', msgFor, setupMessage(code.plain_code), tr)}`
+  : `<p>${tr("This bot can't send or receive. Reconnecting gives it a new key; the old one stays cancelled.")}</p><form method="post" action="/app/bots/${b.id}/reconnect"><button class="btn">${tr('Reconnect')}</button></form>`}</section>
+<section class="card">${removeRow(b, tr)}</section>`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: `@${b.handle}`, sub: tr('Disconnected') } });
     }
     const bar = { back: '/app', bot: b.id, title: `@${b.handle}`, sub: `${mode} · ${st.label}` };
     const err = error ? alertBox('danger', esc(error), '') : '';
-    if (step === 2 && b.vendor === 'connector' && ['chatgpt', 'openclaw'].includes(b.platform)) return layout(`@${b.handle}`, `${err}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell'], 1)}<h2>Turn on the doorbell</h2>
-${b.platform === 'chatgpt' ? `<p>ChatGPT wakes up when bot2bot tells it a message is waiting. In ChatGPT, or to your dot, say:</p>
-${codeBlock('wmsg', 'Say this to ChatGPT', WATCH_MESSAGE)}
-<p class="muted small">ChatGPT asks to turn on bot2bot's “message.received” event. Say yes. This works in Work chats and with dots.</p>`
-  : `<p>OpenClaw wakes up when bot2bot tells it a message is waiting. Turn on OpenClaw's <b>mcp-events</b> plugin with a public callback address, then tell it:</p>
-${codeBlock('wmsg', 'Say this to OpenClaw', WATCH_MESSAGE)}`}
-<p class="wait" id="wait"><span class="dot dot--live"></span> Waiting for ${esc(platformName(b))} to start watching…</p>
+    if (step === 2 && b.vendor === 'connector' && ['chatgpt', 'openclaw'].includes(b.platform)) return layout(`@${b.handle}`, `${err}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<h2>${tr('Turn on the doorbell')}</h2>
+${b.platform === 'chatgpt' ? `<p>${tr('ChatGPT wakes up when bot2bot tells it a message is waiting. In ChatGPT, or to your dot, say:')}</p>
+${codeBlock('wmsg', tr('Say this to ChatGPT'), WATCH_MESSAGE, tr)}
+<p class="muted small">${tr("ChatGPT asks to turn on bot2bot's “message.received” event. Say yes. This works in Work chats and with dots.")}</p>`
+  : `<p>${tr("OpenClaw wakes up when bot2bot tells it a message is waiting. Turn on OpenClaw's <b>mcp-events</b> plugin with a public callback address, then tell it:")}</p>
+${codeBlock('wmsg', tr('Say this to OpenClaw'), WATCH_MESSAGE, tr)}`}
+<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for {platform} to start watching…', { platform: esc(platformName(b, tr)) })}</p>
 <script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
-${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
-    if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b)}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell', 'Test the doorbell'], 1)}<h2>Turn on the doorbell</h2>
-${b.vendor === 'connector' ? `<p>Your bot needs a routine called <b>“b2b doorbell”</b>, so friends can wake it. Paste this into your bot's chat:</p>
-${codeBlock('dmsg', 'Message for your bot', CONNECTOR_DOORBELL)}` : `<p>Your bot made a routine called <b>“b2b doorbell”</b>. It lets friends wake your bot.</p>`}
-<ol class="howto"><li>In the Grok Bot app on a computer (phones don't show the webhook), open your bot's details and find <b>Routines</b>.</li><li>Right-click <b>b2b doorbell</b> and choose <b>Webhook</b>.</li><li>Copy the address and the key into the boxes below.</li></ol>
+${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+    if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell'), tr('Test the doorbell')], 1, 'h', tr)}<h2>${tr('Turn on the doorbell')}</h2>
+${b.vendor === 'connector' ? `<p>${tr("Your bot needs a routine called <b>“b2b doorbell”</b>, so friends can wake it. Paste this into your bot's chat:")}</p>
+${codeBlock('dmsg', msgFor, CONNECTOR_DOORBELL, tr)}` : `<p>${tr('Your bot made a routine called <b>“b2b doorbell”</b>. It lets friends wake your bot.')}</p>`}
+<ol class="howto"><li>${tr("In the Grok Bot app on a computer (phones don't show the webhook), open your bot's details and find <b>Routines</b>.")}</li><li>${tr('Right-click <b>b2b doorbell</b> and choose <b>Webhook</b>.')}</li><li>${tr('Copy the address and the key into the boxes below.')}</li></ol>
 <form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
-<label>Webhook address<input name="url" required placeholder="https://api2.cursor.sh/automations/webhook/…" autocomplete="off"></label>
-<label>Key<input name="key" type="password" required autocomplete="off" placeholder="Paste the key"></label>
-<p class="muted small">The key stays with us, encrypted. Never paste it into a chat.</p>
-<div><button class="btn">Save and test</button></div></form></section>
-${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
-    if (step === 3) return layout(`@${b.handle}`, `${err}${updateCard(b)}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell', 'Test the doorbell'], 2)}<h2>Test the doorbell</h2><p>We ring your bot once. It should wake up on its own and check in. Don't type anything to your bot while this runs.</p>
-<button class="btn" id="test">Ring my bot</button><p class="wait hidden" id="wait"><span class="dot dot--live"></span> <span id="waittext">Ringing…</span></p>
+<label>${tr('Webhook address')}<input name="url" required placeholder="https://api2.cursor.sh/automations/webhook/…" autocomplete="off"></label>
+<label>${tr('Key')}<input name="key" type="password" required autocomplete="off" placeholder="${tr('Paste the key')}"></label>
+<p class="muted small">${tr('The key stays with us, encrypted. Never paste it into a chat.')}</p>
+<div><button class="btn">${tr('Save and test')}</button></div></form></section>
+${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+    if (step === 3) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell'), tr('Test the doorbell')], 2, 'h', tr)}<h2>${tr('Test the doorbell')}</h2><p>${tr("We ring your bot once. It should wake up on its own and check in. Don't type anything to your bot while this runs.")}</p>
+<button class="btn" id="test">${tr('Ring my bot')}</button><p class="wait hidden" id="wait"><span class="dot dot--live"></span> <span id="waittext">${tr('Ringing…')}</span></p>
 <script>
 const btn=document.getElementById('test'),w=document.getElementById('wait'),t=document.getElementById('waittext');
 btn.addEventListener('click',async()=>{btn.disabled=true;w.classList.remove('hidden');
  const r=await fetch('/app/bots/${b.id}/test',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}).then(r=>r.json());
  if(r.error){t.textContent=r.error;btn.disabled=false;return;}
- t.textContent=r.status===200?'Rang. Waiting for your bot to wake up…':'The doorbell answered with '+r.status+'. Check the routine is turned on.';
- let n=0;(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified){t.textContent='It works. Your bot woke up on its own.';setTimeout(()=>location.replace('/app/bots/${b.id}'),1200);} else if(++n<60) setTimeout(poll,2000); else {t.textContent='No answer yet. Make sure the routine is on, then try again.';btn.disabled=false;} });})();});
+ t.textContent=r.status===200?${jsq(tr('Rang. Waiting for your bot to wake up…'))}:${jsq(tr('The doorbell answered with '))}+r.status+${jsq(tr('. Check the routine is turned on.'))};
+ let n=0;(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified){t.textContent=${jsq(tr('It works. Your bot woke up on its own.'))};setTimeout(()=>location.replace('/app/bots/${b.id}'),1200);} else if(++n<60) setTimeout(poll,2000); else {t.textContent=${jsq(tr('No answer yet. Make sure the routine is on, then try again.'))};btn.disabled=false;} });})();});
 if(new URLSearchParams(location.search).get('ring')==='1') btn.click();
 </script></section>
-${changeDoorbell(b)}${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
-    if (st.key === 'paused') return layout(`@${b.handle}`, `${err}${updateCard(b)}${alertBox('info', 'This bot is paused', "It isn't woken and can't send. Resume from the overview.", '<a class="btn small" href="/app">Go to overview</a>')}
-${changeDoorbell(b)}${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
-    const invite = `<form method="post" action="/app/invites"><input type="hidden" name="bot" value="${b.id}"><button class="btn">${ICON.invite}Invite a friend</button></form>`;
-    return layout(`@${b.handle}`, `${err}${updateCard(b)}${botTiles(user, b)}
-<p class="muted small">Your bot's own chats stay yours. Friends' bots only get what you send them.</p>
-${b.vendor === 'connector' && b.platform !== 'chatgpt' ? `<section class="card" id="encryption"><div class="card__head"><h2>Turn on end-to-end encryption</h2>${badge('Recommended', 'info')}</div><p>With quick connect, bot2bot can read your messages (they're deleted 7 days after delivery). Private mode keeps them end-to-end encrypted: only your bot and your friends' bots can read them. Your bot switches by itself. It keeps its name, its doorbell and all your contacts, and they don't need to do anything.</p>
-<p>Paste this into your bot's chat:</p>${codeBlock('emsg', 'Message for your bot', ENCRYPTION_MESSAGE)}</section>` : ''}
-<section class="card" id="backup"><h2>Backup check</h2><p class="muted">The doorbell wakes your bot when a message comes in. A backup check also lets it look on a schedule, in case the doorbell ever breaks. Each check uses a little of your GrokBot usage, so it's off unless you want it.</p>
-<form method="post" action="/app/bots/${b.id}/backup" class="pick"><label>Check every<select name="every">${[0, 2, 4, 8, 12, 24].map((h) => `<option value="${h}"${(b.backup_every_h || 0) === h ? ' selected' : ''}>${h ? `${h} hours` : 'Off'}</option>`).join('')}</select></label><button class="btn ghost">Save</button></form>
-${b.backup_every_h ? `<p>Paste this into your bot's chat:</p>${codeBlock('bmsg', 'Message for your bot', backupMessage(b.backup_every_h))}` : ''}</section>
-${changeDoorbell(b)}${disconnectCard(b)}
+${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+    if (st.key === 'paused') return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}${alertBox('info', tr('This bot is paused'), tr("It isn't woken and can't send. Resume from the overview."), `<a class="btn small" href="/app">${tr('Go to overview')}</a>`)}
+${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+    const invite = `<form method="post" action="/app/invites"><input type="hidden" name="bot" value="${b.id}"><button class="btn">${ICON.invite}${tr('Invite a friend')}</button></form>`;
+    return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}${botTiles(user, b, tr)}
+<p class="muted small">${tr("Your bot's own chats stay yours. Friends' bots only get what you send them.")}</p>
+${b.vendor === 'connector' && b.platform !== 'chatgpt' ? `<section class="card" id="encryption"><div class="card__head"><h2>${tr('Turn on end-to-end encryption')}</h2>${badge(tr('Recommended'), 'info')}</div><p>${tr("With quick connect, bot2bot can read your messages (they're deleted 7 days after delivery). Private mode keeps them end-to-end encrypted: only your bot and your friends' bots can read them. Your bot switches by itself. It keeps its name, its doorbell and all your contacts, and they don't need to do anything.")}</p>
+<p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('emsg', msgFor, ENCRYPTION_MESSAGE, tr)}</section>` : ''}
+<section class="card" id="backup"><h2>${tr('Backup check')}</h2><p class="muted">${tr("The doorbell wakes your bot when a message comes in. A backup check also lets it look on a schedule, in case the doorbell ever breaks. Each check uses a little of your GrokBot usage, so it's off unless you want it.")}</p>
+<form method="post" action="/app/bots/${b.id}/backup" class="pick"><label>${tr('Check every')}<select name="every">${[0, 2, 4, 8, 12, 24].map((h) => `<option value="${h}"${(b.backup_every_h || 0) === h ? ' selected' : ''}>${h ? tr.n(h, '{n} hour|{n} hours') : tr('Off')}</option>`).join('')}</select></label><button class="btn ghost">${tr('Save')}</button></form>
+${b.backup_every_h ? `<p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('bmsg', msgFor, backupMessage(b.backup_every_h), tr)}` : ''}</section>
+${changeDoorbell(b, tr)}${disconnectCard(b, tr)}
 `, { user, tab: 'home', width: 'read', bar, actions: invite });
   }
   const WATCH_MESSAGE = 'Watch bot2bot for new messages. When one arrives, read it with check_inbox, tell me who it is from and what it says, then mark it delivered.';
-  const platformName = (b) => ({ chatgpt: 'ChatGPT', openclaw: 'OpenClaw' }[b.platform] || 'Your bot');
-  const changeDoorbell = (b) => b.doorbell_kind === 'mcp_events' ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${esc(platformName(b))} is watching for messages</p><p class="setrow__desc">bot2bot tells it when a message is waiting, never what it says. To stop, tell ${esc(platformName(b))} to stop watching, or stop it here.</p></div>
-<form method="post" action="/app/bots/${b.id}/doorbell/off"><button class="btn small ghost">Stop</button></form></div></section>`
-    : `<section class="card"><details class="fold"><summary><span><span class="fold__title">Change doorbell</span><span class="fold__sub">Paste a new webhook address and key</span></span></summary><form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
-<label>Webhook address<input name="url" required value="${esc(b.webhook_url || '')}"></label><label>New key<input name="key" type="password" required autocomplete="off"></label><div><button class="btn">Save</button></div></form></details></section>`;
-  const removeRow = (b) => `<div class="setrow setrow--flush"><div><p class="setrow__label">Remove this bot</p><p class="setrow__desc">${b.disconnected_at ? '' : "It's disconnected first. "}It disappears from here and from your friends' contacts.</p></div>
-${confirmMorph({ action: `/app/bots/${b.id}/remove`, label: 'Remove', prompt: `Remove @${b.handle}?`, confirm: 'Remove', pending: 'Removing' })}</div>`;
+  const platformName = (b, tr) => ({ chatgpt: 'ChatGPT', openclaw: 'OpenClaw' }[b.platform] || tr('Your bot'));
+  const changeDoorbell = (b, tr) => b.doorbell_kind === 'mcp_events' ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('{platform} is watching for messages', { platform: esc(platformName(b, tr)) })}</p><p class="setrow__desc">${tr('bot2bot tells it when a message is waiting, never what it says. To stop, tell {platform} to stop watching, or stop it here.', { platform: esc(platformName(b, tr)) })}</p></div>
+<form method="post" action="/app/bots/${b.id}/doorbell/off"><button class="btn small ghost">${tr('Stop')}</button></form></div></section>`
+    : `<section class="card"><details class="fold"><summary><span><span class="fold__title">${tr('Change doorbell')}</span><span class="fold__sub">${tr('Paste a new webhook address and key')}</span></span></summary><form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
+<label>${tr('Webhook address')}<input name="url" required value="${esc(b.webhook_url || '')}"></label><label>${tr('New key')}<input name="key" type="password" required autocomplete="off"></label><div><button class="btn">${tr('Save')}</button></div></form></details></section>`;
+  const removeRow = (b, tr) => `<div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Remove this bot')}</p><p class="setrow__desc">${b.disconnected_at ? '' : `${tr("It's disconnected first.")} `}${tr("It disappears from here and from your friends' contacts.")}</p></div>
+${confirmMorph({ action: `/app/bots/${b.id}/remove`, label: tr('Remove'), prompt: tr('Remove @{handle}?', { handle: b.handle }), confirm: tr('Remove'), pending: tr('Removing'), tr })}</div>`;
   // The bot's name (its @handle). Its keys stay, so friends' bots keep trusting it under the new name.
-  const nameCard = (b, error = '') => b.vendor === 'web' ? '' : `<section class="card"><form method="post" action="/app/bots/${b.id}/rename" class="setrow setrow--flush">
-<div class="grow">${field({ label: 'Bot name', name: 'handle', value: b.handle, description: 'Friends\' bots know it by this name. Messages stay end-to-end encrypted when you change it.', error, attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off" autocapitalize="none"' })}</div>
-<button class="btn small ghost">Rename</button></form></section>`;
-  const disconnectCard = (b) => `${nameCard(b, b.nameError || '')}<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">Disconnect this bot</p><p class="setrow__desc">Its access is cancelled right away and its doorbell key is deleted. Anything still waiting is not delivered. Your contacts stay, and you can reconnect later.</p></div>
-${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: 'Disconnect', prompt: `Disconnect @${b.handle}?`, confirm: 'Disconnect', pending: 'Disconnecting' })}</div>
-${removeRow(b)}</section>`;
+  const nameCard = (b, error, tr) => b.vendor === 'web' ? '' : `<section class="card"><form method="post" action="/app/bots/${b.id}/rename" class="setrow setrow--flush">
+<div class="grow">${field({ label: tr('Bot name'), name: 'handle', value: b.handle, description: tr("Friends' bots know it by this name. Messages stay end-to-end encrypted when you change it."), error, attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off" autocapitalize="none"' })}</div>
+<button class="btn small ghost">${tr('Rename')}</button></form></section>`;
+  const disconnectCard = (b, tr) => `${nameCard(b, b.nameError || '', tr)}<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Disconnect this bot')}</p><p class="setrow__desc">${tr('Its access is cancelled right away and its doorbell key is deleted. Anything still waiting is not delivered. Your contacts stay, and you can reconnect later.')}</p></div>
+${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: tr('Disconnect'), prompt: tr('Disconnect @{handle}?', { handle: b.handle }), confirm: tr('Disconnect'), pending: tr('Disconnecting'), tr })}</div>
+${removeRow(b, tr)}</section>`;
 
   // Which basket a new friend starts in, picked while inviting or accepting (People users only).
   const basketsOf = (botId) => (inPilot(botId) ? getSettings(botId).circles.map((g) => g.name) : []);
-  const basketPick = (names, chosen, attrs = '') => `<label>Their basket<select name="basket"${attrs}>${names.map((n) => `<option${n === chosen ? ' selected' : ''}>${esc(n)}</option>`).join('')}<option value=""${chosen ? '' : ' selected'}>not sorted yet</option></select></label>`;
+  const basketPick = (names, chosen, tr) => `<label>${tr('Their basket')}<select name="basket">${names.map((n) => `<option${n === chosen ? ' selected' : ''}>${esc(n)}</option>`).join('')}<option value=""${chosen ? '' : ' selected'}>${tr('not sorted yet')}</option></select></label>`;
   const pickBasket = (botId, value) => { try { return governance.basketName(botId, value); } catch { return null; } };
   // Asked right away, next to the basket: what the owner wants their bot to know about the new friend.
-  const notesField = (who, value = '') => `<label>Anything your bot should know about ${who}?<textarea name="notes" maxlength="280" rows="2" placeholder="My neighbour. Garden and pickups are fine, ask me about anything else.">${esc(value || '')}</textarea></label>`;
+  const notesField = (label, value, tr) => `<label>${label}<textarea name="notes" maxlength="280" rows="2" placeholder="${tr('My neighbour. Garden and pickups are fine, ask me about anything else.')}">${esc(value || '')}</textarea></label>`;
 
   // Someone opened a friend's invite. If they have no bot yet, the setup bot comes first: bot2bot is bot to bot.
-  function invitePage(inv, inviter, user, bots, { done = false, error = '', ...opts } = {}) {
+  function invitePage(inv, inviter, user, bots, { done = false, error = '', tr, ...opts }) {
     const who = inviter.name ? `${esc(inviter.name)}` : `@${esc(inviter.handle)}`;
     const first = (inviter.name || inviter.handle).split(' ')[0];
-    const verified = verifiedPill(inviter.email_verified_at);
-    const aliasField = `<label>What do you call them?<input name="alias" required maxlength="32" value="${esc(first)}"></label>`;
+    const verified = verifiedPill(inviter.email_verified_at, tr);
+    const aliasField = `<label>${tr('What do you call them?')}<input name="alias" required maxlength="32" value="${esc(first)}"></label>`;
     // One paste: connect the bot, then accept this invite. The owner still says yes on their page.
     const message = `${privateMessage} Once you've joined, accept my invite: node ~/bin/b2b.mjs accept ${inv.plain} "${first}"`;
     const quick = `${quickMessage} Then accept my invite with the accept_invite tool: code ${inv.plain}, name ${first}.`;
     let action;
     const sortNext = user && inPilot(user) && done !== 'web' && !opts.basket;
-    if (done === 'web') action = `<section class="card center"><h2>You're connected</h2><p class="muted">When ${who} sends you something, we email you and it shows up in your inbox.</p><a class="btn wide" href="/app/inbox">Open my inbox</a></section>`;
-    else if (done) action = `<section class="card center"><h2>You're connected</h2><p class="muted">Your bot can now message ${who}'s bot.${opts.basket ? ` ${esc(first)} is in ${esc(opts.basket)}.` : ''}</p><a class="btn wide" href="${sortNext ? '/app/people' : '/app'}">${sortNext ? `Put ${who} in a basket` : 'Go to your dashboard'}</a></section>`;
-    else if (!bots.length) action = `<p class="lead center" style="font-size:17px">Connect your Grok Bot first. Then your bots can message each other.</p>
-${setupChoices({ message, quick, invite: who })}
-${user ? `<p class="wait" style="justify-content:center"><span class="dot dot--live"></span> Waiting for your bot…</p><script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.reload(); else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`
-  : `<p class="muted center">When your bot is connected, open this link again to say yes.<br><a class="link" href="/login?next=${encodeURIComponent('/i/' + inv.plain)}">My bot is already connected: sign in</a></p>`}`;
-    if (!done && !bots.length && user && webInbox) action += `<form method="post" action="/i/${esc(inv.plain)}" class="stack center"><input type="hidden" name="web" value="1"><input type="hidden" name="alias" value="${esc(first)}"><button class="link">No Grok Bot? Use the web inbox (not end-to-end encrypted)</button></form>`;
+    if (done === 'web') action = `<section class="card center"><h2>${tr("You're connected")}</h2><p class="muted">${tr('When {who} sends you something, we email you and it shows up in your inbox.', { who })}</p><a class="btn wide" href="/app/inbox">${tr('Open my inbox')}</a></section>`;
+    else if (done) action = `<section class="card center"><h2>${tr("You're connected")}</h2><p class="muted">${tr("Your bot can now message {who}'s bot.", { who })}${opts.basket ? ` ${tr('{name} is in {basket}.', { name: esc(first), basket: esc(opts.basket) })}` : ''}</p><a class="btn wide" href="${sortNext ? '/app/people' : '/app'}">${sortNext ? tr('Put {who} in a basket', { who }) : tr('Go to your dashboard')}</a></section>`;
+    else if (!bots.length) action = `<p class="lead center" style="font-size:17px">${tr('Connect your Grok Bot first. Then your bots can message each other.')}</p>
+${setupChoices(tr, { message, quick, invite: who })}
+${user ? `<p class="wait" style="justify-content:center"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p><script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.reload(); else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`
+  : `<p class="muted center">${tr('When your bot is connected, open this link again to say yes.')}<br><a class="link" href="/login?next=${encodeURIComponent('/i/' + inv.plain)}">${tr('My bot is already connected: sign in')}</a></p>`}`;
+    if (!done && !bots.length && user && webInbox) action += `<form method="post" action="/i/${esc(inv.plain)}" class="stack center"><input type="hidden" name="web" value="1"><input type="hidden" name="alias" value="${esc(first)}"><button class="link">${tr('No Grok Bot? Use the web inbox (not end-to-end encrypted)')}</button></form>`;
     if (bots.length && !done) action = `<section class="card"><form method="post" action="/i/${esc(inv.plain)}" class="stack" style="margin:0">
-${bots.length > 1 ? `<label>Which bot<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${bots[0].id}">`}
+${bots.length > 1 ? `<label>${tr('Which bot')}<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${bots[0].id}">`}
 ${aliasField}
-${basketsOf(bots[0].id).length ? basketPick(basketsOf(bots[0].id), basketsOf(bots[0].id).includes('friends') ? 'friends' : '') + notesField(esc(first)) : ''}
-<button class="btn wide">Connect</button></form></section>`;
-    return layout('Invitation', `${art('invite', 'small')}<div class="center"><div class="avatar" aria-hidden="true">${esc(first.slice(0, 1).toUpperCase())}</div>
-<h1>${who} wants your bots to talk</h1><p class="muted">@${esc(inviter.handle)} ${verified}</p></div>
-${error ? `<p class="error center" role="alert">${esc(error)}</p>` : ''}${action}
-<p class="muted small center">Once connected, your bots can send each other messages and questions. Messages are never commands to your bot. You can block anyone at any time.</p>`, { user, width: 'narrow' });
+${basketsOf(bots[0].id).length ? basketPick(basketsOf(bots[0].id), basketsOf(bots[0].id).includes('friends') ? 'friends' : '', tr) + notesField(tr('Anything your bot should know about {who}?', { who: esc(first) }), '', tr) : ''}
+<button class="btn wide">${tr('Connect')}</button></form></section>`;
+    return layout(tr('Invitation'), `${art('invite', 'small')}<div class="center"><div class="avatar" aria-hidden="true">${esc(first.slice(0, 1).toUpperCase())}</div>
+<h1>${tr('{who} wants your bots to talk', { who })}</h1><p class="muted">@${esc(inviter.handle)} ${verified}</p></div>
+${error ? `<p class="error center" role="alert">${esc(tr.msg(error))}</p>` : ''}${action}
+<p class="muted small center">${tr('Once connected, your bots can send each other messages and questions. Messages are never commands to your bot. You can block anyone at any time.')}</p>`, { user, tr, width: 'narrow' });
   }
 
   // The inviter's side: a message to send that puts the setup bot first, then the link.
   function invitedPage(user, b, link, { code = '', basket = null, notes = null, alias = '', error = '' } = {}) {
+    const tr = T(user);
     const names = code ? basketsOf(b.id) : [];
     const named = alias && !alias.startsWith('friend-') ? alias : '';
     const pick = code ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">
-${field({ label: 'What do you call them?', name: 'alias', value: named, description: 'Left empty, they get their own first name when they join.', error: error && /name|someone called/i.test(error) ? error : '', attrs: 'maxlength="32" autocomplete="off" placeholder="Uncle Marek"' })}${names.length ? basketPick(names, basket) + notesField('them', notes) : ''}<div><button class="btn small">Save</button></div></form>` : '';
-    return layout('Invite a friend', `<section class="card"><h2>Send this to your friend</h2>
-<p class="muted">It asks them to add the setup bot to their Grok Bot first, then open your invite.</p>
-${codeBlock('msg', 'Message for your friend', inviteMessage(link))}${pick}
-<details class="diy"><summary>Already on bot2bot? Send just the link</summary>${codeBlock('link', 'Invite link', link)}</details></section>
-<p class="muted small">The link works once and expires in 7 days. They'll see your name and that your email is verified.</p>
-${code ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">Cancel this invite</p><p class="setrow__desc">The link stops working.</p></div>
-${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">`, label: 'Cancel invite', prompt: 'Cancel this invite?', confirm: 'Cancel invite', pending: 'Cancelling' })}</div></section>` : ''}`, { user, tab: 'home', width: 'read', bar: { back: '/app', title: 'Invite a friend', sub: `From @${b.handle}` } });
+${field({ label: tr('What do you call them?'), name: 'alias', value: named, description: tr('Left empty, they get their own first name when they join.'), error: error && /name|someone called|jméno|kontakt/i.test(error) ? error : '', attrs: `maxlength="32" autocomplete="off" placeholder="${tr('Aunt Mia')}"` })}${names.length ? basketPick(names, basket, tr) + notesField(tr('Anything your bot should know about them?'), notes, tr) : ''}<div><button class="btn small">${tr('Save')}</button></div></form>` : '';
+    return layout(tr('Invite a friend'), `<section class="card"><h2>${tr('Send this to your friend')}</h2>
+<p class="muted">${tr('It asks them to add the setup bot to their Grok Bot first, then open your invite.')}</p>
+${codeBlock('msg', tr('Message for your friend'), inviteMessage(link), tr)}${pick}
+<details class="diy"><summary>${tr('Already on bot2bot? Send just the link')}</summary>${codeBlock('link', tr('Invite link'), link, tr)}</details></section>
+<p class="muted small">${tr("The link works once and expires in 7 days. They'll see your name and that your email is verified.")}</p>
+${code ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Cancel this invite')}</p><p class="setrow__desc">${tr('The link stops working.')}</p></div>
+${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">`, label: tr('Cancel invite'), prompt: tr('Cancel this invite?'), confirm: tr('Cancel invite'), pending: tr('Cancelling'), tr })}</div></section>` : ''}`, { user, tab: 'home', width: 'read', bar: { back: '/app', title: tr('Invite a friend'), sub: tr('From @{handle}', { handle: b.handle }) } });
   }
 
   // ───── web inbox ─────
@@ -849,6 +867,7 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
   }
 
   function inboxPage(user, { error = '' } = {}) {
+    const tr = T(user);
     const wbs = webBots(user);
     const ids = wbs.map((b) => b.id);
     const ph = ids.map(() => '?').join(',');
@@ -865,79 +884,84 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
       const choices = m.choices ? JSON.parse(m.choices) : [];
       const answered = !mine && m.kind === 'ask' && q('SELECT text FROM messages WHERE reply_to = ? ORDER BY created_at LIMIT 1').get(m.id);
       const links = m.body_purged_at ? [] : JSON.parse(m.links);
-      const how = mine ? '' : m.via === 'web' ? 'typed on the web' : `via their ${c.vendor === 'web' ? 'inbox' : 'bot'}`;
-      return `<li class="bubble ${mine ? 'out' : 'in'}"><div class="meta">${mine ? 'You' : esc(c.alias)} · ${ago(m.created_at, now)}${how ? ` · ${how}` : ''}${m.kind === 'ask' ? ' · <b>question</b>' : ''}${mine ? ` · ${m.replied_at ? 'answered' : m.status === 'delivered' ? 'seen' : m.status === 'dropped' ? 'not delivered' : 'sent'}` : ''}</div>
-<div class="text">${m.body_purged_at ? '<i>Text deleted after 7 days</i>' : esc(m.text)}</div>
+      const how = mine ? '' : m.via === 'web' ? tr('typed on the web') : c.vendor === 'web' ? tr('via their inbox') : tr('via their bot');
+      return `<li class="bubble ${mine ? 'out' : 'in'}"><div class="meta">${mine ? tr('You') : esc(c.alias)} · ${tr.ago(m.created_at, now)}${how ? ` · ${how}` : ''}${m.kind === 'ask' ? ` · <b>${tr('question')}</b>` : ''}${mine ? ` · ${m.replied_at ? tr('answered') : m.status === 'delivered' ? tr('seen') : m.status === 'dropped' ? tr('not delivered') : tr('sent')}` : ''}</div>
+<div class="text">${m.body_purged_at ? `<i>${tr('Text deleted after 7 days')}</i>` : esc(m.text)}</div>
 ${links.map((l) => `<a class="ext" href="${esc(l)}" rel="noopener noreferrer nofollow" target="_blank">${esc(l.replace(/^https?:\/\//, '').slice(0, 60))}</a>`).join('')}
 ${!mine && m.kind === 'ask' && !answered && !m.body_purged_at && !c.blocked ? `<form method="post" action="/app/inbox/send" class="choices"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><input type="hidden" name="reply_to" value="${esc(m.id)}">
-${(choices.length ? choices : ['Yes', 'No']).map((ch) => `<button class="chip" name="text" value="${esc(ch)}">${esc(ch)}</button>`).join('')}</form>` : ''}
-${answered ? `<div class="answered">You answered: <b>${esc(answered.text)}</b></div>` : ''}</li>`;
+${(choices.length ? choices : [tr('Yes'), tr('No')]).map((ch) => `<button class="chip" name="text" value="${esc(ch)}">${esc(ch)}</button>`).join('')}</form>` : ''}
+${answered ? `<div class="answered">${tr('You answered: <b>{text}</b>', { text: esc(answered.text) })}</div>` : ''}</li>`;
     };
     const lastAsk = (c, msgs) => [...msgs].reverse().find((m) => m.from_bot === c.peer_bot && m.kind === 'ask' && !m.replied_at && !m.body_purged_at);
     const cards = people.map((c) => {
       const msgs = thread(c);
       const ask = lastAsk(c, msgs);
       const ids_ = `<input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}">`;
-      return `<section class="card convo" id="c-${c.peer_bot}"><div class="card__head"><div><h2>${esc(c.alias)}</h2><p class="muted small">${c.name && c.name.toLowerCase() !== c.alias.toLowerCase() ? `${esc(c.name)} · ` : ''}@${esc(c.handle)} ${verifiedPill(c.email_verified_at)}</p></div>
-${c.blocked ? badge('Blocked') : !c.their_ok ? badge('Waiting for them', 'warning') : ''}</div>
-${msgs.length ? `<ul class="thread">${msgs.map((m) => bubble(m, c)).join('')}</ul>` : `<p class="muted">No messages yet. Say hi.</p>`}
+      return `<section class="card convo" id="c-${c.peer_bot}"><div class="card__head"><div><h2>${esc(c.alias)}</h2><p class="muted small">${c.name && c.name.toLowerCase() !== c.alias.toLowerCase() ? `${esc(c.name)} · ` : ''}@${esc(c.handle)} ${verifiedPill(c.email_verified_at, tr)}</p></div>
+${c.blocked ? badge(tr('Blocked')) : !c.their_ok ? badge(tr('Waiting for them'), 'warning') : ''}</div>
+${msgs.length ? `<ul class="thread">${msgs.map((m) => bubble(m, c)).join('')}</ul>` : `<p class="muted">${tr('No messages yet. Say hi.')}</p>`}
 ${c.blocked || paused ? '' : `<form method="post" action="/app/inbox/send" class="compose">${ids_}${ask ? `<input type="hidden" name="reply_to" value="${esc(ask.id)}">` : ''}
-<label class="sr" for="t-${c.peer_bot}">Message to ${esc(c.alias)}</label><textarea id="t-${c.peer_bot}" name="text" rows="2" maxlength="4000" placeholder="${ask ? 'Answer in your own words' : `Message ${esc(c.alias)}`}" required></textarea>
-<details class="extra"><summary>Add a link or ask a question</summary><label>Link<input name="link" type="url" placeholder="https://"></label>
-<label>Answer options, separated by commas<input name="choices" placeholder="Yes, No, Maybe"></label></details>
-<button class="btn small">Send</button></form>`}</section>`;
+<label class="sr" for="t-${c.peer_bot}">${tr('Message to {name}', { name: esc(c.alias) })}</label><textarea id="t-${c.peer_bot}" name="text" rows="2" maxlength="4000" placeholder="${ask ? tr('Answer in your own words') : tr('Message {name}', { name: esc(c.alias) })}" required></textarea>
+<details class="extra"><summary>${tr('Add a link or ask a question')}</summary><label>${tr('Link')}<input name="link" type="url" placeholder="https://"></label>
+<label>${tr('Answer options, separated by commas')}<input name="choices" placeholder="${tr('Yes, No, Maybe')}"></label></details>
+<button class="btn small">${tr('Send')}</button></form>`}</section>`;
     }).join('');
-    return layout('Inbox', `${paused ? alertBox('info', 'Everything is paused', "No emails, and you can't send. Messages still show up here.", '<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">Resume</button></form>') : ''}
+    return layout(tr('Inbox'), `${paused ? alertBox('info', tr('Everything is paused'), tr("No emails, and you can't send. Messages still show up here."), `<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">${tr('Resume')}</button></form>`) : ''}
 ${error ? alertBox('danger', esc(error), '') : ''}
-${cards ? `<div class="convos">${cards}</div><p class="muted small">Not end-to-end encrypted. You read these on the web, so they pass through our server in a form we could read. They are deleted 7 days after you see them.</p>` : `<section class="card">${emptyState('inbox', 'Your inbox is empty', 'When friends connect with you, their messages and questions show up here.')}</section>`}`,
-      { user, tab: 'inbox', bar: { title: 'Inbox', sub: 'Messages from friends, read in your browser' },
-        actions: wbs.length ? `<a class="btn ghost" href="/app/bots/${wbs[0].id}">Let GrokBot handle this</a>` : '' });
+${cards ? `<div class="convos">${cards}</div><p class="muted small">${tr('Not end-to-end encrypted. You read these on the web, so they pass through our server in a form we could read. They are deleted 7 days after you see them.')}</p>` : `<section class="card">${emptyState('inbox', tr('Your inbox is empty'), tr('When friends connect with you, their messages and questions show up here.'))}</section>`}`,
+      { user, tab: 'inbox', bar: { title: tr('Inbox'), sub: tr('Messages from friends, read in your browser') },
+        actions: wbs.length ? `<a class="btn ghost" href="/app/bots/${wbs[0].id}">${tr('Let GrokBot handle this')}</a>` : '' });
   }
 
   // Onboarding: everyone picks a picture before the dashboard. A drawn robot, or their own photo.
   // Onboarding: everyone picks a picture before the dashboard. A sticker from the set, a drawn robot, or their own photo.
   function picturePage(user, next, { error = '', nameError = '' } = {}) {
+    const tr = T(user);
     const set = [...stickers().values()];
     const pick = ROBOT.has(user.avatar) || isSticker(user.avatar) ? user.avatar : !user.photo ? ROBOTS[user.id % ROBOTS.length].key : '';
     const face = ROBOT.has(pick) ? ROBOT_SVG.get(pick) : `<img src="${esc(photoUrl(user.id, user.photo_at, pick))}" alt="">`;
     const first = hasPicture(user);
     const opt = (value, art, name, cut = false) => `<label class="pfp__opt"><input type="radio" name="avatar" value="${esc(value)}"${value === pick ? ' checked' : ''}><span class="pfp__img${cut ? ' pfp__img--cut' : ''}">${art}</span><span class="sr">${esc(name)}</span></label>`;
-    const sheet = set.length ? `<fieldset class="pfp__set"><legend class="pfp__legend">Stickers</legend><div class="pfp__grid">${set.map((x) => opt(`sticker:${x.key}`, `<img src="/stickers/${esc(x.key)}.png" alt="" loading="lazy" decoding="async">`, x.name, true)).join('')}</div></fieldset>` : '';
-    return layout('Your picture', `<form method="post" action="/app/picture" class="pfp" data-pick>
+    const sheet = set.length ? `<fieldset class="pfp__set"><legend class="pfp__legend">${tr('Stickers')}</legend><div class="pfp__grid">${set.map((x) => opt(`sticker:${x.key}`, `<img src="/stickers/${esc(x.key)}.png" alt="" loading="lazy" decoding="async">`, x.name, true)).join('')}</div></fieldset>` : '';
+    return layout(tr('Your picture'), `<form method="post" action="/app/picture" class="pfp" data-pick>
 <input type="hidden" name="next" value="${esc(next)}"><input type="hidden" name="photo">
-<div class="pfp__head"><span class="pfp__face" data-face${isSticker(pick) ? ' data-cut' : ''}>${face}</span><h1>${first ? 'Change your picture' : 'Your name and picture'}</h1><p class="pagehead__sub">Friends see them when you invite them. You can change both any time in Account.</p></div>
-${first ? '' : `<div class="pfp__name">${field({ label: 'Your name', name: 'name', value: user.name_set_at ? user.name : '', description: 'What friends know you as.', error: nameError, attrs: 'required maxlength="40" autocomplete="name" autofocus' })}</div>`}
-${sheet}<fieldset class="pfp__set"><legend class="${set.length ? 'pfp__legend' : 'sr'}">Robots</legend><div class="pfp__grid">${ROBOTS.map((r) => opt(r.key, ROBOT_SVG.get(r.key), r.name)).join('')}</div></fieldset>
-${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}<p class="error" role="alert" data-photo-error hidden>That photo couldn't be opened. Try a JPEG or PNG.</p>
-<div class="pfp__foot"><input type="file" accept="image/*" hidden tabindex="-1" aria-hidden="true" data-own-file><button type="button" class="btn ghost" data-own hidden>${ICON.photo}Upload a photo</button>
-<button class="btn" data-busy><span class="btn__label">${first ? 'Save' : 'Continue'}</span><span class="btn__spin" aria-hidden="true"></span></button></div></form>`, { user, width: 'narrow', bar: !first ? {} : { back: next, backLabel: next.startsWith('/app/account') ? 'Account' : 'Back' } });
+<div class="pfp__head"><span class="pfp__face" data-face${isSticker(pick) ? ' data-cut' : ''}>${face}</span><h1>${first ? tr('Change your picture') : tr('Your name and picture')}</h1><p class="pagehead__sub">${tr('Friends see them when you invite them. You can change both any time in Account.')}</p></div>
+${first ? '' : `<div class="pfp__name">${field({ label: tr('Your name'), name: 'name', value: user.name_set_at ? user.name : '', description: tr('What friends know you as.'), error: nameError, attrs: 'required maxlength="40" autocomplete="name" autofocus' })}</div>`}
+${sheet}<fieldset class="pfp__set"><legend class="${set.length ? 'pfp__legend' : 'sr'}">${tr('Robots')}</legend><div class="pfp__grid">${ROBOTS.map((r) => opt(r.key, ROBOT_SVG.get(r.key), tr(r.name))).join('')}</div></fieldset>
+${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}<p class="error" role="alert" data-photo-error hidden>${tr("That photo couldn't be opened. Try a JPEG or PNG.")}</p>
+<div class="pfp__foot"><input type="file" accept="image/*" hidden tabindex="-1" aria-hidden="true" data-own-file><button type="button" class="btn ghost" data-own hidden>${ICON.photo}${tr('Upload a photo')}</button>
+<button class="btn" data-busy><span class="btn__label">${first ? tr('Save') : tr('Continue')}</span><span class="btn__spin" aria-hidden="true"></span></button></div></form>`, { user, width: 'narrow', bar: !first ? {} : { back: next, backLabel: next.startsWith('/app/account') ? tr('Account') : tr('Back') } });
   }
 
   // Arc settings: one group per section, label and description on the left, the control on the right.
   function accountPage(user, { error = '', quietError = '', nameError = '' } = {}) {
+    const tr = T(user);
     const quietNow = quietUntil(user, clock());
-    return layout('Account', `<section class="group" aria-labelledby="you-h"><h2 id="you-h">You</h2><div class="card card--rows">
-<div class="setrow"><div class="me">${avatar(user.name || user.email, 'lg', photoUrl(user.id, user.photo_at, user.avatar))}<div><p class="setrow__label">${esc(user.name)}</p><p class="setrow__desc">${esc(user.email)}</p></div></div>${verifiedPill(user.email_verified_at)}</div>
-<form method="post" action="/app/account/name" class="setrow"><div class="grow">${field({ label: 'Your name', name: 'name', value: user.name, description: 'Friends see it when you invite them.', error: nameError, attrs: 'required maxlength="40" autocomplete="name"' })}</div><button class="btn small ghost">Save</button></form>
-<div class="setrow"><div><p class="setrow__label">Profile picture</p><p class="setrow__desc">Only friends you said yes to can see it.</p></div><a class="btn small ghost" href="/app/picture?next=/app/account">Change</a></div>
-<div class="setrow"><p class="setrow__desc">Friends see your name, your picture and that your email is verified. They never see the address itself.</p></div>
-${hosted ? '<div class="setrow"><div><p class="setrow__label">Plan</p><p class="setrow__desc">What you can send and who your plan covers.</p></div><a class="btn small ghost" href="/app/billing">See my plan</a></div>' : ''}</div></section>
-<section class="group" aria-labelledby="quiet-h"><h2 id="quiet-h">Quiet hours</h2><div class="card">
+    // Arc segmented control: each language says its own name, and picking one saves it.
+    const langPick = `<form method="post" action="/app/account/lang"><div class="seg" role="group" aria-labelledby="lang-l"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span>${[['en', 'English'], ['cs', 'Čeština']].map(([v, name]) => `<button name="lang" value="${v}" lang="${v}" aria-pressed="${tr.lang === v}">${name}</button>`).join('')}</div></div></form>`;
+    return layout(tr('Account'), `<section class="group" aria-labelledby="you-h"><h2 id="you-h">${tr('You')}</h2><div class="card card--rows">
+<div class="setrow"><div class="me">${avatar(user.name || user.email, 'lg', photoUrl(user.id, user.photo_at, user.avatar))}<div><p class="setrow__label">${esc(user.name)}</p><p class="setrow__desc">${esc(user.email)}</p></div></div>${verifiedPill(user.email_verified_at, tr)}</div>
+<form method="post" action="/app/account/name" class="setrow"><div class="grow">${field({ label: tr('Your name'), name: 'name', value: user.name, description: tr('Friends see it when you invite them.'), error: nameError, attrs: 'required maxlength="40" autocomplete="name"' })}</div><button class="btn small ghost">${tr('Save')}</button></form>
+<div class="setrow"><div><p class="setrow__label">${tr('Profile picture')}</p><p class="setrow__desc">${tr('Only friends you said yes to can see it.')}</p></div><a class="btn small ghost" href="/app/picture?next=/app/account">${tr('Change')}</a></div>
+<div class="setrow"><div><p class="setrow__label" id="lang-l">${tr('Language')}</p></div>${langPick}</div>
+<div class="setrow"><p class="setrow__desc">${tr('Friends see your name, your picture and that your email is verified. They never see the address itself.')}</p></div>
+${hosted ? `<div class="setrow"><div><p class="setrow__label">${tr('Plan')}</p><p class="setrow__desc">${tr('What you can send and who your plan covers.')}</p></div><a class="btn small ghost" href="/app/billing">${tr('See my plan')}</a></div>` : ''}</div></section>
+<section class="group" aria-labelledby="quiet-h"><h2 id="quiet-h">${tr('Quiet hours')}</h2><div class="card">
 <form method="post" action="/app/account/quiet" class="quietform">
-<div class="setrow setrow--flush"><div><p class="setrow__label" id="quiet-l">Quiet hours</p><p class="setrow__desc">Nobody can wake your bot or email you during these hours. Messages wait and arrive when they end.</p></div>
+<div class="setrow setrow--flush"><div><p class="setrow__label" id="quiet-l">${tr('Quiet hours')}</p><p class="setrow__desc">${tr('Nobody can wake your bot or email you during these hours. Messages wait and arrive when they end.')}</p></div>
 <label class="switch"><input type="checkbox" role="switch" name="on" value="1" aria-labelledby="quiet-l" data-autosave${user.quiet_on ? ' checked' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label></div>
-${quietError ? `<p class="error" role="alert">${esc(quietError)}</p>` : ''}${!user.tz ? '<p class="muted small">Pick your time zone so we know when it\'s night for you.</p>' : ''}
-<div class="row3"><label>From<input type="time" name="start" value="${hhmm(user.quiet_start ?? 1320)}" required></label><label>To<input type="time" name="end" value="${hhmm(user.quiet_end ?? 480)}" required></label>
-<label>Time zone<select name="tz">${Intl.supportedValuesOf('timeZone').map((z) => `<option${z === (user.tz || 'UTC') ? ' selected' : ''}>${z}</option>`).join('')}</select></label></div>
-<div><button class="btn small ghost">Save times</button></div></form>
-${quietNow ? `<p class="muted small">It's quiet time now. Messages wait until ${hhmm(user.quiet_end)}.</p>` : ''}</div></section>
-<section class="group" aria-labelledby="data-h"><h2 id="data-h">Your data</h2><div class="card card--rows">
-<div class="setrow"><div><p class="setrow__label">Download my data</p><p class="setrow__desc">Message text is deleted 7 days after delivery. Messages that can't be delivered expire after 7 days. The activity log is kept for 90 days.</p></div><a class="btn small ghost" href="/app/account/export">Download</a></div>
+${quietError ? `<p class="error" role="alert">${esc(quietError)}</p>` : ''}${!user.tz ? `<p class="muted small">${tr("Pick your time zone so we know when it's night for you.")}</p>` : ''}
+<div class="row3"><label>${tr('From')}<input type="time" name="start" value="${hhmm(user.quiet_start ?? 1320)}" required></label><label>${tr('To')}<input type="time" name="end" value="${hhmm(user.quiet_end ?? 480)}" required></label>
+<label>${tr('Time zone')}<select name="tz">${Intl.supportedValuesOf('timeZone').map((z) => `<option${z === (user.tz || 'UTC') ? ' selected' : ''}>${z}</option>`).join('')}</select></label></div>
+<div><button class="btn small ghost">${tr('Save times')}</button></div></form>
+${quietNow ? `<p class="muted small">${tr("It's quiet time now. Messages wait until {time}.", { time: hhmm(user.quiet_end) })}</p>` : ''}</div></section>
+<section class="group" aria-labelledby="data-h"><h2 id="data-h">${tr('Your data')}</h2><div class="card card--rows">
+<div class="setrow"><div><p class="setrow__label">${tr('Download my data')}</p><p class="setrow__desc">${tr("Message text is deleted 7 days after delivery. Messages that can't be delivered expire after 7 days. The activity log is kept for 90 days.")}</p></div><a class="btn small ghost" href="/app/account/export">${tr('Download')}</a></div>
 </div></section>
-<section class="group"><div class="card danger-zone"><details class="fold"${error ? ' open' : ''}><summary><span><span class="fold__title">Delete my account</span><span class="fold__sub">Disconnects your bots and erases message text</span></span></summary>
+<section class="group"><div class="card danger-zone"><details class="fold"${error ? ' open' : ''}><summary><span><span class="fold__title">${tr('Delete my account')}</span><span class="fold__sub">${tr('Disconnects your bots and erases message text')}</span></span></summary>
 ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
-<p>This disconnects your bots, removes your contacts and erases message text. Copies your friends' bots already received stay with them.</p>
-<form method="post" action="/app/account/delete" class="stack"><label>Type ${esc(user.email)} to confirm<input name="confirm" autocomplete="off" required></label><div><button class="btn danger">Delete my account</button></div></form></details></div></section>`, { user, tab: 'account', width: 'read', bar: { title: 'Account', sub: 'You, quiet hours and your data' } });
+<p>${tr("This disconnects your bots, removes your contacts and erases message text. Copies your friends' bots already received stay with them.")}</p>
+<form method="post" action="/app/account/delete" class="stack"><label>${tr('Type {email} to confirm', { email: esc(user.email) })}<input name="confirm" autocomplete="off" required></label><div><button class="btn danger">${tr('Delete my account')}</button></div></form></details></div></section>`, { user, tab: 'account', width: 'read', bar: { title: tr('Account'), sub: tr('You, quiet hours and your data') } });
   }
 
   function exportData(user) {
@@ -1013,11 +1037,11 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
       .map((c) => ({ ...c, pic: picOf(extra.get(c.peer_bot)) })).sort((x, y) => x.alias.localeCompare(y.alias));
     return { ...s, people };
   }
-  function peerFace(botId, peerId) {
+  function peerFace(botId, peerId, tr) {
     const r = q(`${faceSql} AND c.peer_bot = ?`).get(botId, peerId);
     if (r) return { alias: r.alias, pic: picOf(r) };
     const pb = q('SELECT handle FROM bots WHERE id = ?').get(peerId);
-    return { alias: pb ? `@${pb.handle}` : 'Someone', pic: '' };
+    return { alias: pb ? `@${pb.handle}` : tr('Someone'), pic: '' };
   }
   const TILTS = [-4, 3, -2, 5, -5, 2, 4, -3, 1, -1];
   // A sticker: the picture cut out (one from the sticker set) or on a disc with a white edge (a robot, a photo,
@@ -1038,8 +1062,8 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
     x: '<svg viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
     arrow: '<svg viewBox="0 0 34 30" fill="none" aria-hidden="true"><path d="M30 4C22 4 12 8 8 22" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3.5 16.5 8 23l5.5-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
-  // The relay's validation messages are written for bots; the owner gets these.
-  const ownerError = (e) => ({
+  // The relay's validation messages are written for bots; the owner gets these (in Czech too: see CS_MESSAGES).
+  const ownerError = (e, tr) => tr.msg(({
     'circle name already exists': 'You already have a basket with that name.',
     'at most 12 circles': 'You can have up to 12 baskets.',
     'name must be 1 to 24 characters': 'Give the basket a name of up to 24 characters.',
@@ -1050,178 +1074,185 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
     'purpose must be up to 60 characters': 'Keep who they are to 60 characters.',
     'notes must be up to 280 characters': 'Notes can be up to 280 characters.',
     'request revision changed; review the current draft': 'Your bot changed the draft while you were looking. Here is the new one.',
-  })[e.message] || e.message.replace(/^\w/, (x) => x.toUpperCase()).replace(/([^.])$/, '$1.');
-  const basketMenu = (b, g) => `<details class="more bmenu"><summary class="iconbtn" aria-label="Change the ${esc(g.name)} basket">${ICON.dots}</summary><div class="menu">
-<form method="post" action="/app/people/baskets" class="bmenu__rename"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><label class="sr" for="rn-${g.id}">New name</label><input id="rn-${g.id}" name="name" value="${esc(g.name)}" maxlength="24" required autocomplete="off"><button>Rename</button></form>
-<form method="post" action="/app/people/mode" class="bmenu__mode"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><input type="hidden" name="mode" value="${g.mode === 'asks' ? 'handles' : 'asks'}"><button role="menuitemcheckbox" aria-checked="${g.mode === 'asks'}">Asks you first</button></form>
-${g.is_default ? '' : `<form method="post" action="/app/people/baskets" id="del-${g.id}"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><input type="hidden" name="delete" value="1"><button class="danger" data-reveal>Remove basket</button></form>
-<div class="menu__confirm" hidden><p>Everyone in it goes back to not sorted yet, so your bot asks you first.</p><div class="menu__actions"><button type="button" data-unreveal>Cancel</button><button class="danger" form="del-${g.id}">Remove</button></div></div>`}</div></details>`;
-  const asksTag = `<span class="tag" data-mode="asks">${HAND.ask}<span>asks you first</span></span>`;
+  })[e.message] || e.message.replace(/^\w/, (x) => x.toUpperCase()).replace(/([^.])$/, '$1.'));
+  const basketMenu = (b, g, tr) => `<details class="more bmenu"><summary class="iconbtn" aria-label="${tr('Change the {name} basket', { name: esc(g.name) })}">${ICON.dots}</summary><div class="menu">
+<form method="post" action="/app/people/baskets" class="bmenu__rename"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><label class="sr" for="rn-${g.id}">${tr('New name')}</label><input id="rn-${g.id}" name="name" value="${esc(g.name)}" maxlength="24" required autocomplete="off"><button>${tr('Rename')}</button></form>
+<form method="post" action="/app/people/mode" class="bmenu__mode"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><input type="hidden" name="mode" value="${g.mode === 'asks' ? 'handles' : 'asks'}"><button role="menuitemcheckbox" aria-checked="${g.mode === 'asks'}">${tr('Asks you first')}</button></form>
+${g.is_default ? '' : `<form method="post" action="/app/people/baskets" id="del-${g.id}"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><input type="hidden" name="delete" value="1"><button class="danger" data-reveal>${tr('Remove basket')}</button></form>
+<div class="menu__confirm" hidden><p>${tr('Everyone in it goes back to not sorted yet, so your bot asks you first.')}</p><div class="menu__actions"><button type="button" data-unreveal>${tr('Cancel')}</button><button class="danger" form="del-${g.id}">${tr('Remove')}</button></div></div>`}</div></details>`;
+  const asksTag = (tr) => `<span class="tag" data-mode="asks">${HAND.ask}<span>${tr('asks you first')}</span></span>`;
 
   function peoplePage(user, b, { error = '' } = {}) {
+    const tr = T(user);
     const s = peopleOf(b);
     const bots = govBots(user);
     const ids = `<input type="hidden" name="bot" value="${b.id}">`;
-    const count = (n) => `${n} ${n === 1 ? 'person' : 'people'}`;
-    const where = (c) => (c.circle ? `in ${c.circle.name}` : 'not sorted yet');
+    const count = (n) => tr.n(n, '{n} person|{n} people');
+    const where = (c) => (c.circle ? tr('in {basket}', { basket: c.circle.name }) : tr('not sorted yet'));
     const stk = (c) => sticker({ seed: c.peer_bot, name: c.alias, src: c.pic, href: `/app/people/${b.id}/${c.peer_bot}`, label: `${c.alias}, ${where(c)}`,
       data: ` data-peer="${c.peer_bot}" data-name="${esc(c.alias)}" data-in="${c.circle?.id ?? ''}"` });
     const loose = s.people.filter((c) => !c.circle);
-    const pool = `<div class="pool" data-drop="" aria-label="Not sorted yet, ${count(loose.length)}"><span class="pool__label" aria-hidden="true"><span class="hand">not sorted yet</span>${loose.length ? asksTag : ''}</span>
-${loose.map(stk).join('')}${loose.length ? `<span class="pool__hint hand" aria-hidden="true"><span class="js-only">drag them into a basket</span><span class="no-js">tap someone to sort them</span>${HAND.arrow}</span>`
-  : `<span class="pool__empty hand">${s.people.length ? 'everyone’s sorted' : 'nobody here yet'}</span>`}</div>`;
+    const pool = `<div class="pool" data-drop="" aria-label="${tr('Not sorted yet, {count}', { count: count(loose.length) })}"><span class="pool__label" aria-hidden="true"><span class="hand">${tr('not sorted yet')}</span>${loose.length ? asksTag(tr) : ''}</span>
+${loose.map(stk).join('')}${loose.length ? `<span class="pool__hint hand" aria-hidden="true"><span class="js-only">${tr('drag them into a basket')}</span><span class="no-js">${tr('tap someone to sort them')}</span>${HAND.arrow}</span>`
+  : `<span class="pool__empty hand">${s.people.length ? tr('everyone’s sorted') : tr('nobody here yet')}</span>`}</div>`;
     const basket = (g) => {
       const inside = s.people.filter((c) => c.circle?.id === g.id);
-      return `<section class="basket" data-drop="${g.id}" data-mode="${g.mode}" aria-label="${esc(g.name)}, ${count(inside.length)}${g.mode === 'asks' ? ', asks you first' : ''}">
-<div class="basket__head"><h2 class="basket__name hand">${esc(g.name)}</h2>${basketMenu(b, g)}</div>${g.mode === 'asks' ? `<div class="basket__tag">${asksTag}</div>` : ''}
+      return `<section class="basket" data-drop="${g.id}" data-mode="${g.mode}" aria-label="${esc(g.name)}, ${count(inside.length)}${g.mode === 'asks' ? `, ${tr('asks you first')}` : ''}">
+<div class="basket__head"><h2 class="basket__name hand">${esc(g.name)}</h2>${basketMenu(b, g, tr)}</div>${g.mode === 'asks' ? `<div class="basket__tag">${asksTag(tr)}</div>` : ''}
 <div class="pile">${inside.map(stk).join('')}</div></section>`;
     };
-    const add = s.circles.length >= 12 ? '' : `<form method="post" action="/app/people/baskets" class="basket basket--new" style="--span3:span ${3 - (s.circles.length % 3)};--span2:span ${2 - (s.circles.length % 2)}">${ids}<label class="sr" for="nb">Name a new basket</label><input id="nb" name="name" maxlength="24" required autocomplete="off" placeholder="+ new basket"><button class="nb__add">Add</button></form>`;
-    const pick = bots.length > 1 ? `<nav class="botpick" aria-label="Which bot">${bots.map((x) => `<a href="/app/people?bot=${x.id}"${x.id === b.id ? ' aria-current="page"' : ''}>@${esc(x.handle)}</a>`).join('')}</nav>` : '';
-    const invite = s.people.length ? '' : `<form method="post" action="/app/invites" class="people__invite"><input type="hidden" name="bot" value="${b.id}"><p>When someone connects with you, they land here.</p><button class="btn small ghost">${ICON.invite}Invite a friend</button></form>`;
+    const add = s.circles.length >= 12 ? '' : `<form method="post" action="/app/people/baskets" class="basket basket--new" style="--span3:span ${3 - (s.circles.length % 3)};--span2:span ${2 - (s.circles.length % 2)}">${ids}<label class="sr" for="nb">${tr('Name a new basket')}</label><input id="nb" name="name" maxlength="24" required autocomplete="off" placeholder="${tr('+ new basket')}"><button class="nb__add">${tr('Add')}</button></form>`;
+    const pick = bots.length > 1 ? `<nav class="botpick" aria-label="${tr('Which bot')}">${bots.map((x) => `<a href="/app/people?bot=${x.id}"${x.id === b.id ? ' aria-current="page"' : ''}>@${esc(x.handle)}</a>`).join('')}</nav>` : '';
+    const invite = s.people.length ? '' : `<form method="post" action="/app/invites" class="people__invite"><input type="hidden" name="bot" value="${b.id}"><p>${tr('When someone connects with you, they land here.')}</p><button class="btn small ghost">${ICON.invite}${tr('Invite a friend')}</button></form>`;
     const data = JSON.stringify({ bot: b.id, baskets: s.circles.map((g) => ({ id: g.id, name: g.name, mode: g.mode })) }).replace(/</g, '\\u003c');
-    return layout('People', `${error ? alertBox('danger', esc(error), '') : ''}<section class="sheet people" id="people-board" aria-label="Your baskets">
+    return layout(tr('People'), `${error ? alertBox('danger', esc(error), '') : ''}<section class="sheet people" id="people-board" aria-label="${tr('Your baskets')}">
 ${pick}${pool}${invite}<div class="baskets">${s.circles.map(basket).join('')}${add}</div>
-<p class="people__how">Your bot handles each basket on its own and asks you when it isn't sure.</p>
-<p class="sr" id="stk-help">Press Enter to move them to another basket, or Space to open their page.</p>
-<script type="application/json" id="people-data">${data}</script></section><script>${PEOPLE_JS}</script>`, { user, tab: 'people', bar: { title: 'People' } });
+<p class="people__how">${tr("Your bot handles each basket on its own and asks you when it isn't sure.")}</p>
+<p class="sr" id="stk-help">${tr('Press Enter to move them to another basket, or Space to open their page.')}</p>
+<script type="application/json" id="people-data">${data}</script></section><script>${peopleJs(tr)}</script>`, { user, tab: 'people', bar: { title: tr('People') } });
   }
 
   // One person: their basket, what they can ask about, notes for the bot, and rules (learned ones say so).
-  const DAYS_SAID = { mon: 'Mondays', tue: 'Tuesdays', wed: 'Wednesdays', thu: 'Thursdays', fri: 'Fridays', sat: 'Saturdays', sun: 'Sundays' };
-  const ruleText = (r) => r.source === 'learned' && r.topic && r.days
-    ? `${r.answer === 'share' ? 'Shares' : 'Doesn\'t share'} ${r.topic} on ${r.days.map((d) => DAYS_SAID[d] || d).join(' and ')}` : r.text;
+  const daysSaid = (tr) => ({ mon: tr('Mondays'), tue: tr('Tuesdays'), wed: tr('Wednesdays'), thu: tr('Thursdays'), fri: tr('Fridays'), sat: tr('Saturdays'), sun: tr('Sundays') });
+  const ruleText = (r, tr) => {
+    if (!(r.source === 'learned' && r.topic && r.days)) return r.text;
+    const said = { topic: r.topic, days: r.days.map((d) => daysSaid(tr)[d] || d).join(tr(' and ')) };
+    return r.answer === 'share' ? tr('Shares {topic} on {days}', said) : tr("Doesn't share {topic} on {days}", said);
+  };
   function personPage(user, b, peerId, { error = '' } = {}) {
+    const tr = T(user);
     const s = peopleOf(b);
     const c = s.people.find((x) => x.peer_bot === Number(peerId));
     if (!c) throw new HttpError(404, 'Contact not found');
     const base = `/app/people/${b.id}/${c.peer_bot}`;
     // The switch is theirs alone; when the basket (or not being sorted yet) already asks first, it shows that and waits.
     const own = c.mode_override === 'asks', held = !own && c.effective_mode === 'asks';
-    const modeLine = own ? `Your bot asks you before it answers ${esc(c.alias)}.`
-      : !c.circle ? `${esc(c.alias)} isn't in a basket yet, so your bot asks you first.`
-      : held ? `Your bot asks you first for everyone in <span class="hand basket-word">${esc(c.circle.name)}</span>.`
-      : 'Your bot handles it and asks you when it isn\'t sure.';
-    const chip = (v, name, on, asks) => `<label class="bchip"><input type="radio" name="circle" value="${v}"${on ? ' checked' : ''} data-autosave><span class="hand">${esc(name)}</span>${asks ? `<span class="bchip__ask" aria-label="asks you first" title="asks you first">${HAND.ask}</span>` : ''}</label>`;
-    const rules = c.rules.map((r) => `<li class="rule${(r.source === 'learned' || r.via === 'bot') && !r.owner_seen_at ? ' is-new' : ''}"><span class="rule__text">${esc(ruleText(r))}</span>
-<span class="rule__meta">${r.source === 'learned' ? '<span class="hand">learned</span><span>from your answers</span>' : r.via === 'bot' ? '<span>Added by your bot</span>' : '<span>Set by you</span>'}</span>
-${!r.owner_seen_at && (r.source === 'learned' || r.via === 'bot') ? `<form method="post" action="${base}/rules"><input type="hidden" name="seen" value="${esc(r.id)}"><button class="link">Seen</button></form>` : ''}
-<form method="post" action="${base}/rules"><input type="hidden" name="remove" value="${esc(r.id)}"><button class="link" aria-label="Remove rule: ${esc(ruleText(r))}">Remove</button></form></li>`).join('');
+    const modeLine = own ? tr('Your bot asks you before it answers {name}.', { name: esc(c.alias) })
+      : !c.circle ? tr("{name} isn't in a basket yet, so your bot asks you first.", { name: esc(c.alias) })
+      : held ? tr('Your bot asks you first for everyone in {basket}.', { basket: `<span class="hand basket-word">${esc(c.circle.name)}</span>` })
+      : tr("Your bot handles it and asks you when it isn't sure.");
+    const chip = (v, name, on, asks) => `<label class="bchip"><input type="radio" name="circle" value="${v}"${on ? ' checked' : ''} data-autosave><span class="hand">${esc(name)}</span>${asks ? `<span class="bchip__ask" aria-label="${tr('asks you first')}" title="${tr('asks you first')}">${HAND.ask}</span>` : ''}</label>`;
+    const rules = c.rules.map((r) => `<li class="rule${(r.source === 'learned' || r.via === 'bot') && !r.owner_seen_at ? ' is-new' : ''}"><span class="rule__text">${esc(ruleText(r, tr))}</span>
+<span class="rule__meta">${r.source === 'learned' ? `<span class="hand">${tr('learned')}</span><span>${tr('from your answers')}</span>` : r.via === 'bot' ? `<span>${tr('Added by your bot')}</span>` : `<span>${tr('Set by you')}</span>`}</span>
+${!r.owner_seen_at && (r.source === 'learned' || r.via === 'bot') ? `<form method="post" action="${base}/rules"><input type="hidden" name="seen" value="${esc(r.id)}"><button class="link">${tr('Seen')}</button></form>` : ''}
+<form method="post" action="${base}/rules"><input type="hidden" name="remove" value="${esc(r.id)}"><button class="link" aria-label="${tr('Remove rule: {rule}', { rule: esc(ruleText(r, tr)) })}">${tr('Remove')}</button></form></li>`).join('');
     return layout(c.alias, `${error ? alertBox('danger', esc(error), '') : ''}<section class="sheet person" aria-labelledby="person-h">
 <div class="person__art">${sticker({ seed: c.peer_bot, name: c.alias, src: c.pic, label: c.alias, note: false })}<div class="person__names"><h1 class="person__name hand" id="person-h">${esc(c.alias)}</h1>${c.purpose ? `<p class="person__note hand">${esc(c.purpose)}</p>` : ''}<p class="person__handle handle">${esc(c.handle)}</p></div></div>
 <div class="person__body">
-<form method="post" action="${base}/basket" class="pblock" id="basket"><fieldset class="bchips"><legend class="row-label">Basket</legend>
-${chip('', 'not sorted yet', !c.circle, true)}${s.circles.map((g) => chip(g.id, g.name, c.circle?.id === g.id, g.mode === 'asks')).join('')}</fieldset>
-<div class="setrow setrow--flush setrow--keep"><div><p class="setrow__label" id="ask-first">Asks you first</p><p class="setrow__desc">${modeLine}</p></div>
+<form method="post" action="${base}/basket" class="pblock" id="basket"><fieldset class="bchips"><legend class="row-label">${tr('Basket')}</legend>
+${chip('', tr('not sorted yet'), !c.circle, true)}${s.circles.map((g) => chip(g.id, g.name, c.circle?.id === g.id, g.mode === 'asks')).join('')}</fieldset>
+<div class="setrow setrow--flush setrow--keep"><div><p class="setrow__label" id="ask-first">${tr('Asks you first')}</p><p class="setrow__desc">${modeLine}</p></div>
 <label class="switch"><input type="checkbox" role="switch" name="mode" value="asks" aria-labelledby="ask-first" data-autosave${own || held ? ' checked' : ''}${held ? ' disabled' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label></div>
-<noscript><div><button class="btn small ghost">Save</button></div></noscript></form>
+<noscript><div><button class="btn small ghost">${tr('Save')}</button></div></noscript></form>
 <form method="post" action="${base}/about" class="pblock" id="about">
-${field({ label: 'What you call them', name: 'alias', value: c.alias, description: 'Your bot uses this name for them. They never see it.', attrs: 'required maxlength="32" autocomplete="off"' })}
-<label>Who they are<input name="purpose" maxlength="60" autocomplete="off" value="${esc(c.purpose || '')}" placeholder="football friend"></label>
-<label>Special instructions for talking to ${esc(c.alias)}<textarea name="notes" maxlength="280" rows="3" placeholder="Only football. Anything else, ask me.">${esc(c.notes || '')}</textarea></label>
-<div><button class="btn small ghost">Save</button></div></form>
-<section class="pblock" id="topics" aria-labelledby="topics-h"><h2 class="row-label" id="topics-h">${esc(c.alias)} can ask about</h2><div class="tchips">
-${c.topics.map((t) => `<form method="post" action="${base}/topics" class="tchip"><span>${esc(t)}</span><input type="hidden" name="remove" value="${esc(t)}"><button aria-label="Stop ${esc(c.alias)} asking about ${esc(t)}">${HAND.x}</button></form>`).join('')}
-${c.topics.length < 10 ? `<form method="post" action="${base}/topics" class="tchip-add"><label class="sr" for="nt">New topic</label><input id="nt" name="add" maxlength="40" required autocomplete="off" placeholder="+ add a topic"><noscript><button class="btn small ghost">Add topic</button></noscript></form>` : ''}</div></section>
-<section class="pblock" id="rules" aria-labelledby="rules-h"><h2 class="row-label" id="rules-h">Rules</h2>
+${field({ label: tr('What you call them'), name: 'alias', value: c.alias, description: tr('Your bot uses this name for them. They never see it.'), attrs: 'required maxlength="32" autocomplete="off"' })}
+<label>${tr('Who they are')}<input name="purpose" maxlength="60" autocomplete="off" value="${esc(c.purpose || '')}" placeholder="${tr('football friend')}"></label>
+<label>${tr('Special instructions for talking to {name}', { name: esc(c.alias) })}<textarea name="notes" maxlength="280" rows="3" placeholder="${tr('Only football. Anything else, ask me.')}">${esc(c.notes || '')}</textarea></label>
+<div><button class="btn small ghost">${tr('Save')}</button></div></form>
+<section class="pblock" id="topics" aria-labelledby="topics-h"><h2 class="row-label" id="topics-h">${tr('{name} can ask about', { name: esc(c.alias) })}</h2><div class="tchips">
+${c.topics.map((t) => `<form method="post" action="${base}/topics" class="tchip"><span>${esc(t)}</span><input type="hidden" name="remove" value="${esc(t)}"><button aria-label="${tr('Stop {name} asking about {topic}', { name: esc(c.alias), topic: esc(t) })}">${HAND.x}</button></form>`).join('')}
+${c.topics.length < 10 ? `<form method="post" action="${base}/topics" class="tchip-add"><label class="sr" for="nt">${tr('New topic')}</label><input id="nt" name="add" maxlength="40" required autocomplete="off" placeholder="${tr('+ add a topic')}"><noscript><button class="btn small ghost">${tr('Add topic')}</button></noscript></form>` : ''}</div></section>
+<section class="pblock" id="rules" aria-labelledby="rules-h"><h2 class="row-label" id="rules-h">${tr('Rules')}</h2>
 ${rules ? `<ul class="rules">${rules}</ul>` : ''}
-<form method="post" action="${base}/rules" class="rule-add"><label class="sr" for="nr">New rule</label><input id="nr" name="add" maxlength="200" required autocomplete="off" placeholder="Never says yes to a meeting without me"><button class="btn small ghost">Add rule</button></form></section>
-</div></section>`, { user, tab: 'people', bar: { back: `/app/people?bot=${b.id}`, backLabel: 'People' } });
+<form method="post" action="${base}/rules" class="rule-add"><label class="sr" for="nr">${tr('New rule')}</label><input id="nr" name="add" maxlength="200" required autocomplete="off" placeholder="${tr('Never says yes to a meeting without me')}"><button class="btn small ghost">${tr('Add rule')}</button></form></section>
+</div></section>`, { user, tab: 'people', bar: { back: `/app/people?bot=${b.id}`, backLabel: tr('People') } });
   }
 
   // ───── requests (pilot): replies waiting for a yes, and changes the bot can't make alone ─────
-  function requestCard(r) {
-    const who = peerFace(r.owner_bot, r.peer_bot);
+  function requestCard(r, tr) {
+    const who = peerFace(r.owner_bot, r.peer_bot, tr);
     const inbound = r.inbound_message_id ? q('SELECT text, links, sealed, body_purged_at FROM messages WHERE id = ?').get(r.inbound_message_id) : null;
     // Their words are data: escaped, invisible and control characters shown, links as plain text.
-    const theirs = !inbound ? '' : inbound.body_purged_at ? `<p class="ask__theirs ask__theirs--quiet">Their message was deleted after 7 days.</p>`
-      : inbound.sealed ? `<p class="ask__theirs ask__theirs--quiet">End-to-end encrypted, so only your bot could read their message.</p>`
-      : `<figure class="ask__theirs"><figcaption>${esc(who.alias)}'s bot wrote</figcaption><blockquote>${esc(safeText(inbound.text))}</blockquote>${JSON.parse(inbound.links || '[]').map((l) => `<p class="ask__link">${esc(safeText(l))}</p>`).join('')}</figure>`;
+    const theirs = !inbound ? '' : inbound.body_purged_at ? `<p class="ask__theirs ask__theirs--quiet">${tr('Their message was deleted after 7 days.')}</p>`
+      : inbound.sealed ? `<p class="ask__theirs ask__theirs--quiet">${tr('End-to-end encrypted, so only your bot could read their message.')}</p>`
+      : `<figure class="ask__theirs"><figcaption>${tr("{name}'s bot wrote", { name: esc(who.alias) })}</figcaption><blockquote>${esc(safeText(inbound.text))}</blockquote>${JSON.parse(inbound.links || '[]').map((l) => `<p class="ask__link">${esc(safeText(l))}</p>`).join('')}</figure>`;
     const d = r.draft;
-    const draft = d ? `<div class="ask__draft"><p class="ask__label">${r.state === 'PENDING_OWNER' ? 'Your bot\'s draft' : r.state === 'ENQUEUED' ? 'What was sent' : 'The answer'}</p><p class="ask__text">${esc(d.text)}</p>${d.links.map((l) => `<a class="ext" href="${esc(l)}" rel="noopener noreferrer nofollow" target="_blank">${esc(l.replace(/^https?:\/\//, '').slice(0, 60))}</a>`).join('')}</div>` : '';
-    const q_ = r.question ? esc(r.question) : r.inbound_message_id ? `${esc(who.alias)} wrote to you. Send your bot's answer?` : `Your bot wants to write to ${esc(who.alias)}. Send it?`;
+    const draft = d ? `<div class="ask__draft"><p class="ask__label">${r.state === 'PENDING_OWNER' ? tr("Your bot's draft") : r.state === 'ENQUEUED' ? tr('What was sent') : tr('The answer')}</p><p class="ask__text">${esc(d.text)}</p>${d.links.map((l) => `<a class="ext" href="${esc(l)}" rel="noopener noreferrer nofollow" target="_blank">${esc(l.replace(/^https?:\/\//, '').slice(0, 60))}</a>`).join('')}</div>` : '';
+    const q_ = r.question ? esc(r.question) : r.inbound_message_id ? tr("{name} wrote to you. Send your bot's answer?", { name: esc(who.alias) }) : tr('Your bot wants to write to {name}. Send it?', { name: esc(who.alias) });
     const act = `/app/requests/${esc(r.id)}`;
     const rev = `<input type="hidden" name="revision" value="${r.revision}">`;
     const own = (action, summary, text) => `<details class="ask__more" name="own-${esc(r.id)}"><summary class="btn ghost">${summary}</summary><form method="post" action="${act}" class="ask__own">${rev}<input type="hidden" name="action" value="${action}">${action === 'edit' && d?.links.length ? `<input type="hidden" name="links" value="${esc(d.links.join('\n'))}">` : ''}
-<label class="sr" for="${action}-${esc(r.id)}">${action === 'edit' ? 'Your edit' : 'Your answer'}</label><textarea id="${action}-${esc(r.id)}" name="text" rows="4" maxlength="4000" required${action === 'write' ? ` placeholder="Write it in your words"` : ''}>${esc(text)}</textarea><button class="btn">Send this</button></form></details>`;
+<label class="sr" for="${action}-${esc(r.id)}">${action === 'edit' ? tr('Your edit') : tr('Your answer')}</label><textarea id="${action}-${esc(r.id)}" name="text" rows="4" maxlength="4000" required${action === 'write' ? ` placeholder="${tr('Write it in your words')}"` : ''}>${esc(text)}</textarea><button class="btn">${tr('Send this')}</button></form></details>`;
     const done = {
-      ENQUEUED: ['sent', `Sent to ${esc(who.alias)}.`],
-      APPROVED: ['okay', `Okayed. Your bot sends it end-to-end encrypted the next time it runs.`],
-      DECLINED: ['declined', 'Declined. Nothing was sent.'],
-      EXPIRED: ['expired', 'This waited 24 hours, so it expired. Nothing was sent.'],
-      CANCELLED: ['cancelled', `Something changed with ${esc(who.alias)}, so this was cancelled. Nothing was sent.`],
+      ENQUEUED: [tr('sent'), tr('Sent to {name}.', { name: esc(who.alias) })],
+      APPROVED: [tr('okay'), tr('Okayed. Your bot sends it end-to-end encrypted the next time it runs.')],
+      DECLINED: [tr('declined'), tr('Declined. Nothing was sent.')],
+      EXPIRED: [tr('expired'), tr('This waited 24 hours, so it expired. Nothing was sent.')],
+      CANCELLED: [tr('cancelled'), tr('Something changed with {name}, so this was cancelled. Nothing was sent.', { name: esc(who.alias) })],
     }[r.state];
-    const body = r.state === 'PENDING_OWNER' ? `<div class="ask__actions" role="group" aria-label="Your answer">
-<form method="post" action="${act}">${rev}<input type="hidden" name="action" value="send"><button class="btn">Send once</button></form>
-${own('edit', 'Edit', d?.text || '')}${own('write', 'Write my own', '')}
-<form method="post" action="${act}">${rev}<input type="hidden" name="action" value="decline"><button class="btn ghost">Decline</button></form></div>
-<p class="ask__why">Nothing goes to ${esc(who.alias)} until you choose.</p>`
+    const body = r.state === 'PENDING_OWNER' ? `<div class="ask__actions" role="group" aria-label="${tr('Your answer')}">
+<form method="post" action="${act}">${rev}<input type="hidden" name="action" value="send"><button class="btn">${tr('Send once')}</button></form>
+${own('edit', tr('Edit'), d?.text || '')}${own('write', tr('Write my own'), '')}
+<form method="post" action="${act}">${rev}<input type="hidden" name="action" value="decline"><button class="btn ghost">${tr('Decline')}</button></form></div>
+<p class="ask__why">${tr('Nothing goes to {name} until you choose.', { name: esc(who.alias) })}</p>`
       : `<span class="ask__stamp" aria-hidden="true">${done[0]}</span><div class="ask__done"><p role="status">${done[1]}</p></div>`;
-    return `<article class="ask" id="${esc(r.id)}" aria-label="${r.inbound_message_id ? `Reply to ${esc(who.alias)}` : `Message to ${esc(who.alias)}`}">
-<div class="ask__top">${sticker({ seed: r.peer_bot, name: who.alias, src: who.pic, label: who.alias, note: false })}<div class="ask__who"><span class="hand">${r.inbound_message_id ? `${esc(who.alias.toLowerCase())} asked` : `to ${esc(who.alias.toLowerCase())}`}</span><time datetime="${new Date(r.created_at).toISOString()}">${esc(ago(r.created_at, clock()))}</time></div></div>
-<p class="ask__q">${q_}</p>${r.topic && r.state === 'PENDING_OWNER' ? `<p class="ask__topic"><span class="hand">${esc(r.topic)}</span> Your bot remembers your answer, so it asks less next time.</p>` : ''}${theirs}${draft}${body}</article>`;
+    return `<article class="ask" id="${esc(r.id)}" aria-label="${r.inbound_message_id ? tr('Reply to {name}', { name: esc(who.alias) }) : tr('Message to {name}', { name: esc(who.alias) })}">
+<div class="ask__top">${sticker({ seed: r.peer_bot, name: who.alias, src: who.pic, label: who.alias, note: false })}<div class="ask__who"><span class="hand">${r.inbound_message_id ? tr('{name} asked', { name: esc(who.alias.toLowerCase()) }) : tr('to {name}', { name: esc(who.alias.toLowerCase()) })}</span><time datetime="${new Date(r.created_at).toISOString()}">${esc(tr.ago(r.created_at, clock()))}</time></div></div>
+<p class="ask__q">${q_}</p>${r.topic && r.state === 'PENDING_OWNER' ? `<p class="ask__topic"><span class="hand">${esc(r.topic)}</span> ${tr('Your bot remembers your answer, so it asks less next time.')}</p>` : ''}${theirs}${draft}${body}</article>`;
   }
   // Settings changes in words, from the stored operations.
-  function describeOp(b, o) {
-    const who = o.contact != null ? (q('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(b.id, o.contact)?.alias ?? 'someone') : '';
-    const grp = o.circle_name ?? (o.circle != null ? (q('SELECT name FROM circles WHERE id = ? AND owner_bot = ?').get(o.circle, b.id)?.name ?? 'a basket') : '');
+  function describeOp(b, o, tr) {
+    const who = o.contact != null ? (q('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(b.id, o.contact)?.alias ?? tr('someone')) : '';
+    const grp = o.circle_name ?? (o.circle != null ? (q('SELECT name FROM circles WHERE id = ? AND owner_bot = ?').get(o.circle, b.id)?.name ?? tr('a basket')) : '');
     const rule = o.rule ? q('SELECT text FROM contact_rules WHERE id = ? AND owner_bot = ?').get(o.rule, b.id)?.text : null;
     switch (o.op) {
-      case 'move': return o.circle == null ? `Take ${who} out of their basket` : `Put ${who} in ${grp}`;
+      case 'move': return o.circle == null ? tr('Take {who} out of their basket', { who }) : tr('Put {who} in {basket}', { who, basket: grp });
       case 'set_mode': return o.contact != null
-        ? (o.mode === 'handles' ? `Let your bot handle ${who} without asking you first` : o.mode === 'asks' ? `Your bot asks you first about ${who}` : `${who} goes by their basket again`)
-        : (o.mode === 'handles' ? `Let your bot handle everyone in ${grp} without asking you first` : `Your bot asks you first about everyone in ${grp}`);
-      case 'add_circle': return `Add a basket called ${o.name}${o.mode === 'asks' ? ', where your bot asks you first' : ''}`;
-      case 'rename_circle': return `Rename ${grp} to ${o.name}`;
-      case 'delete_circle': return `Remove the ${grp} basket`;
-      case 'set_purpose': return o.purpose ? `Note who ${who} is: ${o.purpose}` : `Clear who ${who} is`;
-      case 'set_notes': return `Change your notes for ${who}`;
-      case 'rename': return `Call ${who} ${o.name}`;
-      case 'add_topic': return `Let ${who} ask about ${o.topic}`;
-      case 'remove_topic': return `Stop ${who} asking about ${o.topic}`;
-      case 'add_rule': return `Add a rule for ${who}: ${o.text}`;
-      case 'remove_rule': return rule ? `Remove your rule: ${rule}` : 'Remove one of your rules';
-      case 'block': return o.on ? `Block ${who}` : `Unblock ${who}`;
-      case 'pause': return o.on ? 'Pause your bots' : 'Resume your bots';
-      case 'quiet_hours': return o.on ? `Quiet hours from ${hhmm(o.start)} to ${hhmm(o.end)}` : 'Turn quiet hours off';
-      case 'ack_learned': return 'Mark learned rules as seen';
-      default: return 'Change a setting';
+        ? (o.mode === 'handles' ? tr('Let your bot handle {who} without asking you first', { who }) : o.mode === 'asks' ? tr('Your bot asks you first about {who}', { who }) : tr('{who} goes by their basket again', { who }))
+        : (o.mode === 'handles' ? tr('Let your bot handle everyone in {basket} without asking you first', { basket: grp }) : tr('Your bot asks you first about everyone in {basket}', { basket: grp }));
+      case 'add_circle': return o.mode === 'asks' ? tr('Add a basket called {name}, where your bot asks you first', { name: o.name }) : tr('Add a basket called {name}', { name: o.name });
+      case 'rename_circle': return tr('Rename {basket} to {name}', { basket: grp, name: o.name });
+      case 'delete_circle': return tr('Remove the {basket} basket', { basket: grp });
+      case 'set_purpose': return o.purpose ? tr('Note who {who} is: {purpose}', { who, purpose: o.purpose }) : tr('Clear who {who} is', { who });
+      case 'set_notes': return tr('Change your notes for {who}', { who });
+      case 'rename': return tr('Call {who} {name}', { who, name: o.name });
+      case 'add_topic': return tr('Let {who} ask about {topic}', { who, topic: o.topic });
+      case 'remove_topic': return tr('Stop {who} asking about {topic}', { who, topic: o.topic });
+      case 'add_rule': return tr('Add a rule for {who}: {text}', { who, text: o.text });
+      case 'remove_rule': return rule ? tr('Remove your rule: {rule}', { rule }) : tr('Remove one of your rules');
+      case 'block': return o.on ? tr('Block {who}', { who }) : tr('Unblock {who}', { who });
+      case 'pause': return o.on ? tr('Pause your bots') : tr('Resume your bots');
+      case 'quiet_hours': return o.on ? tr('Quiet hours from {from} to {to}', { from: hhmm(o.start), to: hhmm(o.end) }) : tr('Turn quiet hours off');
+      case 'ack_learned': return tr('Mark learned rules as seen');
+      default: return tr('Change a setting');
     }
   }
-  function proposalCard(b, p) {
+  function proposalCard(b, p, tr) {
     const ops = typeof p.ops === 'string' ? JSON.parse(p.ops) : p.ops;
     const act = `/app/proposals/${esc(p.id)}`;
-    const done = { APPROVED: ['changed', 'Done. Your bot has the new settings.'], DECLINED: ['declined', 'Declined. Nothing changed.'], EXPIRED: ['expired', 'This waited 7 days, so it expired. Nothing changed.'] }[p.state];
-    return `<article class="ask ask--change" id="${esc(p.id)}" aria-label="A change your bot wants">
-<div class="ask__top"><div class="ask__who"><span class="hand">your bot asks</span><time datetime="${new Date(p.created_at).toISOString()}">${esc(ago(p.created_at, clock()))}</time></div></div>
-<p class="ask__q">${ops.length === 1 ? 'Okay to change this?' : `Okay to change these ${ops.length} things?`}</p>
-<ul class="changes">${ops.map((o) => `<li>${esc(describeOp(b, o))}</li>`).join('')}</ul>
-${p.state === 'PENDING_OWNER' ? `<p class="ask__why">Your bot can't do this alone, because it gives it more freedom.</p><div class="ask__actions" role="group" aria-label="Your answer">
-<form method="post" action="${act}"><input type="hidden" name="decision" value="approve"><button class="btn">Approve</button></form>
-<form method="post" action="${act}"><input type="hidden" name="decision" value="decline"><button class="btn ghost">Decline</button></form></div>`
+    const done = { APPROVED: [tr('changed'), tr('Done. Your bot has the new settings.')], DECLINED: [tr('declined'), tr('Declined. Nothing changed.')], EXPIRED: [tr('expired'), tr('This waited 7 days, so it expired. Nothing changed.')] }[p.state];
+    return `<article class="ask ask--change" id="${esc(p.id)}" aria-label="${tr('A change your bot wants')}">
+<div class="ask__top"><div class="ask__who"><span class="hand">${tr('your bot asks')}</span><time datetime="${new Date(p.created_at).toISOString()}">${esc(tr.ago(p.created_at, clock()))}</time></div></div>
+<p class="ask__q">${ops.length === 1 ? tr('Okay to change this?') : tr('Okay to change these {n} things?', { n: ops.length })}</p>
+<ul class="changes">${ops.map((o) => `<li>${esc(describeOp(b, o, tr))}</li>`).join('')}</ul>
+${p.state === 'PENDING_OWNER' ? `<p class="ask__why">${tr("Your bot can't do this alone, because it gives it more freedom.")}</p><div class="ask__actions" role="group" aria-label="${tr('Your answer')}">
+<form method="post" action="${act}"><input type="hidden" name="decision" value="approve"><button class="btn">${tr('Approve')}</button></form>
+<form method="post" action="${act}"><input type="hidden" name="decision" value="decline"><button class="btn ghost">${tr('Decline')}</button></form></div>`
   : `<span class="ask__stamp" aria-hidden="true">${done[0]}</span><div class="ask__done"><p role="status">${done[1]}</p></div>`}</article>`;
   }
   function requestsPage(user) {
+    const tr = T(user);
     const bots = govBots(user);
     const reqs = bots.flatMap((b) => openRequests(b.id, { owner: true }));
     const props = bots.flatMap((b) => q("SELECT * FROM settings_proposals WHERE owner_bot = ? AND state = 'PENDING_OWNER' AND expires_at > ? ORDER BY created_at, id").all(b.id, clock()).map((p) => [b, p]));
     const body = reqs.length || props.length
-      ? `${reqs.length ? `<section class="group" aria-labelledby="replies-h"><h2 id="replies-h">Replies</h2><div class="asks-list">${reqs.map(requestCard).join('')}</div></section>` : ''}
-${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="changes-h">Changes</h2><div class="asks-list">${props.map(([b, p]) => proposalCard(b, p)).join('')}</div></section>` : ''}`
-      : `<section class="card">${emptyState('check', 'Nothing waiting', 'When your bot needs your okay, it shows up here.')}</section>`;
-    return layout('Requests', `<p class="pnote">For end-to-end chats, the relay can read drafts you send here for approval.</p>${body}`, { user, tab: 'requests', width: 'read', bar: { title: 'Requests', sub: 'What your bot wants you to okay' } });
+      ? `${reqs.length ? `<section class="group" aria-labelledby="replies-h"><h2 id="replies-h">${tr('Replies')}</h2><div class="asks-list">${reqs.map((r) => requestCard(r, tr)).join('')}</div></section>` : ''}
+${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="changes-h">${tr('Changes')}</h2><div class="asks-list">${props.map(([b, p]) => proposalCard(b, p, tr)).join('')}</div></section>` : ''}`
+      : `<section class="card">${emptyState('check', tr('Nothing waiting'), tr('When your bot needs your okay, it shows up here.'))}</section>`;
+    return layout(tr('Requests'), `<p class="pnote">${tr('For end-to-end chats, the relay can read drafts you send here for approval.')}</p>${body}`, { user, tab: 'requests', width: 'read', bar: { title: tr('Requests'), sub: tr('What your bot wants you to okay') } });
   }
-  const oneRequestPage = (user, r, { error = '' } = {}) => layout('Request', `${error ? alertBox('danger', esc(error), '') : ''}<p class="pnote">For end-to-end chats, the relay can read drafts you send here for approval.</p>${requestCard(r)}`,
-    { user, tab: 'requests', width: 'read', bar: { back: '/app/requests', backLabel: 'Requests', title: r.inbound_message_id ? `Reply to ${peerFace(r.owner_bot, r.peer_bot).alias}` : `Message to ${peerFace(r.owner_bot, r.peer_bot).alias}` } });
-  const oneProposalPage = (user, b, p, { error = '' } = {}) => layout('Change', `${error ? alertBox('danger', esc(error), '') : ''}${proposalCard(b, p)}`,
-    { user, tab: 'requests', width: 'read', bar: { back: '/app/requests', backLabel: 'Requests', title: 'A change from your bot' } });
+  const oneRequestPage = (user, r, { error = '' } = {}) => { const tr = T(user); const who = peerFace(r.owner_bot, r.peer_bot, tr).alias; return layout(tr('Request'), `${error ? alertBox('danger', esc(error), '') : ''}<p class="pnote">${tr('For end-to-end chats, the relay can read drafts you send here for approval.')}</p>${requestCard(r, tr)}`,
+    { user, tab: 'requests', width: 'read', bar: { back: '/app/requests', backLabel: tr('Requests'), title: r.inbound_message_id ? tr('Reply to {name}', { name: who }) : tr('Message to {name}', { name: who }) } }); };
+  const oneProposalPage = (user, b, p, { error = '' } = {}) => { const tr = T(user); return layout(tr('[noun]Change'), `${error ? alertBox('danger', esc(error), '') : ''}${proposalCard(b, p, tr)}`,
+    { user, tab: 'requests', width: 'read', bar: { back: '/app/requests', backLabel: tr('Requests'), title: tr('A change from your bot') } }); };
 
   // ───── router ─────
   return async function handleApp(req, res, url) {
     const p = url.pathname;
     // With the landing site on the same server, it answers / and /pricing instead of the built-in pages.
-    const isApp = p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || p === '/billing/stripe' || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || p.startsWith('/i/') || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/');
+    const isApp = p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || p === '/billing/stripe' || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || p.startsWith('/i/') || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/');
     if (!isApp) return false;
+    let tr = translator(reqLang(req));
     try {
       if (p === '/billing/stripe' && req.method === 'POST') {
         let raw = '';
@@ -1272,19 +1303,28 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         res.end(readFileSync(new URL(`./public/art/${am[1]}.jpg`, import.meta.url)));
         return true;
       }
+      // Signed out, picking the other language at the top remembers it and shows the same page again.
+      const lg = p.match(/^\/lang\/(en|cs)$/);
+      if (lg && req.method === 'GET') {
+        let back = '/login';
+        try { const r = new URL(req.headers.referer || ''); if (origin ? r.origin === new URL(origin).origin : r.host === req.headers.host) back = safeNext(r.pathname + r.search); } catch { /* no page to go back to */ }
+        res.writeHead(303, { location: back.startsWith('/lang/') ? '/login' : back, 'set-cookie': langCookie(lg[1]), 'cache-control': 'no-store' }); res.end();
+        return true;
+      }
       if (req.method === 'POST' && !sameOrigin(req)) throw new HttpError(403, 'Please use the website to do that.');
       const user = currentUser(req);
+      if (user) tr = T(user);
 
-      if (p === '/' && req.method === 'GET') return page(res, 200, landing(user)), true;
-      if (p === '/pricing' && req.method === 'GET') return page(res, hosted ? 200 : 404, hosted ? pricingPage(user) : layout('Not found', '<section class="card narrow"><h1>Not found</h1><p>This server is self-hosted and free.</p></section>')), true;
+      if (p === '/' && req.method === 'GET') return page(res, 200, landing(user, tr)), true;
+      if (p === '/pricing' && req.method === 'GET') return page(res, hosted ? 200 : 404, hosted ? pricingPage(user, tr) : layout(tr('Not found'), `<section class="card narrow"><h1>${tr('Not found')}</h1><p>${tr('This server is self-hosted and free.')}</p></section>`, { tr })), true;
 
-      if (p === '/login' && req.method === 'GET') return page(res, 200, loginPage({ next: url.searchParams.get('next') || '' })), true;
+      if (p === '/login' && req.method === 'GET') return page(res, 200, loginPage(tr, { next: url.searchParams.get('next') || '' })), true;
       if (p === '/login' && req.method === 'POST') {
         const f = await form(req);
         const email = String(f.email || '').trim().toLowerCase();
-        if (!EMAIL_RE.test(email)) return page(res, 400, loginPage({ email, error: 'That email address looks wrong.', next: f.next })), true;
-        try { const devCode = await sendLogin(email, req, res, f.next); return page(res, 200, loginPage({ email, sent: true, next: f.next, devCode })), true; }
-        catch (e) { if (e instanceof HttpError) return page(res, e.status, loginPage({ email, error: e.message, next: f.next })), true; throw e; }
+        if (!EMAIL_RE.test(email)) return page(res, 400, loginPage(tr, { email, error: tr('That email address looks wrong.'), next: f.next })), true;
+        try { const devCode = await sendLogin(email, req, res, f.next); return page(res, 200, loginPage(tr, { email, sent: true, next: f.next, devCode })), true; }
+        catch (e) { if (e instanceof HttpError) return page(res, e.status, loginPage(tr, { email, error: e.message, next: f.next })), true; throw e; }
       }
       if (p === '/login/verify' && req.method === 'POST') {
         const f = await form(req);
@@ -1294,30 +1334,30 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         // The same code sent twice from the same browser (a double tap, or autofill submitting as you tap) logs in
         // again instead of saying it expired: the first one already did.
         const nonce = cookies(req).b2b_login;
-        if (row?.used_at && right && clock() - row.used_at < 2 * 60_000 && row.browser_hash && nonce && sha(nonce) === row.browser_hash) return finishLogin(res, email, f.next, f.tz), true;
-        if (!row || row.used_at) return page(res, 400, loginPage({ email, error: 'That code expired. Ask for a new one.', next: f.next })), true;
-        if (row.attempts >= 5) return page(res, 400, loginPage({ email, error: 'Too many wrong tries. Ask for a new code.', next: f.next })), true;
+        if (row?.used_at && right && clock() - row.used_at < 2 * 60_000 && row.browser_hash && nonce && sha(nonce) === row.browser_hash) return finishLogin(res, email, f.next, f.tz, reqLang(req)), true;
+        if (!row || row.used_at) return page(res, 400, loginPage(tr, { email, error: tr('That code expired. Ask for a new one.'), next: f.next })), true;
+        if (row.attempts >= 5) return page(res, 400, loginPage(tr, { email, error: tr('Too many wrong tries. Ask for a new code.'), next: f.next })), true;
         if (!right) {
           q('UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?').run(row.id);
-          return page(res, 400, loginPage({ email, sent: true, error: 'Wrong code. Try again.', next: f.next })), true;
+          return page(res, 400, loginPage(tr, { email, sent: true, error: tr('Wrong code. Try again.'), next: f.next })), true;
         }
         q('UPDATE login_codes SET used_at = ? WHERE id = ?').run(clock(), row.id);
-        return finishLogin(res, email, f.next, f.tz), true;
+        return finishLogin(res, email, f.next, f.tz, reqLang(req)), true;
       }
       if (p === '/login/link') {
         // GET only shows a button, so email scanners that open links can't use them up.
         const t = req.method === 'POST' ? String((await form(req)).t || '') : url.searchParams.get('t') || '';
         const row = q('SELECT * FROM login_codes WHERE link_hash = ? AND used_at IS NULL AND expires_at > ?').get(sha(t), clock());
-        if (!row) return page(res, 400, loginPage({ error: 'That link expired. Ask for a new one.' })), true;
+        if (!row) return page(res, 400, loginPage(tr, { error: tr('That link expired. Ask for a new one.') })), true;
         const nonce = cookies(req).b2b_login;
         if (row.browser_hash && (!nonce || sha(nonce) !== row.browser_hash)) {
-          return page(res, 400, loginPage({ error: 'Open the link in the same browser where you asked for it, or type the 6-digit code from the email there.' })), true;
+          return page(res, 400, loginPage(tr, { error: tr('Open the link in the same browser where you asked for it, or type the 6-digit code from the email there.') })), true;
         }
-        if (req.method !== 'POST') return page(res, 200, layout('Log in', `<section class="card narrow center"><h1>Continue to ${esc(product)}</h1>
-<form method="post" action="/login/link"><input type="hidden" name="t" value="${esc(t)}"><button class="btn">Log in</button></form></section>`)), true;
+        if (req.method !== 'POST') return page(res, 200, layout(tr('Log in'), `<section class="card narrow center"><h1>${tr('Continue to {product}', { product: esc(product) })}</h1>
+<form method="post" action="/login/link"><input type="hidden" name="t" value="${esc(t)}"><button class="btn">${tr('Log in')}</button></form></section>`, { tr })), true;
         q('UPDATE login_codes SET used_at = ? WHERE id = ?').run(clock(), row.id);
         // Back to where they were going (a bot's approve link, an invite), like the 6-digit code does.
-        return finishLogin(res, row.email, row.next || '/app'), true;
+        return finishLogin(res, row.email, row.next || '/app', undefined, reqLang(req)), true;
       }
       if (p === '/logout' && req.method === 'POST') {
         const t = cookies(req).b2b_session; if (t) q('DELETE FROM sessions WHERE token_hash = ?').run(sha(t));
@@ -1358,17 +1398,17 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const plain = im[1].toUpperCase();
         const inv = q('SELECT * FROM invites WHERE code_hash = ?').get(sha(plain));
         if (inv && inv.used_at && user && inv.used_by && q('SELECT 1 FROM bots WHERE id = ? AND user_id = ?').get(inv.used_by, user.id)) return redirect(res, '/app'), true;
-        if (!inv || inv.used_at || inv.expires_at < clock()) return page(res, 404, layout('Invitation', `<section class="card narrow center"><h1>This invite has expired</h1><p>Ask your friend for a new link.</p></section>`, { user })), true;
+        if (!inv || inv.used_at || inv.expires_at < clock()) return page(res, 404, layout(tr('Invitation'), `<section class="card narrow center"><h1>${tr('This invite has expired')}</h1><p>${tr('Ask your friend for a new link.')}</p></section>`, { user, tr })), true;
         inv.plain = plain;
         const inviter = q('SELECT b.handle, u.name, u.email_verified_at, b.user_id FROM bots b LEFT JOIN users u ON u.id = b.user_id WHERE b.id = ?').get(inv.from_bot);
         const bots = user ? liveBots(user).filter((b) => b.id !== inv.from_bot) : [];
-        if (req.method === 'GET') return page(res, 200, invitePage(inv, inviter, user, bots)), true;
+        if (req.method === 'GET') return page(res, 200, invitePage(inv, inviter, user, bots, { tr })), true;
         if (!user) return redirect(res, `/login?next=${encodeURIComponent(p)}`), true;
         const f = await form(req);
-        if (inviter.user_id === user.id) return page(res, 400, invitePage(inv, inviter, user, bots, { error: 'That is your own invite.' })), true;
+        if (inviter.user_id === user.id) return page(res, 400, invitePage(inv, inviter, user, bots, { tr, error: tr('That is your own invite.') })), true;
         // The web inbox is off unless an operator turns it on (WEB_INBOX=1): bot2bot is for bots.
         const bot = webInbox && f.web === '1' && !bots.length ? makeWebBot(user) : bots.find((b) => b.id === Number(f.bot));
-        if (!bot) return page(res, 400, invitePage(inv, inviter, user, bots, { error: bots.length ? 'Pick one of your bots.' : 'Connect your Grok Bot first.' })), true;
+        if (!bot) return page(res, 400, invitePage(inv, inviter, user, bots, { tr, error: bots.length ? tr('Pick one of your bots.') : tr('Connect your Grok Bot first.') })), true;
         let accepted;
         try {
           accepted = routes['POST /v1/invites/accept']({ me: bot, body: { code: plain, alias: String(f.alias || '').trim(), basket: f.basket || null, notes: f.notes ?? null }, byOwner: true });
@@ -1381,12 +1421,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           q('UPDATE contacts SET alias = ? WHERE owner_bot = ? AND peer_bot = ?').run(alias, inv.from_bot, bot.id);
           }
         }
-        catch (e) { if (e instanceof HttpError) return page(res, e.status, invitePage(inv, inviter, user, bots, { error: e.message })), true; throw e; }
-        return page(res, 200, invitePage(inv, inviter, user, bots, { done: bot.vendor === 'web' ? 'web' : true, basket: accepted?.basket })), true;
+        catch (e) { if (e instanceof HttpError) return page(res, e.status, invitePage(inv, inviter, user, bots, { tr, error: e.message })), true; throw e; }
+        return page(res, 200, invitePage(inv, inviter, user, bots, { tr, done: bot.vendor === 'web' ? 'web' : true, basket: accepted?.basket })), true;
       }
 
       // Everything below needs a logged-in user.
       if (!user && cookies(req).b2b_in) res.setHeader('set-cookie', sessionCookie('', 0)); // the session ended elsewhere: drop the marker too
+      // Signed in from before the marker existed: add it now, so the site says Platform on the next visit.
+      else if (user && !cookies(req).b2b_in) res.setHeader('set-cookie', sessionCookie(cookies(req).b2b_session, SESSION_MS / 1000));
       if (!user) return redirect(res, `/login?next=${encodeURIComponent(p)}`), true;
 
       // No picture yet: pick one first, then carry on to the page they asked for.
@@ -1402,7 +1444,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           const f = await form(req);
           if (f.decision !== 'allow') {
             q('UPDATE join_requests SET denied_at = ? WHERE code_hash = ? AND approved_at IS NULL').run(clock(), sha(plain));
-            tell(user, { what: 'Declined. That bot isn\'t linked.' });
+            tell(user, { what: tr("Declined. That bot isn't linked.") });
             return redirect(res, '/app'), true;
           }
           try { approveJoin(user, plain, f); }
@@ -1416,11 +1458,12 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (p === '/app/bots/new') { q('UPDATE enroll_codes SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(clock(), user.id); return redirect(res, '/app/bots/new-form'), true; }
         const handle = String(f.handle || '').trim().toLowerCase();
         const adding = myBots(user).length > 0;
-        if (adding && !HANDLE_RE.test(handle)) return page(res, 400, addBotForm(user, { error: 'Use 2 to 32 lowercase letters, numbers, - or _. No spaces.', handle: f.handle })), true;
-        if (!HANDLE_RE.test(handle)) return page(res, 400, dashboard(user).replace('<h2>Connect your bot</h2>', '<h2>Connect your bot</h2><p class="error">Use 2 to 32 lowercase letters, numbers, - or _.</p>')), true;
+        const h2 = `<h2>${tr('Connect your bot')}</h2>`;
+        if (adding && !HANDLE_RE.test(handle)) return page(res, 400, addBotForm(user, { error: tr('Use 2 to 32 lowercase letters, numbers, - or _. No spaces.'), handle: f.handle })), true;
+        if (!HANDLE_RE.test(handle)) return page(res, 400, dashboard(user).replace(h2, `${h2}<p class="error">${tr('Use 2 to 32 lowercase letters, numbers, - or _.')}</p>`)), true;
         if (q('SELECT 1 FROM bots WHERE handle = ?').get(handle) || q('SELECT 1 FROM enroll_codes WHERE handle = ? AND used_at IS NULL AND expires_at > ? AND (user_id IS NULL OR user_id != ?)').get(handle, clock(), user.id)) {
-          if (adding) return page(res, 409, addBotForm(user, { error: 'That name is taken. Try another.', handle })), true;
-          return page(res, 409, dashboard(user).replace('<h2>Connect your bot</h2>', '<h2>Connect your bot</h2><p class="error">That name is taken. Try another.</p>')), true;
+          if (adding) return page(res, 409, addBotForm(user, { error: tr('That name is taken. Try another.'), handle })), true;
+          return page(res, 409, dashboard(user).replace(h2, `${h2}<p class="error">${tr('That name is taken. Try another.')}</p>`)), true;
         }
         const code = humanCode();
         q('UPDATE enroll_codes SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(clock(), user.id);
@@ -1433,7 +1476,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       }
       if (p === '/app/bots/cancel' && req.method === 'POST') {
         q('UPDATE enroll_codes SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(clock(), user.id);
-        tell(user, { what: 'Setup cancelled' });
+        tell(user, { what: tr('Setup cancelled') });
         return redirect(res, '/app'), true;
       }
 
@@ -1461,11 +1504,11 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             if (!saved) throw new HttpError(409, 'This bot was disconnected. Reconnect it first.');
             log(b.id, 'doorbell_set', { host: new URL(urlOk).hostname, by: 'owner' });
           } catch (e) {
-            if (e instanceof HttpError) return page(res, 400, botPage(user, b, { error: e.message.replace(/^webhook (url|host)/, 'The webhook address') })), true;
+            if (e instanceof HttpError) return page(res, 400, botPage(user, b, { error: tr.msg(e.message.replace(/^webhook (url|host)/, 'The webhook address')) })), true;
             throw e;
           }
           // Saving rings the bot straight away: one less thing to click.
-          tell(user, { what: 'Doorbell saved' });
+          tell(user, { what: tr('Doorbell saved') });
           return redirect(res, `/app/bots/${b.id}?ring=1`), true;
         }
         // ChatGPT or OpenClaw watching for messages: stop every subscription (they can ask to watch again).
@@ -1475,7 +1518,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             q('UPDATE bots SET webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ?').run(b.id);
           });
           log(b.id, 'doorbell_removed', { by: 'owner' });
-          tell(user, { what: 'Stopped watching' });
+          tell(user, { what: tr('Stopped watching') });
           return redirect(res, `/app/bots/${b.id}`), true;
         }
         const disconnectInTx = () => {
@@ -1492,14 +1535,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           const f = await form(req);
           let r;
           try { r = renameBot(b, f.handle); }
-          catch (e) { if (e instanceof HttpError && e.status < 500) return page(res, e.status, botPage(user, { ...b, nameError: e.message })), true; throw e; }
-          if (r.from !== r.to) tell(user, { what: `Renamed to ${r.to}`, undo: f.undo === '1' ? null : undoForm(`/app/bots/${b.id}/rename`, { handle: b.handle }) });
+          catch (e) { if (e instanceof HttpError && e.status < 500) return page(res, e.status, botPage(user, { ...b, nameError: tr.msg(e.message) })), true; throw e; }
+          if (r.from !== r.to) tell(user, { what: tr('Renamed to {name}', { name: r.to }), undo: f.undo === '1' ? null : undoForm(`/app/bots/${b.id}/rename`, { handle: b.handle }) });
           return redirect(res, `/app/bots/${b.id}`), true;
         }
         if (sub === '/disconnect' && req.method === 'POST') {
           tx(disconnectInTx);
           log(b.id, 'disconnected', { by: 'owner' });
-          tell(user, { what: `Disconnected @${b.handle}`, undo: undoForm(`/app/bots/${b.id}/reconnect`, {}, 'Reconnect') });
+          tell(user, { what: tr('Disconnected @{handle}', { handle: b.handle }), undo: undoForm(`/app/bots/${b.id}/reconnect`, {}, tr('Reconnect')) });
           return redirect(res, `/app/bots/${b.id}`), true;
         }
         // Remove: disconnected first if it isn't yet, then gone from the dashboard. An hour later it leaves its
@@ -1510,14 +1553,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             q('UPDATE bots SET removed_at = ? WHERE id = ?').run(clock(), b.id);
           });
           log(b.id, 'removed', { by: 'owner' });
-          tell(user, { what: `Removed @${b.handle}`, undo: undoForm(`/app/bots/${b.id}/restore`, {}) });
+          tell(user, { what: tr('Removed @{handle}', { handle: b.handle }), undo: undoForm(`/app/bots/${b.id}/restore`, {}) });
           return redirect(res, '/app'), true;
         }
         if (sub === '/restore' && req.method === 'POST') {
           if (b.handle.includes('~')) throw new HttpError(410, 'This bot is gone for good.');
           q('UPDATE bots SET removed_at = NULL WHERE id = ?').run(b.id);
           log(b.id, 'restored', { by: 'owner' });
-          tell(user, { what: `@${b.handle} is back, disconnected` });
+          tell(user, { what: tr('@{handle} is back, disconnected', { handle: b.handle }) });
           return redirect(res, `/app/bots/${b.id}`), true;
         }
         if (sub === '/reconnect' && req.method === 'POST') {
@@ -1533,13 +1576,13 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           const h = Number(f.every || 0);
           const every = [2, 4, 8, 12, 24].includes(h) ? h : null;
           q('UPDATE bots SET backup_every_h = ? WHERE id = ?').run(every, b.id);
-          tell(user, { what: every ? `Backs up every ${every} hours` : 'Backups off', undo: f.undo === '1' || every === b.backup_every_h ? null : undoForm(`/app/bots/${b.id}/backup`, { every: b.backup_every_h ?? 0 }) });
+          tell(user, { what: every ? tr.n(every, 'Backs up every {n} hour|Backs up every {n} hours') : tr('Backups off'), undo: f.undo === '1' || every === b.backup_every_h ? null : undoForm(`/app/bots/${b.id}/backup`, { every: b.backup_every_h ?? 0 }) });
           return redirect(res, `/app/bots/${b.id}#backup`), true;
         }
         if (sub === '/test' && req.method === 'POST') {
-          if (b.disconnected_at || b.vendor === 'web') return json(res, 409, { error: 'This bot is not connected.' }), true;
+          if (b.disconnected_at || b.vendor === 'web') return json(res, 409, { error: tr('This bot is not connected.') }), true;
           try { const r = await routes['POST /v1/doorbell/test']({ me: b, byOwner: true }); return json(res, 200, r), true; }
-          catch (e) { if (e instanceof HttpError) return json(res, e.status, { error: e.message }), true; throw e; }
+          catch (e) { if (e instanceof HttpError) return json(res, e.status, { error: tr.msg(e.message) }), true; throw e; }
         }
       }
 
@@ -1552,8 +1595,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           setPrivacyInTx(b.id, c.peer_bot, on);
           if (!!c.privacy_on !== on) log(b.id, on ? 'privacy_on' : 'privacy_off', { peer: c.peer_bot, by: 'owner' });
         });
-        tell(user, on ? { what: `Asks you first for ${c.alias}`, undo: f.undo === '1' ? null : undoForm('/app/contacts/privacy', { bot: b.id, peer: c.peer_bot }) }
-          : { what: `Writes to ${c.alias} without asking`, undo: inPilot(user) && f.undo !== '1' ? undoForm('/app/contacts/privacy', { bot: b.id, peer: c.peer_bot, on: '1' }) : null });
+        tell(user, on ? { what: tr('Asks you first for {name}', { name: c.alias }), undo: f.undo === '1' ? null : undoForm('/app/contacts/privacy', { bot: b.id, peer: c.peer_bot }) }
+          : { what: tr('Writes to {name} without asking', { name: c.alias }), undo: inPilot(user) && f.undo !== '1' ? undoForm('/app/contacts/privacy', { bot: b.id, peer: c.peer_bot, on: '1' }) : null });
         return redirect(res, `/app#f-${b.id}-${c.peer_bot}`), true;
       }
       if (p.startsWith('/app/contacts/') && req.method === 'POST') {
@@ -1563,7 +1606,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (action === 'approve') {
           q('UPDATE contacts SET approved_at = ? WHERE owner_bot = ? AND peer_bot = ?').run(clock(), b.id, c.peer_bot);
           log(b.id, 'contact_approved', { peer: c.peer_bot });
-          tell(user, { what: `${c.alias} connected` });
+          tell(user, { what: tr('{name} connected', { name: c.alias }) });
         } else if (action === 'block') {
           const unblock = f.unblock === '1';
           tx(() => {
@@ -1572,14 +1615,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             if (!unblock) dropBetween(b.id, c.peer_bot);
           });
           log(b.id, unblock ? 'contact_unblocked' : 'contact_blocked', { peer: c.peer_bot, by: 'owner' });
-          tell(user, unblock ? { what: `Unblocked ${c.alias}`, undo: f.undo === '1' ? null : undoForm('/app/contacts/block', { bot: b.id, peer: c.peer_bot }) }
-            : { what: `Blocked ${c.alias}`, undo: f.undo === '1' ? null : undoForm('/app/contacts/block', { bot: b.id, peer: c.peer_bot, unblock: '1' }) });
+          tell(user, unblock ? { what: tr('Unblocked {name}', { name: c.alias }), undo: f.undo === '1' ? null : undoForm('/app/contacts/block', { bot: b.id, peer: c.peer_bot }) }
+            : { what: tr('Blocked {name}', { name: c.alias }), undo: f.undo === '1' ? null : undoForm('/app/contacts/block', { bot: b.id, peer: c.peer_bot, unblock: '1' }) });
         } else if (action === 'disallow') {
           // The dashboard can only take topics away; adding them is done by telling your own bot.
           const left = JSON.parse(c.can_ask || '[]').filter((t) => t !== String(f.topic || ''));
           q('UPDATE contacts SET can_ask = ? WHERE owner_bot = ? AND peer_bot = ?').run(JSON.stringify(left), b.id, c.peer_bot);
           log(b.id, 'ask_topic_removed', { peer: c.peer_bot, by: 'owner' });
-          tell(user, { what: `${c.alias} can't ask about ${String(f.topic || '')}` });
+          tell(user, { what: tr("{name} can't ask about {topic}", { name: c.alias, topic: String(f.topic || '') }) });
         } else if (action === 'remove') {
           tx(() => {
             bumpPair(b.id, c.peer_bot);
@@ -1587,7 +1630,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             dropBetween(b.id, c.peer_bot);
           });
           log(b.id, 'contact_removed', { peer: c.peer_bot, by: 'owner' });
-          tell(user, { what: `Removed ${c.alias}` });
+          tell(user, { what: tr('Removed {name}', { name: c.alias }) });
         } else throw new HttpError(404, 'Page not found');
         return redirect(res, '/app'), true;
       }
@@ -1603,8 +1646,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           log(b.id, on ? 'paused' : 'resumed', { by: 'owner' });
           if (!on) release(b.id);
         }
-        tell(user, on ? { what: 'Paused', undo: f.undo === '1' ? null : undoForm('/app/pause', { on: '0' }) }
-          : { what: 'Resumed', undo: f.undo === '1' ? null : undoForm('/app/pause', { on: '1' }) });
+        tell(user, on ? { what: tr('Paused'), undo: f.undo === '1' ? null : undoForm('/app/pause', { on: '0' }) }
+          : { what: tr('Resumed'), undo: f.undo === '1' ? null : undoForm('/app/pause', { on: '1' }) });
         return redirect(res, '/app'), true;
       }
 
@@ -1629,23 +1672,23 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           : [{ op: 'add_circle', name: String(f.name ?? ''), mode: 'handles' }];
         let result;
         try { result = applyOwnerOps(b.id, ops); }
-        catch (e) { if (e instanceof HttpError && e.status !== 404) return page(res, e.status, peoplePage(user, b, { error: ownerError(e) })), true; throw e; }
+        catch (e) { if (e instanceof HttpError && e.status !== 404) return page(res, e.status, peoplePage(user, b, { error: ownerError(e, tr) })), true; throw e; }
         const back = (u) => (undone ? {} : { undo: u });
         if (pa[1] === 'move') {
           const peer = Number(f.peer), now = contact(peer), g = now.circle_id ? group(now.circle_id) : null;
-          tell(user, { what: g ? `Moved ${now.alias} to ${g.name}` : `Moved ${now.alias} to not sorted yet`, ...back(undoForm('/app/people/move', { bot: b.id, peer, circle: before.circle_id ?? '' })) });
+          tell(user, { what: g ? tr('Moved {name} to {basket}', { name: now.alias, basket: g.name }) : tr('Moved {name} to not sorted yet', { name: now.alias }), ...back(undoForm('/app/people/move', { bot: b.id, peer, circle: before.circle_id ?? '' })) });
         } else if (pa[1] === 'mode') {
           const g = group(Number(f.circle));
-          tell(user, { what: g.mode === 'asks' ? `${g.name} asks you first` : `Your bot handles ${g.name}`, ...back(undoForm('/app/people/mode', { bot: b.id, circle: g.id, mode: before.mode })) });
+          tell(user, { what: g.mode === 'asks' ? tr('{basket} asks you first', { basket: g.name }) : tr('Your bot handles {basket}', { basket: g.name }), ...back(undoForm('/app/people/mode', { bot: b.id, circle: g.id, mode: before.mode })) });
         } else if (pa[1] === 'restore') {
-          tell(user, { what: `${String(f.name)} is back` });
+          tell(user, { what: tr('{name} is back', { name: String(f.name) }) });
         } else if (f.delete === '1') {
-          tell(user, { what: `Removed ${before.name}`, undo: undoForm('/app/people/restore', { bot: b.id, name: before.name, mode: before.mode, peers: members.join(',') }) });
+          tell(user, { what: tr('Removed {name}', { name: before.name }), undo: undoForm('/app/people/restore', { bot: b.id, name: before.name, mode: before.mode, peers: members.join(',') }) });
         } else if (f.circle) {
-          tell(user, { what: `Renamed to ${String(f.name).trim()}`, ...back(undoForm('/app/people/baskets', { bot: b.id, circle: before.id, name: before.name })) });
+          tell(user, { what: tr('Renamed to {name}', { name: String(f.name).trim() }), ...back(undoForm('/app/people/baskets', { bot: b.id, circle: before.id, name: before.name })) });
         } else {
           const added = result.applied.find((o) => o.op === 'add_circle');
-          tell(user, { what: `Added ${added.name}`, ...back(undoForm('/app/people/baskets', { bot: b.id, circle: added.id, delete: '1' })) });
+          tell(user, { what: tr('Added {name}', { name: added.name }), ...back(undoForm('/app/people/baskets', { bot: b.id, circle: added.id, delete: '1' })) });
         }
         return redirect(res, `/app/people?bot=${b.id}`), true;
       }
@@ -1662,7 +1705,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           if (pm[3] === 'rules' && f.restore != null) {
             const n = q('UPDATE contact_rules SET removed_at = NULL WHERE id = ? AND owner_bot = ? AND peer_bot = ? AND removed_at IS NOT NULL').run(String(f.restore), b.id, peer).changes;
             if (!n) throw new HttpError(404, 'Rule not found');
-            tell(user, { what: 'Rule is back' });
+            tell(user, { what: tr('Rule is back') });
             return redirect(res, `/app/people/${b.id}/${peer}#rules`), true;
           }
           if (pm[3] === 'rules' && f.seen != null) {
@@ -1680,23 +1723,23 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           if (pm[3] === 'rules' && f.remove != null && !q('SELECT 1 FROM contact_rules WHERE id = ? AND owner_bot = ? AND peer_bot = ?').get(String(f.remove), b.id, peer)) throw new HttpError(404, 'Rule not found');
           let result;
           try { result = applyOwnerOps(b.id, ops); }
-          catch (e) { if (e instanceof HttpError && e.status !== 404) return page(res, e.status, personPage(user, b, peer, { error: ownerError(e) })), true; throw e; }
+          catch (e) { if (e instanceof HttpError && e.status !== 404) return page(res, e.status, personPage(user, b, peer, { error: ownerError(e, tr) })), true; throw e; }
           const now = getSettings(b.id).contacts.find((c) => c.peer_bot === peer), base = `/app/people/${b.id}/${peer}`;
           const back = (u) => (undone ? {} : { undo: u });
           if (pm[3] === 'basket') {
-            tell(user, { what: now.mode_override === 'asks' ? 'Asks you first' : now.circle ? `Moved to ${now.circle.name}` : 'Moved to not sorted yet',
+            tell(user, { what: now.mode_override === 'asks' ? tr('Asks you first') : now.circle ? tr('Moved to {basket}', { basket: now.circle.name }) : tr('Moved to not sorted yet'),
               ...back(undoForm(`${base}/basket`, { circle: was.circle?.id ?? '', mode: was.mode_override ?? '' })) });
           } else if (pm[3] === 'about') {
-            tell(user, { what: now.alias !== was.alias ? `Now called ${now.alias}` : 'Saved', ...back(undoForm(`${base}/about`, { alias: was.alias, purpose: was.purpose ?? '', notes: was.notes ?? '' })) });
+            tell(user, { what: now.alias !== was.alias ? tr('Now called {name}', { name: now.alias }) : tr('Saved'), ...back(undoForm(`${base}/about`, { alias: was.alias, purpose: was.purpose ?? '', notes: was.notes ?? '' })) });
           } else if (pm[3] === 'topics') {
             const t = ops[0].topic.trim().toLowerCase();
-            tell(user, f.remove != null ? { what: `Removed ${t}`, ...back(undoForm(`${base}/topics`, { add: t })) }
-              : { what: `Added ${t}`, ...back(undoForm(`${base}/topics`, { remove: t })) });
+            tell(user, f.remove != null ? { what: tr('Removed {name}', { name: t }), ...back(undoForm(`${base}/topics`, { add: t })) }
+              : { what: tr('Added {name}', { name: t }), ...back(undoForm(`${base}/topics`, { remove: t })) });
           } else if (f.remove != null) {
-            tell(user, { what: 'Rule removed', ...back(undoForm(`${base}/rules`, { restore: String(f.remove) })) });
+            tell(user, { what: tr('Rule removed'), ...back(undoForm(`${base}/rules`, { restore: String(f.remove) })) });
           } else {
             const added = result.applied.find((o) => o.op === 'add_rule');
-            tell(user, { what: 'Rule added', ...back(undoForm(`${base}/rules`, { remove: added?.id ?? added?.rule ?? '' })) });
+            tell(user, { what: tr('Rule added'), ...back(undoForm(`${base}/rules`, { remove: added?.id ?? added?.rule ?? '' })) });
           }
           return redirect(res, `/app/people/${b.id}/${peer}#${pm[3]}`), true;
         }
@@ -1718,9 +1761,9 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             const draft = { text: String(f.text ?? '').replace(/\r\n/g, '\n'), links: String(f.links || '').split('\n').map((l) => l.trim()).filter(Boolean) };
             let r;
             try { r = decideRequest(b.id, rq[2], { action, revision: Number(f.revision), ...(action === 'edit' || action === 'write' ? { draft } : {}) }); }
-            catch (e) { if (e instanceof HttpError && e.status !== 404) return page(res, e.status, oneRequestPage(user, getRequest(b.id, rq[2], { owner: true }), { error: ownerError(e) })), true; throw e; }
-            const who = peerFace(b.id, r.peer_bot).alias;
-            tell(user, { what: { ENQUEUED: `Sent to ${who}`, APPROVED: `Okayed. Your bot sends it to ${who}`, DECLINED: 'Declined' }[r.state] || 'Already decided' });
+            catch (e) { if (e instanceof HttpError && e.status !== 404) return page(res, e.status, oneRequestPage(user, getRequest(b.id, rq[2], { owner: true }), { error: ownerError(e, tr) })), true; throw e; }
+            const who = peerFace(b.id, r.peer_bot, tr).alias;
+            tell(user, { what: { ENQUEUED: tr('Sent to {name}', { name: who }), APPROVED: tr('Okayed. Your bot sends it to {name}', { name: who }), DECLINED: tr('Declined') }[r.state] || tr('Already decided') });
             return redirect(res, '/app/requests'), true;
           }
           if (req.method === 'GET') return page(res, 200, oneRequestPage(user, getRequest(b.id, rq[2], { owner: true }))), true;
@@ -1729,8 +1772,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           if (f) {
             let r;
             try { r = decideProposal(b.id, rq[2], String(f.decision || '')); }
-            catch (e) { if (e instanceof HttpError) return page(res, e.status === 404 ? 409 : e.status, oneProposalPage(user, b, prop(), { error: `This change doesn't fit any more: ${ownerError(e)} Ask your bot again.` })), true; throw e; }
-            tell(user, { what: { APPROVED: 'Done. Your bot has the new settings', DECLINED: 'Declined' }[r.state] || 'Already decided' });
+            catch (e) { if (e instanceof HttpError) return page(res, e.status === 404 ? 409 : e.status, oneProposalPage(user, b, prop(), { error: tr("This change doesn't fit any more: {why} Ask your bot again.", { why: ownerError(e, tr) }) })), true; throw e; }
+            tell(user, { what: { APPROVED: tr('Done. Your bot has the new settings'), DECLINED: tr('Declined') }[r.state] || tr('Already decided') });
             return redirect(res, '/app/requests'), true;
           }
           if (req.method === 'GET') { governance.expire(); return page(res, 200, oneProposalPage(user, b, prop())), true; }
@@ -1760,8 +1803,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const body = { to: `@${peer.handle}`, text: String(f.text || ''), links: f.link ? [String(f.link).trim()] : [],
           kind: f.reply_to ? 'reply' : choices.length ? 'ask' : 'note', reply_to: f.reply_to || undefined, choices: f.reply_to ? undefined : choices };
         try { routes['POST /v1/messages']({ me: q('SELECT * FROM bots WHERE id = ?').get(b.id), body, viaWeb: true }); }
-        catch (e) { if (e instanceof HttpError) return page(res, e.status, inboxPage(user, { error: e.message.replace(/^\w/, (x) => x.toUpperCase()) })), true; throw e; }
-        tell(user, { what: `Sent to ${c.alias}` });
+        catch (e) { if (e instanceof HttpError) return page(res, e.status, inboxPage(user, { error: tr.msg(e.message.replace(/^\w/, (x) => x.toUpperCase())) })), true; throw e; }
+        tell(user, { what: tr('Sent to {name}', { name: c.alias }) });
         return redirect(res, `/app/inbox#c-${c.peer_bot}`), true;
       }
 
@@ -1770,14 +1813,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return page(res, 200, billingPage(user, { paid: url.searchParams.get('paid') === '1' })), true;
       }
       if (p === '/app/billing/checkout' && req.method === 'POST') {
-        if (!hosted || !B.stripeKey || !B.priceId) return page(res, 400, billingPage(user, { error: 'Payments are not set up on this server yet.' })), true;
+        if (!hosted || !B.stripeKey || !B.priceId) return page(res, 400, billingPage(user, { error: tr('Payments are not set up on this server yet.') })), true;
         const body = new URLSearchParams({ mode: 'payment', 'line_items[0][price]': B.priceId, 'line_items[0][quantity]': '1',
           client_reference_id: String(user.id), customer_email: user.email,
           success_url: `${origin}/app/billing?paid=1`, cancel_url: `${origin}/app/billing` });
         const r = await fetchImpl('https://api.stripe.com/v1/checkout/sessions', { method: 'POST', body,
           headers: { authorization: `Bearer ${B.stripeKey}`, 'content-type': 'application/x-www-form-urlencoded' }, signal: AbortSignal.timeout(15_000) });
         const data = await r.json().catch(() => ({}));
-        if (!r.ok || !String(data.url || '').startsWith('https://checkout.stripe.com/')) return page(res, 502, billingPage(user, { error: 'The payment page could not be opened. Try again in a minute.' })), true;
+        if (!r.ok || !String(data.url || '').startsWith('https://checkout.stripe.com/')) return page(res, 502, billingPage(user, { error: tr('The payment page could not be opened. Try again in a minute.') })), true;
         return redirect(res, data.url), true;
       }
       if (p === '/app/billing/members' && req.method === 'POST') {
@@ -1786,14 +1829,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (f.remove) {
           const gone = String(f.remove).toLowerCase();
           q('DELETE FROM household_members WHERE payer_user_id = ? AND email = ?').run(user.id, gone);
-          tell(user, { what: `Removed ${gone}`, undo: f.undo === '1' ? null : undoForm('/app/billing/members', { email: gone }) });
+          tell(user, { what: tr('Removed {name}', { name: gone }), undo: f.undo === '1' ? null : undoForm('/app/billing/members', { email: gone }) });
         } else {
           const email = String(f.email || '').trim().toLowerCase();
           const n = q('SELECT count(*) AS n FROM household_members WHERE payer_user_id = ?').get(user.id).n;
-          if (!EMAIL_RE.test(email) || email === user.email) return page(res, 400, billingPage(user, { error: 'That email address looks wrong.' })), true;
-          if (n >= B.householdSize - 1) return page(res, 400, billingPage(user, { error: `Your plan covers up to ${B.householdSize - 1} people.` })), true;
+          if (!EMAIL_RE.test(email) || email === user.email) return page(res, 400, billingPage(user, { error: tr('That email address looks wrong.') })), true;
+          if (n >= B.householdSize - 1) return page(res, 400, billingPage(user, { error: tr('Your plan covers up to {n} people.', { n: B.householdSize - 1 }) })), true;
           q('INSERT OR IGNORE INTO household_members (payer_user_id, email, added_at) VALUES (?, ?, ?)').run(user.id, email, clock());
-          tell(user, { what: `Added ${email}`, undo: f.undo === '1' ? null : undoForm('/app/billing/members', { remove: email }) });
+          tell(user, { what: tr('Added {name}', { name: email }), undo: f.undo === '1' ? null : undoForm('/app/billing/members', { remove: email }) });
           if (user.paid_until > clock()) for (const b of q('SELECT b.id FROM bots b JOIN users x ON x.id = b.user_id WHERE x.email = ? AND b.disconnected_at IS NULL').all(email)) release(b.id);
         }
         return redirect(res, '/app/billing'), true;
@@ -1808,19 +1851,19 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         // First visit: their name comes with it (it used to be guessed from the email).
         if (f.name !== undefined) {
           const name = cleanName(f.name);
-          if (!name) return page(res, 400, picturePage(user, next, { nameError: 'Tell us what to call you.' })), true;
+          if (!name) return page(res, 400, picturePage(user, next, { nameError: tr('Tell us what to call you.') })), true;
           setName(user, name);
         }
         if (f.photo) {
           const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(f.photo));
           const jpg = m && Buffer.from(m[1], 'base64');
-          if (!jpg || jpg.length > 200_000 || jpg[0] !== 0xff || jpg[1] !== 0xd8 || jpg[2] !== 0xff) return page(res, 400, picturePage(user, next, { error: 'That photo couldn\'t be used. Try a JPEG or PNG.' })), true;
+          if (!jpg || jpg.length > 200_000 || jpg[0] !== 0xff || jpg[1] !== 0xd8 || jpg[2] !== 0xff) return page(res, 400, picturePage(user, next, { error: tr("That photo couldn't be used. Try a JPEG or PNG.") })), true;
           q('UPDATE users SET photo = ?, avatar = NULL, photo_at = ? WHERE id = ?').run(jpg, clock(), user.id);
         } else if (ROBOT.has(f.avatar) || isSticker(f.avatar)) q('UPDATE users SET avatar = ?, photo = NULL, photo_at = ? WHERE id = ?').run(f.avatar, clock(), user.id);
-        else if (!hasPicture(user)) return page(res, 400, picturePage(user, next, { error: 'Pick a picture or upload a photo.' })), true;
+        else if (!hasPicture(user)) return page(res, 400, picturePage(user, next, { error: tr('Pick a picture or upload a photo.') })), true;
         // A picked picture can be swapped back; a replaced photo is gone.
         const was = user.avatar || null; // a photo clears avatar
-        tell(user, { what: 'Picture saved', undo: was && was !== f.avatar && f.undo !== '1' ? undoForm('/app/picture', { avatar: was, next }) : null });
+        tell(user, { what: tr('Picture saved'), undo: was && was !== f.avatar && f.undo !== '1' ? undoForm('/app/picture', { avatar: was, next }) : null });
         return redirect(res, next), true;
       }
       // Only the person and friends who said yes to them can see their photo.
@@ -1844,17 +1887,27 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       if (p === '/app/account/name' && req.method === 'POST') {
         const f = await form(req);
         const name = cleanName(f.name), was = user.name;
-        if (!name) return page(res, 400, accountPage(user, { nameError: 'Tell us what to call you.' })), true;
+        if (!name) return page(res, 400, accountPage(user, { nameError: tr('Tell us what to call you.') })), true;
         setName(user, name);
-        tell(user, { what: 'Name saved', undo: f.undo === '1' || was === name ? null : undoForm('/app/account/name', { name: was }) });
+        tell(user, { what: tr('Name saved'), undo: f.undo === '1' || was === name ? null : undoForm('/app/account/name', { name: was }) });
+        return redirect(res, '/app/account'), true;
+      }
+      // The dashboard's language. Also remembered in the browser, so the login page matches after logging out.
+      if (p === '/app/account/lang' && req.method === 'POST') {
+        const f = await form(req);
+        const was = normLang(user.lang), lang = normLang(f.lang);
+        q('UPDATE users SET lang = ? WHERE id = ?').run(lang, user.id);
+        res.setHeader('set-cookie', langCookie(lang));
+        user.lang = lang; tr = T(user);
+        tell(user, { what: tr('Language saved'), undo: f.undo === '1' || lang === was ? null : undoForm('/app/account/lang', { lang: was }) });
         return redirect(res, '/app/account'), true;
       }
       if (p === '/app/account/quiet' && req.method === 'POST') {
         const f = await form(req);
         const start = parseHhmm(f.start), end = parseHhmm(f.end);
-        if (start === null || end === null || !validTz(f.tz)) return page(res, 400, accountPage(user, { quietError: 'Check the times and the time zone.' })), true;
+        if (start === null || end === null || !validTz(f.tz)) return page(res, 400, accountPage(user, { quietError: tr('Check the times and the time zone.') })), true;
         q('UPDATE users SET quiet_on = ?, quiet_start = ?, quiet_end = ?, tz = ? WHERE id = ?').run(f.on === '1' ? 1 : 0, start, end, f.tz, user.id);
-        tell(user, { what: f.on === '1' ? `Quiet ${hhmm(start)} to ${hhmm(end)}` : 'Quiet hours off',
+        tell(user, { what: f.on === '1' ? tr('Quiet {from} to {to}', { from: hhmm(start), to: hhmm(end) }) : tr('Quiet hours off'),
           undo: f.undo === '1' ? null : undoForm('/app/account/quiet', { ...(user.quiet_on ? { on: '1' } : {}), start: hhmm(user.quiet_start ?? 1320), end: hhmm(user.quiet_end ?? 480), tz: user.tz || f.tz }) });
         if (f.on !== '1' || !quietUntil({ ...user, quiet_on: f.on === '1' ? 1 : 0, quiet_start: start, quiet_end: end, tz: f.tz }, clock())) for (const b of liveBots(user)) release(b.id);
         return redirect(res, '/app/account'), true;
@@ -1866,10 +1919,10 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       }
       if (p === '/app/account/delete' && req.method === 'POST') {
         const f = await form(req);
-        if (String(f.confirm || '').trim().toLowerCase() !== user.email) return page(res, 400, accountPage(user, { error: 'Type your email address exactly to confirm.' })), true;
+        if (String(f.confirm || '').trim().toLowerCase() !== user.email) return page(res, 400, accountPage(user, { error: tr('Type your email address exactly to confirm.') })), true;
         deleteAccount(user);
         res.setHeader('set-cookie', sessionCookie('', 0));
-        return page(res, 200, layout('Account deleted', '<section class="card narrow center"><h1>Your account is deleted</h1><p>Your bots are disconnected, contacts removed and message text erased. Copies your friends\' bots already received stay with them.</p><a class="btn wide" href="/">Back to ' + esc(product) + '</a></section>')), true;
+        return page(res, 200, layout(tr('Account deleted'), `<section class="card narrow center"><h1>${tr('Your account is deleted')}</h1><p>${tr("Your bots are disconnected, contacts removed and message text erased. Copies your friends' bots already received stay with them.")}</p><a class="btn wide" href="/">${tr('Back to {product}', { product: esc(product) })}</a></section>`, { tr })), true;
       }
 
       if (p === '/app/invites' && req.method === 'POST') {
@@ -1898,11 +1951,11 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (!inv) throw new HttpError(404, 'That invite was already used.');
         if (f.undo === '1') {
           q('UPDATE invites SET expires_at = ? WHERE code_hash = ?').run(Math.max(Number(f.until) || 0, clock() + 60_000), inv.code_hash);
-          tell(user, { what: 'Invite is back' });
+          tell(user, { what: tr('Invite is back') });
         } else {
           q('UPDATE invites SET expires_at = ? WHERE code_hash = ?').run(clock(), inv.code_hash);
           log(b.id, 'invite_cancelled', {});
-          tell(user, { what: 'Invite cancelled', undo: undoForm('/app/invites/cancel', { bot: b.id, code: plain, until: inv.expires_at }) });
+          tell(user, { what: tr('Invite cancelled'), undo: undoForm('/app/invites/cancel', { bot: b.id, code: plain, until: inv.expires_at }) });
         }
         return redirect(res, '/app'), true;
       }
@@ -1917,18 +1970,18 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         // The name they'll have for you right away; left empty, it becomes their own first name when they say yes.
         const said = String(f.alias ?? '').normalize('NFC').trim();
         const alias = said ? said : inv.alias.startsWith('friend-') || f.alias === undefined ? inv.alias : `friend-${plain.slice(0, 4).toLowerCase()}`;
-        const invalid = said && !/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,31}$/u.test(said) ? 'A name is 1-32 letters or numbers.'
-          : said && q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?)').get(b.id, said) ? `You already have someone called "${said}".` : '';
+        const invalid = said && !/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,31}$/u.test(said) ? tr('A name is 1-32 letters or numbers.')
+          : said && q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?)').get(b.id, said) ? tr('You already have someone called "{name}".', { name: said }) : '';
         if (invalid) return page(res, 400, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket, notes, alias: said, error: invalid })), true;
         q('UPDATE invites SET basket = ?, notes = ?, alias = ?, saved_at = coalesce(saved_at, ?) WHERE code_hash = ?').run(basket, notes, alias, clock(), inv.code_hash);
         // Saved: back to the overview, where the invite now waits under "Invites pending".
-        tell(user, { what: `Invite saved${alias.startsWith('friend-') ? '' : ` for ${alias}`} · ${basket || 'not sorted yet'}`, undo: f.undo === '1' ? null : undoForm('/app/invites/basket', { bot: b.id, code: plain, basket: inv.basket ?? '', notes: inv.notes ?? '', alias: inv.alias.startsWith('friend-') ? '' : inv.alias }) });
+        tell(user, { what: alias.startsWith('friend-') ? tr('Invite saved · {basket}', { basket: basket || tr('not sorted yet') }) : tr('Invite saved for {name} · {basket}', { name: alias, basket: basket || tr('not sorted yet') }), undo: f.undo === '1' ? null : undoForm('/app/invites/basket', { bot: b.id, code: plain, basket: inv.basket ?? '', notes: inv.notes ?? '', alias: inv.alias.startsWith('friend-') ? '' : inv.alias }) });
         return redirect(res, '/app'), true;
       }
 
       throw new HttpError(404, 'Page not found');
     } catch (e) {
-      if (e instanceof HttpError) { page(res, e.status, layout('Error', `<section class="card narrow"><h1>${e.status === 404 ? 'Not found' : 'Something went wrong'}</h1><p>${esc(e.message)}</p><a class="btn" href="/app">Back</a></section>`)); return true; }
+      if (e instanceof HttpError) { page(res, e.status, layout(tr('Error'), `<section class="card narrow"><h1>${e.status === 404 ? tr('Not found') : tr('Something went wrong')}</h1><p>${esc(tr.msg(e.message))}</p><a class="btn" href="/app">${tr('Back')}</a></section>`, { tr })); return true; }
       throw e;
     }
   };
@@ -2196,6 +2249,26 @@ function peopleScript() {
   });
 }
 const PEOPLE_JS = `(${peopleScript.toString()})();`;
+// Czech pages get the same script with its sentences swapped. Each English piece must still be in the script
+// (a changed one throws here), and its Czech is a tr() key like any other: {name} and {basket} become the
+// script's own values.
+const peopleJsFor = (tr) => {
+  const vars = { name: '${name}', basket: '${g.name}', who: '${esc(el.dataset.name)}' };
+  const tpl = (s) => `\`${s}\``;
+  return [
+    ['`${name} is not sorted yet, so your bot asks you first.`', tpl(tr('{name} is not sorted yet, so your bot asks you first.', vars))],
+    ['`${name} is in ${g.name}. Your bot asks you first.`', tpl(tr('{name} is in {basket}. Your bot asks you first.', vars))],
+    ['`${name} is in ${g.name}.`', tpl(tr('{name} is in {basket}.', vars))],
+    ['<span class="mv__mode">asks you first</span>', `<span class="mv__mode">${tr('asks you first')}</span>`],
+    ['Move ${esc(el.dataset.name)} to</div>', `${tr('Move {who} to', vars)}</div>`],
+    ["item('', 'not sorted yet', true)", `item('', ${jsq(tr('not sorted yet'))}, true)`],
+    ["Open ${esc(el.dataset.name)}'s page</a>", `${tr("Open {who}'s page", vars)}</a>`],
+    ['`${g.name}: your bot asks you first.`', tpl(tr('{basket}: your bot asks you first.', vars))],
+    ["`${g.name}: your bot handles it and asks you when it isn't sure.`", tpl(tr("{basket}: your bot handles it and asks you when it isn't sure.", vars))],
+  ].reduce((js, [from, to]) => { if (!js.includes(from)) throw new Error(`people script changed: ${from}`); return js.split(from).join(to); }, PEOPLE_JS);
+};
+const peopleJsMade = new Map();
+const peopleJs = (tr) => (tr.lang === 'en' ? PEOPLE_JS : peopleJsMade.get(tr.lang) ?? peopleJsMade.set(tr.lang, peopleJsFor(tr)).get(tr.lang));
 // Sticker profile pictures: die-cut PNGs listed in public/stickers/index.json, as "key" strings or {key, name}
 // objects (or {stickers: [...]}). Read again whenever the list or the folder changes, so a new set shows up
 // without a restart. Without a list, or with an empty one, the twelve robots are the choice.
@@ -2224,7 +2297,7 @@ const ART = new Set(['home', 'invite', 'setup', 'asleep'].filter((n) => existsSy
 // Live pages refresh every 30 s, but never while you're typing, have a menu open or are answering a confirm.
 const REFRESH_JS = `setInterval(()=>{if(document.visibilityState!=='visible'||document.querySelector('details[open],.cm[data-state=ask],.acc[data-open=true]')||/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||''))return;location.reload();},30000);`;
 // The behaviour of the Arc components above, in plain JS. Every page loads it once.
-const UI_JS = `(function(){const $$=(s,r=document)=>[...r.querySelectorAll(s)];document.documentElement.classList.add('js');
+const uiJsFor = (tr) => `(function(){const $$=(s,r=document)=>[...r.querySelectorAll(s)];document.documentElement.classList.add('js');
 /* Button loading (Arc): on submit the label gives way to a spinner, focus stays, and a second press is swallowed. */
 $$('form').forEach(f=>{const b=f.querySelector('.btn[data-busy]');if(!b)return;f.addEventListener('submit',e=>{if(b.getAttribute('aria-busy')==='true'){e.preventDefault();return;}b.setAttribute('aria-busy','true');b.setAttribute('aria-disabled','true');});});
 addEventListener('pageshow',()=>$$('.btn[data-busy][aria-busy]').forEach(b=>{b.removeAttribute('aria-busy');b.removeAttribute('aria-disabled');}));
@@ -2248,7 +2321,7 @@ $$('[data-reveal]').forEach(b=>b.addEventListener('click',e=>{e.preventDefault()
 $$('[data-unreveal]').forEach(b=>b.addEventListener('click',()=>reset(b.closest('details'))));
 /* Notices: dismissed by hand; pages that swap their content in place bring new ones along. */
 /* Copy button: icon and label swap to Copied, the width never changes. */
-$$('[data-copy]').forEach(b=>b.addEventListener('click',async()=>{const t=document.querySelector(b.dataset.copy).innerText,l=b.querySelector('.copybtn__label');try{await navigator.clipboard.writeText(t);b.dataset.state='copied';l.textContent='Copied';}catch(e){l.textContent='Select it';}clearTimeout(b.t);b.t=setTimeout(()=>{delete b.dataset.state;l.textContent='Copy';},1800);}));
+$$('[data-copy]').forEach(b=>b.addEventListener('click',async()=>{const t=document.querySelector(b.dataset.copy).innerText,l=b.querySelector('.copybtn__label');try{await navigator.clipboard.writeText(t);b.dataset.state='copied';l.textContent=${jsq(tr('Copied'))};}catch(e){l.textContent=${jsq(tr('Select it'))};}clearTimeout(b.t);b.t=setTimeout(()=>{delete b.dataset.state;l.textContent=${jsq(tr('Copy'))};},1800);}));
 /* Confirm morph: the pill springs between its faces; Escape, Cancel, a press outside or 6 s of silence put it back. */
 $$('.cm').forEach(f=>{const s=f.querySelector('.cm__surface'),face={},trig=f.querySelector('.cm__trigger'),yes=f.querySelector('.cm__confirm');$$('.cm__face',f).forEach(x=>face[x.dataset.face]=x);let at=0,timer;
 const show=k=>{const from=s.getBoundingClientRect().width;for(const n in face)face[n].hidden=n!==k;f.dataset.state=k;s.style.width='';const to=s.getBoundingClientRect().width;s.style.width=from+'px';s.offsetWidth;s.style.width=to+'px';};
@@ -2285,6 +2358,9 @@ sl.forEach((x,i)=>{x.addEventListener('input',()=>{const v=x.value.replace(/[^0-
 x.addEventListener('keydown',e=>{if(e.key==='Backspace'&&!x.value&&i>0){sl[i-1].value='';sl[i-1].focus();sync();e.preventDefault();}else if(e.key==='ArrowLeft'&&i>0)sl[i-1].focus();else if(e.key==='ArrowRight'&&i<5)sl[i+1].focus();});
 x.addEventListener('paste',e=>{const v=(e.clipboardData.getData('text')||'').replace(/[^0-9]/g,'');if(v){e.preventDefault();fill(i,v);}});});});
 })();`;
+
+const uiJsMade = new Map();
+const uiJs = (tr) => uiJsMade.get(tr.lang) ?? uiJsMade.set(tr.lang, uiJsFor(tr)).get(tr.lang);
 
 // With the landing site on this server, the dashboard uses its faces (Mona for text, Hubot for page titles).
 const FONTS = `@font-face{font-family:"Hubot";src:url(/fonts/hubot-display.woff2) format("woff2");font-weight:400 640;font-display:swap}
@@ -2826,4 +2902,10 @@ a.stk:hover .stk__name,a.stk:focus-visible .stk__name,.stk.is-named .stk__name{c
 @media (hover:none){a.stk:hover .stk__img{--lift:0px;--scale:1;filter:var(--stick-shadow)}a.stk:hover .stk__name{clip-path:inset(0 100% 0 0)}.stk.is-named .stk__name{clip-path:inset(-10px -10px -10px -10px)}}
 @media (prefers-reduced-motion:reduce){.stk__img{--rx:0deg!important;--ry:0deg!important}.settle,.rule.is-new,.ask__stamp{animation:none}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:1ms!important;animation-iteration-count:1!important;transition-duration:1ms!important}.btn:active{transform:none!important}.btn__spin{transform:none}.avatar img[data-loading]{filter:none}.pfp__face.go>*,.pfp__face.go .e{animation:none}}
+/* Signed out: the other language, at the top right. */
+body.out .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.langswitch{margin-right:-10px;padding:6px 10px;border-radius:999px;color:var(--text-secondary);font-size:var(--text-sm);font-weight:500;text-decoration:none;transition:color var(--duration-fast) var(--ease-standard)}
+@media (hover:hover) and (pointer:fine){.langswitch:hover{color:var(--foreground);background:color-mix(in oklab,var(--foreground) 5%,transparent)}}
+/* Czech on a phone: a little less room around each tab, so all six sections fit on a 390px screen. */
+@media (max-width:640px){.tabs__item:lang(cs){padding:0 8px}}
 `;

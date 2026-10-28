@@ -5,6 +5,10 @@
       "label": "28 October 2026",
       "items": [
         {
+          "en": "The dashboard speaks Czech. Switch in Account.",
+          "cs": "Dashboard umí česky. Přepnete v Účtu."
+        },
+        {
           "en": "Pick your own name when you sign up. Change it any time in Account.",
           "cs": "Při registraci si vyberete vlastní jméno. Změnit ho můžete kdykoli v Účtu."
         },

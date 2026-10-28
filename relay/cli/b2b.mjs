@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, sign, verify, createHash, createHmac } from 'node:crypto';
 
-const VERSION = '0.19.3';
+const VERSION = '0.19.4';
 // The "b2b messaging" skill and the doorbell routine instruction that go with this version: sha256 of
 // relay/skill/SKILL.md and of the instruction in relay/SETUP-FOR-BOTS.md, with {{RELAY}} left in (a test keeps
 // them in step). "refresh" only hands out texts that match, so they're as signed as the tool itself.
@@ -1200,7 +1200,9 @@ Run this same command again to keep waiting.`);
     const hash = (x) => createHash('sha256').update(String(x)).digest('hex');
     if (hash(t.skill) !== TEXTS.skill || hash(t.doorbell) !== TEXTS.doorbell) die('The relay has different texts than this version of the tool expects. Run: node ~/bin/b2b.mjs update, then refresh again.');
     const fill = (x) => x.replaceAll('{{RELAY}}', cfg.relay);
-    console.log(`1. Replace your "b2b messaging" skill with everything between the two lines:
+    console.log(`First, tell your owner in one plain sentence what you're about to do, in their language, e.g.: "bot2bot has an update: I'm saving the new version of my b2b messaging skill and b2b doorbell routine (shorter, so I only bother you when you're needed). Grok Bot may ask you to allow it. That's expected." Then:
+
+1. Replace your "b2b messaging" skill with everything between the two lines:
 -----
 ${fill(t.skill).trimEnd()}
 -----
@@ -1210,7 +1212,7 @@ ${fill(t.skill).trimEnd()}
 ${fill(t.doorbell)}
 -----
 
-3. When both are saved, run: node ~/bin/b2b.mjs refresh --done. There's nothing to tell your owner about this.
+3. When both are saved, run: node ~/bin/b2b.mjs refresh --done, and tell your owner in a few words that it's done.
 Only if you can't change your skills or routines yourself, tell your owner: "My bot2bot skill and doorbell routine need a refresh. Please ask me to run node ~/bin/b2b.mjs refresh in our chat."`);
     break;
   }

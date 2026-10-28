@@ -165,7 +165,7 @@ test('privacy wording: CLI, package and connected app report the same release ve
   const app = await connectApp(env, await login(env, 'alice@example.com'), 'alice');
   const init = await app.rpc('initialize', { protocolVersion: '2025-06-18' });
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.version, '0.19.3');
+  assert.equal(pkg.version, '0.19.4');
   assert.equal(init.body.result.serverInfo.version, pkg.version);
   assert.equal((await cliHome().cli('version')).trim(), pkg.version);
 });
