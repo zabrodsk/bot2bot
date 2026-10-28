@@ -153,7 +153,7 @@ export function createApp(ctx) {
     const planName = hosted ? { paid: 'Paid', covered: 'Covered', infinite: 'Infinite' }[planState_] || 'Free' : '';
     const face = avatar(user.name || user.email, 'md', photoUrl(user.id, user.photo_at, user.avatar));
     const me = `<details class="more umenu"><summary class="umenu__trigger" aria-label="Your account">${face}</summary>
-<div class="umenu__panel"><div class="umenu__head">${face}<div class="umenu__id"><span class="umenu__row"><span class="umenu__fullname">${esc(user.name)}</span>${planName ? `<span class="umenu__plan${planState_ === 'infinite' ? ' umenu__plan--infinite' : ''}">${planName}</span>` : ''}</span><span class="umenu__email">${esc(user.email)}</span></div></div>
+<div class="umenu__panel"><div class="umenu__head">${face}<div class="umenu__id"><span class="umenu__row"><span class="umenu__fullname">${esc(user.name)}</span>${planName ? `<span class="umenu__plan${planState_ === 'infinite' ? ' umenu__plan--infinite' : ''}">${planState_ === 'infinite' ? '<span class="inf" aria-hidden="true">∞</span>' : ''}${planName}</span>` : ''}</span><span class="umenu__email">${esc(user.email)}</span></div></div>
 <div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}Account</a>${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}Plan</a>` : ''}
 <div class="umenu__sep"></div><form method="post" action="/logout"><button class="umenu__item">${ICON.logout}Log out</button></form></div></details>`;
     const back = bar.back ? `<a class="crumb" href="${esc(bar.back)}">${ICON.back}${esc(bar.backLabel || 'Overview')}</a>` : '';
@@ -380,7 +380,7 @@ Give me the link it prints so I can approve you, then run the same join command 
       : c.state === 'paid' ? `Paid until ${dateStr(c.until)}.`
       : c.state === 'covered' ? `Covered by ${esc(c.payer)} until ${dateStr(c.until)}.`
       : `Free plan: ${c.used} of ${c.limit} messages sent ${B.periodWord}. It starts again ${B.freePeriod === 'day' ? 'at midnight UTC' : `on ${dateStr(c.resets)}`}. Receiving is never limited.`;
-    return layout('Plan', `<section class="card"><h2>Your plan${c.state === 'infinite' ? ' <span class="umenu__plan umenu__plan--infinite">Infinite</span>' : ''}</h2>${paid ? '<p class="okmsg" role="status">Thanks! Payment received.</p>' : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
+    return layout('Plan', `<section class="card"><h2>Your plan${c.state === 'infinite' ? ' <span class="umenu__plan umenu__plan--infinite"><span class="inf" aria-hidden="true">∞</span>Infinite</span>' : ''}</h2>${paid ? '<p class="okmsg" role="status">Thanks! Payment received.</p>' : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
 ${c.limited ? `<div class="card__block">${usageMeter(c)}</div>` : ''}<p>${status}</p>
 ${c.state === 'covered' || c.state === 'infinite' ? '' : canPay ? `<form method="post" action="/app/billing/checkout"><button class="btn">${c.state === 'paid' ? 'Add another year' : `Pay ${esc(B.priceLabel)}`}</button></form><p class="muted small">${c.state === 'paid' ? '' : 'No monthly limit for you and your household. '}One payment a year. No subscription, nothing renews by itself.</p>`
   : '<p class="muted small">The paid plan is coming soon.</p>'}</section>
@@ -775,12 +775,10 @@ ${error ? `<p class="error center" role="alert">${esc(error)}</p>` : ''}${action
   }
 
   // The inviter's side: a message to send that puts the setup bot first, then the link.
-  function invitedPage(user, b, link, { code = '', basket = null, notes = null, saved = false } = {}) {
+  function invitedPage(user, b, link, { code = '', basket = null, notes = null } = {}) {
     const names = code ? basketsOf(b.id) : [];
-    // After Save, say what happened right where they clicked, and offer the way back.
-    const savedLine = saved ? `<p class="okmsg" role="status">${ICON.check}<span>Saved. When they join, they go in ${basket ? `<b>${esc(basket)}</b>` : '<b>not sorted yet</b>'}${notes ? ', and your bot gets your instructions' : ''}. Now send them the message above.</span></p>` : '';
-    const pick = names.length ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">${basketPick(names, basket)}${notesField('them', notes)}${savedLine}<div class="actions">${saved ? '<a class="btn small" href="/app">Done</a><button class="btn small ghost">Save again</button>' : '<button class="btn small">Save</button>'}</div></form>` : '';
-    return layout('Invite a friend', `${art('invite', 'small')}<section class="card"><h2>Send this to your friend</h2>
+    const pick = names.length ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">${basketPick(names, basket)}${notesField('them', notes)}<div><button class="btn small">Save</button></div></form>` : '';
+    return layout('Invite a friend', `<section class="card"><h2>Send this to your friend</h2>
 <p class="muted">It asks them to add the setup bot to their Grok Bot first, then open your invite.</p>
 ${codeBlock('msg', 'Message for your friend', inviteMessage(link))}${pick}
 <details class="diy"><summary>Already on bot2bot? Send just the link</summary>${codeBlock('link', 'Invite link', link)}</details></section>
@@ -1832,7 +1830,9 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const basket = pickBasket(b.id, f.basket || null);
         const notes = f.notes === undefined ? inv.notes : String(f.notes).normalize('NFC').trim().slice(0, 280) || null;
         q('UPDATE invites SET basket = ?, notes = ? WHERE code_hash = ?').run(basket, notes, inv.code_hash);
-        return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket, notes, saved: true })), true;
+        // Saved: back to the overview, where the invite now waits under "Invites sent".
+        tell(user, { what: `Invite saved · ${basket || 'not sorted yet'}`, undo: f.undo === '1' ? null : undoForm('/app/invites/basket', { bot: b.id, code: plain, basket: inv.basket ?? '', notes: inv.notes ?? '' }) });
+        return redirect(res, '/app'), true;
       }
 
       throw new HttpError(404, 'Page not found');
@@ -2341,9 +2341,12 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .umenu__panel{position:absolute;right:0;top:calc(100% + 8px);z-index:60;width:15.5rem;padding:4px;border:.5px solid var(--border);border-radius:10px;background:var(--surface-raised);box-shadow:var(--shadow-floating);line-height:1.3;transform-origin:top right;animation:menu-in var(--duration-fast) var(--ease-standard)}
 .umenu__head{display:flex;align-items:center;gap:10px;padding:8px}.umenu__id{display:grid;gap:2px;min-width:0;flex:1}
 .umenu__row{display:flex;align-items:center;gap:6px;min-width:0}.umenu__fullname{min-width:0;overflow:hidden;font-size:13px;font-weight:500;text-overflow:ellipsis;white-space:nowrap}
-.umenu__plan.umenu__plan--infinite{position:relative;isolation:isolate;border-color:transparent;color:#fff;text-shadow:0 1px 1px rgb(0 0 0/.35);background:linear-gradient(90deg,#ff3b30,#ff9500,#ffcc00,#34c759,#00c7be,#007aff,#5856d6,#af52de,#ff3b30) 0 0/64px 100% repeat-x;animation:infinite-pill 3s linear infinite}
-.umenu__plan.umenu__plan--infinite::before{content:"";position:absolute;inset:-1px;z-index:-1;border-radius:inherit;background:inherit;animation:inherit;filter:blur(7px) saturate(1.4);opacity:.85}
-@keyframes infinite-pill{to{background-position:64px 0}}@media (prefers-reduced-motion:reduce){.umenu__plan.umenu__plan--infinite,.umenu__plan.umenu__plan--infinite::before{animation:none}}
+.umenu__plan.umenu__plan--infinite{position:relative;isolation:isolate;overflow:visible;display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 8px 0 7px;border:0;border-radius:999px;color:#fff;font-weight:500;letter-spacing:.01em;text-shadow:0 1px 1px rgb(0 0 0/.3);background:linear-gradient(90deg,#ff3b30,#ff9500,#ffcc00,#34c759,#00c7be,#007aff,#5856d6,#af52de,#ff2d92,#ff3b30) 0 0/96px 100% repeat-x;box-shadow:inset 0 0 0 .5px rgb(255 255 255/.35);animation:infinite-pill 4s linear infinite}
+.umenu__plan.umenu__plan--infinite::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;background:inherit;animation:inherit;filter:blur(8px) saturate(1.5);opacity:.75}
+.umenu__plan.umenu__plan--infinite::after{content:"";position:absolute;inset:0;border-radius:inherit;background:linear-gradient(110deg,transparent 30%,rgb(255 255 255/.55) 50%,transparent 70%) -150% 0/250% 100% no-repeat;animation:infinite-shine 3.2s ease-in-out infinite;pointer-events:none}
+.umenu__plan--infinite .inf{font-size:13px;line-height:1;margin-top:-1px}
+@keyframes infinite-pill{to{background-position:96px 0}}@keyframes infinite-shine{0%,35%{background-position:-150% 0}75%,100%{background-position:250% 0}}
+@media (prefers-reduced-motion:reduce){.umenu__plan.umenu__plan--infinite,.umenu__plan.umenu__plan--infinite::before,.umenu__plan.umenu__plan--infinite::after{animation:none}}
 h2 .umenu__plan{display:inline-block;vertical-align:2px;margin-left:6px}
 .umenu__plan{flex:none;height:17px;padding:0 5px;border:.5px solid color-mix(in oklab,var(--foreground) 9%,transparent);border-radius:4px;background:color-mix(in oklab,var(--foreground) 4%,transparent);color:var(--text-secondary);font-size:11px;font-weight:500;line-height:16px}
 .umenu__email{overflow:hidden;font-size:12px;color:var(--text-muted);text-overflow:ellipsis;white-space:nowrap}

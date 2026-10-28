@@ -674,10 +674,12 @@ test('inviting picks the basket: friends by default, changeable, and a bot can n
   assert.match(made.text, /<label>Their basket<select name="basket"><option>family<\/option><option selected>friends<\/option>/);
   const code = made.text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   const picked = await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'family' } });
-  assert.match(picked.text, /class="okmsg" role="status">[^]*Saved\. When they join, they go in <b>family<\/b>\. Now send them the message above\./);
-  assert.match(picked.text, /href="\/app">Done<\/a>/);
-  assert.match(picked.text, /Already on bot2bot\? Send just the link/);
-  assert.match(picked.text, /<option selected>family<\/option>/);
+  assert.equal(picked.location, '/app');
+  const after = (await ann.b('/app')).text;
+  assert.match(after, /Invite saved · family/);
+  assert.match(after, /Waiting for them · family/);
+  assert.match((await ann.b(`/app/invites/${code}`)).text, /Already on bot2bot\? Send just the link/);
+  assert.match((await ann.b(`/app/invites/${code}`)).text, /<option selected>family<\/option>/);
   const page = await ben.b(`/i/${code}`);
   assert.match(page.text, /<label>Their basket<select name="basket"><option>family<\/option><option selected>friends<\/option>/);
   const done = await ben.b(`/i/${code}`, { method: 'POST', form: { bot: ben.botId, alias: 'Ann', basket: 'work' } });
@@ -705,8 +707,8 @@ test('inviting asks right away what the bot should know about the new friend, on
   assert.match(made.text, /<label>Anything your bot should know about them\?<textarea name="notes" maxlength="280"/);
   const code = made.text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   const saved = await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'friends', notes: '  My neighbour. Garden and pickups are fine.  ' } });
-  assert.match(saved.text, /they go in <b>friends<\/b>, and your bot gets your instructions/);
-  assert.match(saved.text, />My neighbour\. Garden and pickups are fine\.<\/textarea>/);
+  assert.equal(saved.location, '/app');
+  assert.match((await ann.b(`/app/invites/${code}`)).text, />My neighbour\. Garden and pickups are fine\.<\/textarea>/);
   // Changing only the basket keeps the notes.
   await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'family', notes: 'My neighbour. Garden and pickups are fine.' } });
   const page = await ben.b(`/i/${code}`);

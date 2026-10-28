@@ -190,7 +190,7 @@ test('hosted: the Infinite plan has no limit, shows a rainbow Infinite pill, and
   assert.equal((await admin({ email: 'Dad@example.com' })).status, 200);
   for (const t of ['one', 'two', 'three']) assert.match(await ben.cli('send', 'Mia9', t), /Sent msg_/);
   const home = (await ben.b('/app')).text;
-  assert.match(home, /umenu__plan umenu__plan--infinite">Infinite</);
+  assert.match(home, /umenu__plan umenu__plan--infinite"><span class="inf" aria-hidden="true">∞<\/span>Infinite</);
   assert.doesNotMatch(home, /free messages left/);
   const plan = (await ben.b('/app/billing')).text;
   assert.match(plan, /No limit, for good/);
