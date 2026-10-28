@@ -140,3 +140,25 @@ test('audit 13: login emails are limited per client', async (t0) => {
   for (let i = 0; i < 10; i++) assert.equal((await b('/login', { method: 'POST', form: { email: `p${i}@example.com` } })).status, 200);
   assert.equal((await b('/login', { method: 'POST', form: { email: 'p10@example.com' } })).status, 429);
 });
+
+test('a login code sent twice from the same browser logs in again instead of saying it expired', async (t0) => {
+  const env = await setup(t0);
+  const b = browser(env.url);
+  await b('/login', { method: 'POST', form: { email: 'uncle@example.com' } });
+  const code = env.mail.at(-1).text.match(/code is (\d{6})/)[1];
+  // A double tap: both submits log in.
+  assert.equal((await b('/login/verify', { method: 'POST', form: { email: 'uncle@example.com', code } })).status, 303);
+  assert.equal((await b('/login/verify', { method: 'POST', form: { email: 'uncle@example.com', code } })).status, 303);
+  // Not from another browser, and not later.
+  const other = browser(env.url);
+  assert.match((await other('/login/verify', { method: 'POST', form: { email: 'uncle@example.com', code } })).text, /That code expired/);
+  env.advance(3 * 60_000);
+  assert.match((await b('/login/verify', { method: 'POST', form: { email: 'uncle@example.com', code } })).text, /That code expired/);
+
+  // Five wrong tries say so.
+  await b('/login', { method: 'POST', form: { email: 'aunt@example.com' } });
+  const right = env.mail.at(-1).text.match(/code is (\d{6})/)[1];
+  const wrong = right === '111111' ? '222222' : '111111';
+  for (let i = 0; i < 5; i++) assert.match((await b('/login/verify', { method: 'POST', form: { email: 'aunt@example.com', code: wrong } })).text, /Wrong code/);
+  assert.match((await b('/login/verify', { method: 'POST', form: { email: 'aunt@example.com', code: right } })).text, /Too many wrong tries/);
+});

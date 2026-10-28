@@ -401,7 +401,7 @@ ${devCode ? `<p class="dev">Dev mode: your code is <b>${esc(devCode)}</b></p>` :
 <form method="post" action="/login/verify" class="stack"><input type="hidden" name="email" value="${esc(email)}"><input type="hidden" name="next" value="${esc(next)}"><input type="hidden" name="tz" id="tz">
 <div class="otp" role="group" aria-label="6-digit code"><input type="hidden" name="code">${[0, 1, 2, 3, 4, 5].map((i) => `<input class="otp__slot" inputmode="numeric" aria-label="Digit ${i + 1} of 6"${i ? ' autocomplete="off"' : ' autocomplete="one-time-code" autofocus'}>`).join('')}</div>
 <noscript><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required aria-label="6-digit code"></noscript>
-<button class="btn">Log in</button></form><script>try{document.getElementById('tz').value=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){}</script>`
+<button class="btn" data-busy><span class="btn__label">Log in</span><span class="btn__spin" aria-hidden="true"></span></button></form><script>try{document.getElementById('tz').value=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){}</script>`
     : `<p>No password. We email you a code.</p><form method="post" action="/login" class="stack"><input type="hidden" name="next" value="${esc(next)}">
 <label>Email<input name="email" type="email" autocomplete="email" required autofocus value="${esc(email)}"></label><button class="btn">Email me a code</button></form>${site ? '<p class="muted small">By signing up you agree to the <a class="link" href="/terms/">terms</a>. Here’s how we handle <a class="link" href="/privacy/">your data</a>.</p>' : ''}`}
 </section>`);
@@ -1215,9 +1215,15 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       if (p === '/login/verify' && req.method === 'POST') {
         const f = await form(req);
         const email = String(f.email || '').trim().toLowerCase();
-        const row = q('SELECT * FROM login_codes WHERE email = ? AND used_at IS NULL AND expires_at > ? ORDER BY created_at DESC').get(email, clock());
-        if (!row || row.attempts >= 5) return page(res, 400, loginPage({ email, error: 'That code expired. Ask for a new one.', next: f.next })), true;
-        if (row.code_hash !== sha(String(f.code || '').trim())) {
+        const row = q('SELECT * FROM login_codes WHERE email = ? AND expires_at > ? ORDER BY created_at DESC').get(email, clock());
+        const right = !!row && row.code_hash === sha(String(f.code || '').trim());
+        // The same code sent twice from the same browser (a double tap, or autofill submitting as you tap) logs in
+        // again instead of saying it expired: the first one already did.
+        const nonce = cookies(req).b2b_login;
+        if (row?.used_at && right && clock() - row.used_at < 2 * 60_000 && row.browser_hash && nonce && sha(nonce) === row.browser_hash) return finishLogin(res, email, f.next, f.tz), true;
+        if (!row || row.used_at) return page(res, 400, loginPage({ email, error: 'That code expired. Ask for a new one.', next: f.next })), true;
+        if (row.attempts >= 5) return page(res, 400, loginPage({ email, error: 'Too many wrong tries. Ask for a new code.', next: f.next })), true;
+        if (!right) {
           q('UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?').run(row.id);
           return page(res, 400, loginPage({ email, sent: true, error: 'Wrong code. Try again.', next: f.next })), true;
         }
@@ -2139,7 +2145,7 @@ bs.forEach(b=>b.addEventListener('click',()=>{bs.forEach(x=>x.setAttribute('aria
 put(on());requestAnimationFrame(()=>g.classList.add('ready'));addEventListener('resize',()=>put(on()));});
 /* One-time code: six slots fill one hidden field; typing moves on, Backspace moves back, a paste fills them all. */
 $$('.otp').forEach(g=>{const hid=g.querySelector('input[type=hidden]'),sl=$$('.otp__slot',g);
-const sync=()=>{hid.value=sl.map(x=>x.value).join('');sl.forEach(x=>x.dataset.filled=String(!!x.value));if(hid.value.length===6)g.closest('form').requestSubmit();};
+const sync=()=>{hid.value=sl.map(x=>x.value).join('');sl.forEach(x=>x.dataset.filled=String(!!x.value));if(hid.value.length===6&&!g.dataset.sent){g.dataset.sent='1';g.closest('form').requestSubmit();}};
 const fill=(i,v)=>{v.split('').slice(0,6-i).forEach((d,j)=>{sl[i+j].value=d;});sl[Math.min(5,i+v.length)].focus();sync();};
 sl.forEach((x,i)=>{x.addEventListener('input',()=>{const v=x.value.replace(/[^0-9]/g,'');if(v.length>1)return fill(i,v);x.value=v;if(v&&i<5)sl[i+1].focus();sync();});
 x.addEventListener('keydown',e=>{if(e.key==='Backspace'&&!x.value&&i>0){sl[i-1].value='';sl[i-1].focus();sync();e.preventDefault();}else if(e.key==='ArrowLeft'&&i>0)sl[i-1].focus();else if(e.key==='ArrowRight'&&i<5)sl[i+1].focus();});
