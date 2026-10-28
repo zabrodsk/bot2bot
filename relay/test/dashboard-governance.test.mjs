@@ -509,8 +509,8 @@ test('review: all thirty shipped stickers serve exact PNG bytes; font licence an
   assert.match(readFileSync(join(root, 'public/hand/OFL.txt'), 'utf8'), /Caveat Project Authors[^]*SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(readFileSync(join(root, 'Dockerfile'), 'utf8'), /COPY public \.\/public/);
   assert.match(readFileSync(join(root, '../Dockerfile'), 'utf8'), /COPY relay\/public \.\/public/);
-  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.19.6');
-  assert.equal((await cliHome().cli('version')).trim(), '0.19.6');
+  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.19.7');
+  assert.equal((await cliHome().cli('version')).trim(), '0.19.7');
 });
 
 function privateMcp(t, who) {

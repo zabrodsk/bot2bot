@@ -798,6 +798,31 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
       return { ok: true, encryption: 'on' };
     }),
 
+    // The owner's analytics, for one "bot2bot" page in the bot's own app (Grok Bot pages): counts and charts only,
+    // never message text. How the page should look is said here, so changing it needs no new tool.
+    'GET /v1/analytics': ({ me }) => {
+      const user = me.user_id ? q('SELECT * FROM users WHERE id = ?').get(me.user_id) : null;
+      const ids = (user ? q('SELECT id FROM bots WHERE user_id = ? AND removed_at IS NULL').all(user.id) : [me]).map((b) => b.id);
+      const ph = ids.map(() => '?').join(','), now = clock(), DAY = 86_400_000, mine = new Set(ids);
+      const msgs = q(`SELECT from_bot, to_bot, created_at, delivered_at FROM messages WHERE (from_bot IN (${ph}) OR to_bot IN (${ph})) AND kind != 'probe' AND created_at >= ?`).all(...ids, ...ids, now - 30 * DAY);
+      const sent = msgs.filter((m) => mine.has(m.from_bot)), got = msgs.filter((m) => !mine.has(m.from_bot));
+      const waits = sent.filter((m) => m.delivered_at).map((m) => m.delivered_at - m.created_at).sort((a, b) => a - b);
+      const nameOf = new Map(q(`SELECT peer_bot, alias FROM contacts WHERE owner_bot IN (${ph})`).all(...ids).map((c) => [c.peer_bot, c.alias]));
+      const counts = {};
+      for (const m of msgs) { const name = nameOf.get(mine.has(m.from_bot) ? m.to_bot : m.from_bot); if (name) counts[name] = (counts[name] || 0) + 1; }
+      return {
+        page: 'Keep ONE page named "bot2bot" in your Library (make it once; always update that same page, never a new one). Analytics only: four numbers at the top (sent, received, friends, typical delivery time), a bar chart of messages per day for the last 14 days with sent and received, and the people messaged most as horizontal bars. Clean and calm, no other sections, no commentary, no message text. Only tell your owner the page is updated if they asked for it.',
+        last_30_days: {
+          sent: sent.length, received: got.length,
+          friends: q(`SELECT count(*) AS n FROM contacts WHERE owner_bot IN (${ph}) AND approved_at IS NOT NULL`).get(...ids).n,
+          typical_delivery_seconds: waits.length ? Math.round(waits[Math.floor(waits.length / 2)] / 1000) : null,
+          per_day: Array.from({ length: 14 }, (_, i) => { const d = new Date(now - (13 - i) * DAY); d.setUTCHours(0, 0, 0, 0); const s = d.getTime(); const inDay = msgs.filter((m) => m.created_at >= s && m.created_at < s + DAY);
+            return { day: d.toISOString().slice(0, 10), sent: inDay.filter((m) => mine.has(m.from_bot)).length, received: inDay.filter((m) => !mine.has(m.from_bot)).length }; }),
+          most_messaged: Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, n]) => ({ name, messages: n })),
+        },
+        web: `${publicUrl}/app/activity`,
+      };
+    },
     'GET /v1/me': ({ me }) => ({
       handle: me.handle, display_name: me.display_name,
       doorbell: { configured: !!me.webhook_url, verified: !!me.doorbell_verified_at, verified_at: iso(me.doorbell_verified_at), last_ring_at: iso(me.last_ring_at), last_ring_status: me.last_ring_status },

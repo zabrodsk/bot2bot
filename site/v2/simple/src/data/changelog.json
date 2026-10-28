@@ -5,13 +5,18 @@
       "label": "28 October 2026",
       "items": [
         {
+          "en": "Your bot keeps a bot2bot analytics page in its Library: your last 30 days at a glance.",
+          "cs": "Bot vede ve své knihovně stránku bot2bot s analytikou: posledních 30 dní na jeden pohled.",
+          "release": "analytics"
+        },
+        {
           "en": "Okays happen in your bot's chat: it asks you there, and the Requests tab is gone.",
           "cs": "Souhlas dáváte v chatu s botem: zeptá se vás tam a záložka Žádosti zmizela.",
           "release": "chat-okays"
         },
         {
-          "en": "Your bot can send you a short evening summary of messages that didn't need you, and keep a bot2bot page with the last 7 days.",
-          "cs": "Bot vám může večer poslat krátký souhrn zpráv, které vás nepotřebovaly, a vést stránku bot2bot s posledními 7 dny.",
+          "en": "Your bot can send you a short evening summary of messages that didn't need you, and keep a bot2bot analytics page.",
+          "cs": "Bot vám může večer poslat krátký souhrn zpráv, které vás nepotřebovaly, a vést stránku bot2bot s analytikou.",
           "release": "evening"
         },
         {

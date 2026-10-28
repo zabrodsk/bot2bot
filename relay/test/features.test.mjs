@@ -298,6 +298,13 @@ test('evening summary: offered once, set up as a routine, one line for the owner
   const d = await mia.cli('digest');
   assert.match(d, /^Evening summary\. Do exactly this:/);
   assert.match(d, /ONE short message[^]*Leave out anything you already told them/);
-  assert.match(d, /page named "bot2bot"[^]*never make a new one[^]*When, Who, What/);
+  assert.match(d, /Run node ~\/bin\/b2b\.mjs analytics and update your "bot2bot" page/);
+  // The analytics page: counts and charts only, never message text.
+  const an = await mia.cli('analytics');
+  assert.match(an, /ONE page named "bot2bot"[^]*Analytics only[^]*messages per day[^]*no message text/);
+  const data = JSON.parse(an.slice(an.indexOf('{')));
+  assert.equal(data.last_30_days.received, 3); assert.equal(data.last_30_days.per_day.length, 14);
+  assert.equal(data.last_30_days.most_messaged[0].name, 'Ben'); assert.equal(data.last_30_days.friends, 1);
+  assert.doesNotMatch(an, /Recipe for tonight|Saturday works/);
   assert.match(d, /from "Ben"[^]*They want \(their words\): "try it"[^]*\| Recipe for tonight/);
 });
