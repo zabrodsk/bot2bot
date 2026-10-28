@@ -79,6 +79,14 @@ export function quietUntil(user, t) {
   return t + ((e - now + 1440) % 1440) * 60_000;
 }
 const ALIAS_RE = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,31}$/u;
+// What an owner tells their bot about someone while inviting or accepting them (saved as that contact's notes).
+function inviteNotes(v) {
+  if (v == null) return null;
+  if (typeof v !== 'string') throw new HttpError(400, 'notes must be text');
+  const t = v.normalize('NFC').trim();
+  if (t.length > 280) throw new HttpError(400, 'notes can be up to 280 characters');
+  return t || null;
+}
 // End-to-end encryption: the relay stores each bot's two public keys and carries sealed messages it can't open.
 const SEALED_RE = /^b2b1\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{86}$/;
 const TAG_RE = /^[A-Za-z0-9_-]{16,64}$/;
@@ -730,8 +738,9 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       const open = q('SELECT count(*) AS n FROM invites WHERE from_bot = ? AND used_at IS NULL AND expires_at > ?').get(me.id, clock()).n;
       if (open >= 10) throw new HttpError(429, 'too many open invites');
       const basket = governance.basketName(me.id, body.basket);
+      const notes = inviteNotes(body.notes);
       const code = humanCode();
-      q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner, basket) VALUES (?, ?, ?, ?, 0, ?)').run(sha(code), me.id, alias, clock() + L.inviteTtlMs, basket);
+      q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner, basket, notes) VALUES (?, ?, ?, ?, 0, ?, ?)').run(sha(code), me.id, alias, clock() + L.inviteTtlMs, basket, notes);
       log(me.id, 'invite_created', { alias, by: 'bot' });
       const link = `${publicUrl}/i/${code}`;
       return { code, alias, link, message: inviteMessage(link), expires_at: iso(clock() + L.inviteTtlMs), owner_must_approve: !!me.user_id, ...(basket ? { basket } : {}) };
@@ -753,6 +762,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       if (q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?)').get(me.id, alias)) throw new HttpError(409, `you already have a contact called "${alias}"`);
       if (q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?)').get(inv.from_bot, inv.alias)) throw new HttpError(409, 'the inviter already used that alias; ask for a new invite');
       const basket = governance.basketName(me.id, body.basket);
+      const notes = inviteNotes(body.notes);
       q('UPDATE invites SET used_at = ?, used_by = ? WHERE code_hash = ?').run(clock(), me.id, inv.code_hash);
       const inviter = q('SELECT * FROM bots WHERE id = ?').get(inv.from_bot);
       const t = clock();
@@ -762,6 +772,9 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       q('INSERT INTO contacts (owner_bot, peer_bot, alias, created_at, approved_at, gen, privacy_on) VALUES (?, ?, ?, ?, ?, ?, ?)').run(me.id, inv.from_bot, alias, t, mineOk, t, governance.inPilot(me) ? 1 : 0);
       governance.placeInBasket(inv.from_bot, me.id, inv.basket);
       governance.placeInBasket(me.id, inv.from_bot, basket);
+      // What each owner said about the other while inviting or accepting goes to their own bot, as notes.
+      if (inv.notes) q('UPDATE contacts SET notes = ? WHERE owner_bot = ? AND peer_bot = ?').run(inv.notes, inv.from_bot, me.id);
+      if (notes) q('UPDATE contacts SET notes = ? WHERE owner_bot = ? AND peer_bot = ?').run(notes, me.id, inv.from_bot);
       log(me.id, 'paired', { with: inviter.handle, by: byOwner ? 'owner' : 'bot', waiting: [!mineOk && 'me', !inviterOk && 'them'].filter(Boolean) });
       return { paired_with: `@${inviter.handle}`, inviter_name: inviter.display_name, your_alias_for_them: alias, ...(basket ? { basket } : {}),
         waiting_for_your_owner: !mineOk, waiting_for_them: !inviterOk,

@@ -29,7 +29,7 @@ No body. Returns circles, contacts with their rules and effective modes, quiet h
     {"id": 2, "owner_bot": 1, "name": "friends", "mode": "handles", "is_default": 1, "position": 1, "created_at": 1792886400000},
     {"id": 3, "owner_bot": 1, "name": "work", "mode": "handles", "is_default": 1, "position": 2, "created_at": 1792886400000}
   ],
-  "contacts": [{"peer_bot": 2, "handle": "@jon", "alias": "Jon", "circle": null, "effective_mode": "asks", "mode_override": null, "purpose": "football friend", "notes": "Only discuss football", "topics": ["football"], "rules": [], "blocked": false}],
+  "contacts": [{"peer_bot": 2, "handle": "@jon", "alias": "Jon", "circle": null, "effective_mode": "asks", "mode_override": null, "purpose": "football friend", "notes": "Only discuss football", "topics": ["football"], "rules": [], "past_answers": [{"topic": "location", "answer": "share", "times": 2, "days": ["wed"], "last": "2026-10-21"}], "blocked": false}],
   "quiet_hours": {"on": true, "start": 1320, "end": 480, "tz": "Europe/Prague"},
   "paused": false,
   "pending_proposals": [],
@@ -137,7 +137,7 @@ Example response:
 {"id":"dec_example","learned_rules":["rule_learned"]}
 ```
 
-`answer` is share or decline. Without `always_days`, share decisions on three distinct local dates matching peer, topic and weekday within 60 days create a rule. Each row stores local_date at report time. Only decisions after the latest removal of that same learned rule count. Weekdays use the owner's time zone, or UTC when unset. Explicit days create rules immediately. There is one active learned rule per peer/topic/weekday/answer to avoid duplicate Wednesday rules. All learned rules remain guidance; they never change the send gate. Settings returns unannounced learned rules until `ack_learned` is applied. Owners can remove them. Optional client_id deduplicates report retries and returns the original result; reusing it for a different answer returns 409. CLI decision --client-id and both MCP record_decision tools pass it through.
+`answer` is share or decline. Decisions never turn into rules by count. Settings lists each contact's `past_answers` from the last 60 days (topic, answer, times, weekdays, last local date, newest first, at most 20), and the bot sees them with that contact's messages and judges from them. Each row stores local_date and the weekday in the owner's time zone, or UTC when unset. Only explicit `always_days` create rules, immediately. There is one active learned rule per peer/topic/weekday/answer to avoid duplicate Wednesday rules. All learned rules remain guidance; they never change the send gate. Settings returns unannounced learned rules until `ack_learned` is applied. Owners can remove them. Optional client_id deduplicates report retries and returns the original result; reusing it for a different answer returns 409. CLI decision --client-id and both MCP record_decision tools pass it through.
 
 ### POST /v1/messages with approval
 

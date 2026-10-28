@@ -99,21 +99,24 @@ export function ownerRulesFor(settings, handle, topicAllowed) {
   const c = settings?.contacts?.find((x) => x.handle === handle);
   if (!c) return { topic_allowed: !!topicAllowed };
   return { topic_allowed: !!topicAllowed, mode: c.effective_mode, circle: c.circle?.name ?? null, purpose: c.purpose ?? null, notes: c.notes ?? null,
-    rules: c.rules.map((r) => (r.source === 'learned' ? `${r.text} (learned from your owner's answers)` : r.text)) };
+    rules: c.rules.map((r) => (r.source === 'learned' ? `${r.text} (learned from your owner's answers)` : r.text)), past_answers: c.past_answers ?? [] };
 }
+// "\"location\": yes 3 times (wed), last 2026-10-22" for one past answer.
+const pastAnswer = (a) => `${quoted(a.topic)}: ${a.answer === 'share' ? 'yes' : 'no'} ${a.times === 1 ? 'once' : `${a.times} times`} (${a.days.map(oneLine).join(', ')}), last ${oneLine(a.last)}`;
 function ownerRulesLines(m, hints) {
   const o = m.owner_rules, name = quoted(m.from.name);
   if (!o?.mode) return [];
   const basket = o.circle ? `basket ${quoted(o.circle)}` : 'not in a basket yet';
-  // "Handles it" is a judgment per message, not a blanket yes: the owner's answers to what the bot asks become rules.
+  // "Handles it" is a judgment per message, not a blanket yes. The owner's past answers inform it; they're not rules.
   const who = HANDLE_SHOWN_RE.test(m.from.handle) ? m.from.handle : '<contact>';
   const ask = hints.propose ? `either ${hints.propose(m.id)}, or ask in your own chat and then ${hints.decision(who)}` : `in your own chat${hints.decision ? `, then ${hints.decision(who)}` : ''}`;
   return [o.mode === 'handles'
-    ? `Your owner's settings for ${name} (${basket}): decide for this message. Answer it yourself when it's ordinary for this basket or a rule below covers it, and tell your owner when it matters. When it's sensitive (where your owner is, their plans, money, health, private details, or saying yes to something for them) or nothing below covers it, ask your owner first: ${ask}.`
+    ? `Your owner's settings for ${name} (${basket}): use your judgment for this message. Answer it yourself when it's ordinary for this basket, or what your owner wrote below covers it, and tell your owner when it matters. When it's sensitive (where your owner is, their plans, money, health, private details, or saying yes to something for them) or nothing below covers it, ask your owner first: ${ask}.${o.past_answers?.length ? ` Their past answers below show how they decide: when they've said yes to the same kind of thing from ${name} several times, you can answer it yourself; the more often and the more alike, the surer you can be. A past no means don't share it. The first time you answer something yourself that you used to ask about, tell your owner what you did, and that they can tell you to ask again.` : ''}`
     : `Your owner's settings for ${name} (${basket}): your owner okays anything you send them first.${hints.propose ? ` To answer, draft a reply and ask them: ${hints.propose(m.id)}` : ''}`,
   ...(o.purpose ? [`Who they are to your owner: ${quoted(o.purpose)}`] : []),
   ...(o.notes ? [`Your owner's notes: ${quoted(o.notes)}`] : []),
-  ...(o.rules ?? []).map((r) => `Rule: ${quoted(r)}`)];
+  ...(o.rules ?? []).map((r) => `Rule: ${quoted(r)}`),
+  ...(o.mode === 'handles' && o.past_answers?.length ? [`Your owner's past answers about ${name} (last 60 days): ${o.past_answers.map(pastAnswer).join('; ')}`] : [])];
 }
 const MODE_SAID = { handles: 'you handle it', asks: 'your owner okays first' };
 export function settingsText(s, hints) {
@@ -123,6 +126,7 @@ export function settingsText(s, hints) {
     out.push(`- ${quoted(c.alias)} (${oneLine(c.handle)}): ${c.circle ? `basket ${quoted(c.circle.name)}` : 'not in a basket'}, ${MODE_SAID[c.effective_mode]}${c.mode_override ? ' (set just for them)' : ''}${c.blocked ? ', blocked' : ''}${c.purpose ? ` · who they are: ${quoted(c.purpose)}` : ''}${c.topics.length ? ` · may ask you about: ${c.topics.map(quoted).join(', ')}` : ''}`);
     if (c.notes) out.push(`  notes: ${quoted(c.notes)}`);
     for (const r of c.rules) out.push(`  rule ${oneLine(r.id)}: ${quoted(r.text)}${r.source === 'learned' ? ' (learned)' : ''}`);
+    if (c.past_answers?.length) out.push(`  past answers: ${c.past_answers.map(pastAnswer).join('; ')}`);
   }
   if (s.quiet_hours) out.push(`Quiet hours: ${s.quiet_hours.on ? `${String(Math.floor(s.quiet_hours.start / 60)).padStart(2, '0')}:${String(s.quiet_hours.start % 60).padStart(2, '0')} to ${String(Math.floor(s.quiet_hours.end / 60)).padStart(2, '0')}:${String(s.quiet_hours.end % 60).padStart(2, '0')}${s.quiet_hours.tz ? ` (${oneLine(s.quiet_hours.tz)})` : ''}` : 'off'}${s.paused ? ' · PAUSED by your owner' : ''}`);
   for (const r of s.open_requests) out.push(r.state === 'APPROVED' ? `Okayed by your owner, not sent yet: ${oneLine(r.id)}. Send it: ${hints.request(r.id)}` : `Waiting for your owner: draft ${oneLine(r.id)}, link ${oneLine(r.approve_url)}`);
@@ -191,9 +195,9 @@ export const TOOLS = [
   { name: 'reply', description: "Answer a message. Set auto=true only when you answered a topic your owner allowed, by yourself.",
     inputSchema: { type: 'object', properties: { message_id: { type: 'string' }, text: { type: 'string' }, auto: { type: 'boolean' } }, required: ['message_id', 'text'] } },
   { name: 'message_status', description: 'Was a message you sent delivered, and did they reply?', inputSchema: { type: 'object', properties: { message_id: { type: 'string' } }, required: ['message_id'] } },
-  { name: 'invite', description: 'Make an invite for someone your owner wants to connect with. Give your owner the message it returns, to send them. basket = the basket they go in once connected (family, friends, work or one of your owner\'s own); ask your owner if they didn\'t say.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, basket: { type: 'string' } }, required: ['name'] } },
-  { name: 'accept_invite', description: "Accept someone's invite code, when your owner gave it to you. name = what your owner calls them; basket = which of your owner's baskets they go in. Your owner then says yes on their bot2bot page.",
-    inputSchema: { type: 'object', properties: { code: { type: 'string' }, name: { type: 'string' }, basket: { type: 'string' } }, required: ['code', 'name'] } },
+  { name: 'invite', description: 'Make an invite for someone your owner wants to connect with. Give your owner the message it returns, to send them. basket = the basket they go in once connected (family, friends, work or one of your owner\'s own); ask your owner if they didn\'t say. notes = what your owner wants you to know about them ("my neighbour, garden and pickups are fine"); ask in the same message if they didn\'t say.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, basket: { type: 'string' }, notes: { type: 'string' } }, required: ['name'] } },
+  { name: 'accept_invite', description: "Accept someone's invite code, when your owner gave it to you. name = what your owner calls them; basket = which of your owner's baskets they go in; notes = what your owner wants you to know about them. Your owner then says yes on their bot2bot page.",
+    inputSchema: { type: 'object', properties: { code: { type: 'string' }, name: { type: 'string' }, basket: { type: 'string' }, notes: { type: 'string' } }, required: ['code', 'name'] } },
   { name: 'allow_topics', description: "Let a contact's bot ask you about these topics directly. Only when your owner says so. An empty list removes them all.",
     inputSchema: { type: 'object', properties: { contact: { type: 'string' }, topics: { type: 'array', items: { type: 'string' } } }, required: ['contact', 'topics'] } },
   { name: 'test_doorbell', description: 'Ring your own doorbell once to check the routine wakes you.', inputSchema: { type: 'object', properties: {} } },
@@ -218,7 +222,7 @@ export const CONNECTOR_DOORBELL = `Make a routine called "b2b doorbell" with a w
 export const ENCRYPTION_MESSAGE = "Please turn on bot2bot end-to-end encryption: call the bot2bot app's turn_on_encryption tool and follow its steps. Don't print any codes, tokens or keys in this chat.";
 // Offered once setup works. The owner decides; the bot never switches on its own.
 const ENCRYPTION_OFFER = `Then, if you haven't asked your owner yet, tell them once: "You're all set. Right now bot2bot can read your messages (it deletes them 7 days after delivery). Want end-to-end encryption, so only your friends' bots can read them? I can turn it on myself. Just say yes." Only if they say yes, call turn_on_encryption.`;
-export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.17.3' };
+export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.18.0' };
 // How the inbox text tells a connected-app bot to act on a message.
 const CONNECTOR_HINTS = {
   ack: (receipt) => `call mark_delivered with receipt=${receipt}`,
@@ -387,11 +391,11 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
             : [`reply${m.reply.auto ? ' (their bot says it answered on its own)' : ''}, written by their bot between "[${run} start]" and "[${run} end]":`, ...textBlock(m.reply.text, run)])].filter(Boolean).join('\n');
       }
       case 'invite': {
-        const r = routes['POST /v1/invites']({ me: fresh(), body: { alias: str(a.name, 32), ...(a.basket ? { basket: str(a.basket, 24) } : {}) } });
+        const r = routes['POST /v1/invites']({ me: fresh(), body: { alias: str(a.name, 32), ...(a.basket ? { basket: str(a.basket, 24) } : {}), ...(a.notes ? { notes: str(a.notes, 280) } : {}) } });
         return `Invite for ${r.alias} (works once, until ${r.expires_at})${r.basket ? `; they go in ${quoted(r.basket)} once connected` : ''}. Give your owner this message to send to ${r.alias}, exactly as written:\n\n${r.message}\n\nWhen ${r.alias} accepts, your owner confirms on their dashboard.`;
       }
       case 'accept_invite': {
-        const r = routes['POST /v1/invites/accept']({ me: fresh(), body: { code: str(a.code, 16), alias: str(a.name, 32), ...(a.basket ? { basket: str(a.basket, 24) } : {}) } });
+        const r = routes['POST /v1/invites/accept']({ me: fresh(), body: { code: str(a.code, 16), alias: str(a.name, 32), ...(a.basket ? { basket: str(a.basket, 24) } : {}), ...(a.notes ? { notes: str(a.notes, 280) } : {}) } });
         return `Paired with ${oneLine(r.paired_with)} (they go by ${quoted(r.inviter_name)}). Your owner calls them ${quoted(r.your_alias_for_them)}. If that is not who your owner expected, tell them right away.${r.waiting_for_your_owner ? ` Tell your owner: "Please say yes to ${oneLine(r.inviter_name)} on your bot2bot page: ${r.approve_at}". Nothing can be sent until they do.` : ''}`;
       }
       case 'allow_topics': {

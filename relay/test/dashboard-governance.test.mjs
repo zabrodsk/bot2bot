@@ -267,7 +267,7 @@ test('requests: a connected-app bot asks, the owner writes their own answer, and
   const inbox = await app.tool('check_inbox');
   assert.match(inbox.content[0].text, new RegExp(`Your owner's settings for "Ann" \\(not in a basket yet\\): your owner okays anything you send them first\\. To answer, draft a reply and ask them: call propose_reply with message_id=${ask} and a short topic, then give your owner the link it returns`));
   const rec = inbox.structuredContent.records.find((x) => x.type === 'message');
-  assert.deepEqual(rec.owner_rules, { topic_allowed: false, mode: 'asks', circle: null, purpose: null, notes: null, rules: [] });
+  assert.deepEqual(rec.owner_rules, { topic_allowed: false, mode: 'asks', circle: null, purpose: null, notes: null, rules: [], past_answers: [] });
   await app.tool('mark_delivered', { receipt: rec.receipt });
   const refused = await app.tool('reply', { message_id: ask, text: 'Yes' });
   assert.equal(refused.isError, true);
@@ -365,12 +365,16 @@ test('tools: settings, decisions and an inbox that carries what the owner set fo
   await ben.cli('send', 'Ann', 'Training moved to 8?');
   const recs = (await ann.cli('inbox', '--json')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
   const m = recs.find((x) => x.type === 'message');
-  assert.deepEqual({ ...m.owner_rules, rules: [...m.owner_rules.rules].sort() }, { topic_allowed: false, mode: 'handles', circle: 'friends', purpose: 'football friend', notes: 'Plays on Wednesdays',
+  const { past_answers: past, ...rulesOnly } = m.owner_rules;
+  assert.deepEqual({ ...rulesOnly, rules: [...rulesOnly.rules].sort() }, { topic_allowed: false, mode: 'handles', circle: 'friends', purpose: 'football friend', notes: 'Plays on Wednesdays',
     rules: ['Only football', "Shares location with Ben on thu (learned from your owner's answers)", "Shares location with Ben on wed (learned from your owner's answers)"] });
+  // The owner's answer is a past answer the bot judges from, not a rule.
+  assert.deepEqual(past.map(({ topic, answer, times }) => [topic, answer, times]), [['location', 'share', 1]]);
   await ann.cli('ack', m.receipt);
   await ben.cli('send', 'Ann', 'And Friday?');
   const inbox = await ann.cli('inbox');
-  assert.match(inbox, /\nYour owner's settings for "Ben" \(basket "friends"\): decide for this message\. Answer it yourself when it's ordinary for this basket or a rule below covers it, and tell your owner when it matters\. When it's sensitive \(where your owner is, their plans, money, health, private details, or saying yes to something for them\) or nothing below covers it, ask your owner first: either node ~\/bin\/b2b\.mjs propose msg_[\w-]+ - --topic "<topic>" \(your draft on stdin\) and give your owner the link it prints, or ask in your own chat and then record their answer: node ~\/bin\/b2b\.mjs decision @ben "<topic>" share\|decline\.\nWho they are to your owner: "football friend"\nYour owner's notes: "Plays on Wednesdays"\nRule: "Only football"\n/);
+  assert.match(inbox, /\nYour owner's past answers about "Ben" \(last 60 days\): "location": yes once \(\w{3}\), last \d{4}-\d\d-\d\d\n/);
+  assert.match(inbox, /\nYour owner's settings for "Ben" \(basket "friends"\): use your judgment for this message\. Answer it yourself when it's ordinary for this basket, or what your owner wrote below covers it, and tell your owner when it matters\. When it's sensitive \(where your owner is, their plans, money, health, private details, or saying yes to something for them\) or nothing below covers it, ask your owner first: either node ~\/bin\/b2b\.mjs propose msg_[\w-]+ - --topic "<topic>" \(your draft on stdin\) and give your owner the link it prints, or ask in your own chat and then record their answer: node ~\/bin\/b2b\.mjs decision @ben "<topic>" share\|decline\. Their past answers below show how they decide: [^\n]+ they can tell you to ask again\.\nWho they are to your owner: "football friend"\nYour owner's notes: "Plays on Wednesdays"\nRule: "Only football"\n/);
 
   // Outside the pilot the inbox is as before, and the new commands say so plainly.
   const cy = await quietBot(env, 'cy@example.com', 'cy');
@@ -506,8 +510,8 @@ test('review: all thirty shipped stickers serve exact PNG bytes; font licence an
   assert.match(readFileSync(join(root, 'public/hand/OFL.txt'), 'utf8'), /Caveat Project Authors[^]*SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(readFileSync(join(root, 'Dockerfile'), 'utf8'), /COPY public \.\/public/);
   assert.match(readFileSync(join(root, '../Dockerfile'), 'utf8'), /COPY relay\/public \.\/public/);
-  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.17.3');
-  assert.equal((await cliHome().cli('version')).trim(), '0.17.3');
+  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.18.0');
+  assert.equal((await cliHome().cli('version')).trim(), '0.18.0');
 });
 
 function privateMcp(t, who) {
@@ -689,4 +693,34 @@ test('inviting picks the basket: friends by default, changeable, and a bot can n
   assert.match(accepted, /They're in "friends"\./);
   assert.equal(contactOf(env, ann, cat).circle.name, 'work');
   assert.equal(contactOf(env, cat, ann).circle.name, 'friends');
+});
+
+test('inviting asks right away what the bot should know about the new friend, on both sides', async (t) => {
+  const env = await setup(t, { privacyPilot: true });
+  const ann = await quietBot(env, 'ann@example.com', 'ann'), ben = await quietBot(env, 'ben@example.com', 'ben'), cat = await quietBot(env, 'cat@example.com', 'cat');
+  // The dashboard: the box sits under the basket on Ann's invite page, and on the page Ben opens.
+  const made = await ann.b('/app/invites', { method: 'POST', form: { bot: ann.botId } });
+  assert.match(made.text, /<label>Anything your bot should know about them\?<textarea name="notes" maxlength="280"/);
+  const code = made.text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  const saved = await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'friends', notes: '  My neighbour. Garden and pickups are fine.  ' } });
+  assert.match(saved.text, /<span class="toast__what">Saved for your bot<\/span>/);
+  assert.match(saved.text, />My neighbour\. Garden and pickups are fine\.<\/textarea>/);
+  // Changing only the basket keeps the notes.
+  await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'family', notes: 'My neighbour. Garden and pickups are fine.' } });
+  const page = await ben.b(`/i/${code}`);
+  assert.match(page.text, /<label>Anything your bot should know about Ann\?<textarea name="notes"/);
+  await ben.b(`/i/${code}`, { method: 'POST', form: { bot: ben.botId, alias: 'Ann', basket: 'friends', notes: 'From climbing. Only climbing plans.' } });
+  assert.equal(contactOf(env, ann, ben).notes, 'My neighbour. Garden and pickups are fine.');
+  assert.equal(contactOf(env, ann, ben).circle.name, 'family');
+  assert.equal(contactOf(env, ben, ann).notes, 'From climbing. Only climbing plans.');
+  // The bot sees them with each message from that person.
+  await ben.cli('send', 'Ann', 'Can I borrow the ladder?');
+  assert.match(await ann.cli('inbox'), /\nYour owner's notes: "My neighbour\. Garden and pickups are fine\."\n/);
+
+  // A bot passes them along too; too long is refused and makes nothing.
+  await assert.rejects(cliIn(ann.home, '', 'invite', 'cat', `--notes=${'x'.repeat(281)}`), (e) => /notes can be up to 280 characters/.test(e.stderr));
+  const out = await ann.cli('invite', 'cat', '--basket', 'work', '--notes', 'Colleague, design team');
+  await cat.cli('accept', out.match(/accept ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1], 'Ann', '--notes=Old boss. Ask me first about money.');
+  assert.equal(contactOf(env, ann, cat).notes, 'Colleague, design team');
+  assert.equal(contactOf(env, cat, ann).notes, 'Old boss. Ask me first about money.');
 });

@@ -25,8 +25,8 @@ node ~/bin/b2b.mjs version
 
 | Command | What it does |
 | - | - |
-| `invite <name>` | Makes an invite link for someone. The name is what *you* call them. `--basket <basket>` puts them in that basket once connected. |
-| `accept <code> <name>` | Accepts someone's invite. The name is what you call *them*. Takes `--basket` too. |
+| `invite <name>` | Makes an invite link for someone. The name is what *you* call them. `--basket <basket>` puts them in that basket once connected, and `--notes "..."` saves what your owner wants you to know about them. |
+| `accept <code> <name>` | Accepts someone's invite. The name is what you call *them*. Takes `--basket` and `--notes` too. |
 | `contacts` | Lists contacts and whether each chat is end-to-end encrypted. |
 | `allow <contact> "<topic>"…` | Lets a contact's bot ask yours about these topics directly. Only when the owner says so. |
 | `disallow <contact> "<topic>"` | Takes that back (`--all` for every topic). |

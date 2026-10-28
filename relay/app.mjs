@@ -706,6 +706,8 @@ ${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: 'Disconnect', pr
   const basketsOf = (botId) => (inPilot(botId) ? getSettings(botId).circles.map((g) => g.name) : []);
   const basketPick = (names, chosen, attrs = '') => `<label>Their basket<select name="basket"${attrs}>${names.map((n) => `<option${n === chosen ? ' selected' : ''}>${esc(n)}</option>`).join('')}<option value=""${chosen ? '' : ' selected'}>not sorted yet</option></select></label>`;
   const pickBasket = (botId, value) => { try { return governance.basketName(botId, value); } catch { return null; } };
+  // Asked right away, next to the basket: what the owner wants their bot to know about the new friend.
+  const notesField = (who, value = '') => `<label>Anything your bot should know about ${who}?<textarea name="notes" maxlength="280" rows="2" placeholder="My neighbour. Garden and pickups are fine, ask me about anything else.">${esc(value || '')}</textarea></label>`;
 
   // Someone opened a friend's invite. If they have no bot yet, the setup bot comes first: bot2bot is bot to bot.
   function invitePage(inv, inviter, user, bots, { done = false, error = '', ...opts } = {}) {
@@ -728,7 +730,7 @@ ${user ? `<p class="wait" style="justify-content:center"><span class="dot dot--l
     if (bots.length && !done) action = `<section class="card"><form method="post" action="/i/${esc(inv.plain)}" class="stack" style="margin:0">
 ${bots.length > 1 ? `<label>Which bot<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${bots[0].id}">`}
 ${aliasField}
-${basketsOf(bots[0].id).length ? basketPick(basketsOf(bots[0].id), basketsOf(bots[0].id).includes('friends') ? 'friends' : '') : ''}
+${basketsOf(bots[0].id).length ? basketPick(basketsOf(bots[0].id), basketsOf(bots[0].id).includes('friends') ? 'friends' : '') + notesField(esc(first)) : ''}
 <button class="btn wide">Connect</button></form></section>`;
     return layout('Invitation', `${art('invite', 'small')}<div class="center"><div class="avatar" aria-hidden="true">${esc(first.slice(0, 1).toUpperCase())}</div>
 <h1>${who} wants your bots to talk</h1><p class="muted">@${esc(inviter.handle)} ${verified}</p></div>
@@ -737,9 +739,9 @@ ${error ? `<p class="error center" role="alert">${esc(error)}</p>` : ''}${action
   }
 
   // The inviter's side: a message to send that puts the setup bot first, then the link.
-  function invitedPage(user, b, link, { code = '', basket = null } = {}) {
+  function invitedPage(user, b, link, { code = '', basket = null, notes = null } = {}) {
     const names = code ? basketsOf(b.id) : [];
-    const pick = names.length ? `<form method="post" action="/app/invites/basket" class="card__block"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">${basketPick(names, basket, ' data-autosave')}<noscript><button class="btn small">Save</button></noscript></form>` : '';
+    const pick = names.length ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">${basketPick(names, basket, ' data-autosave')}${notesField('them', notes)}<div><button class="btn small">Save</button></div></form>` : '';
     return layout('Invite a friend', `${art('invite', 'small')}<section class="card"><h2>Send this to your friend</h2>
 <p class="muted">It asks them to add the setup bot to their Grok Bot first, then open your invite.</p>
 ${codeBlock('msg', 'Message for your friend', inviteMessage(link))}${pick}
@@ -1268,7 +1270,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (!bot) return page(res, 400, invitePage(inv, inviter, user, bots, { error: bots.length ? 'Pick one of your bots.' : 'Connect your Grok Bot first.' })), true;
         let accepted;
         try {
-          accepted = routes['POST /v1/invites/accept']({ me: bot, body: { code: plain, alias: String(f.alias || '').trim(), basket: f.basket || null }, byOwner: true });
+          accepted = routes['POST /v1/invites/accept']({ me: bot, body: { code: plain, alias: String(f.alias || '').trim(), basket: f.basket || null, notes: f.notes ?? null }, byOwner: true });
           // Dashboard links don't know the friend's name up front: name them for the inviter now.
           // (Invites a bot made already carry the name its owner uses.)
           if (inv.alias.startsWith('friend-')) {
@@ -1739,9 +1741,10 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const inv = q('SELECT * FROM invites WHERE code_hash = ? AND from_bot = ? AND used_at IS NULL AND expires_at > ?').get(sha(plain), b.id, clock());
         if (!inv) throw new HttpError(404, 'That invite was used or has expired.');
         const basket = pickBasket(b.id, f.basket || null);
-        q('UPDATE invites SET basket = ? WHERE code_hash = ?').run(basket, inv.code_hash);
-        tell(user, { what: basket ? `They'll be in ${basket}` : 'They\'ll be not sorted yet' });
-        return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket })), true;
+        const notes = f.notes === undefined ? inv.notes : String(f.notes).normalize('NFC').trim().slice(0, 280) || null;
+        q('UPDATE invites SET basket = ?, notes = ? WHERE code_hash = ?').run(basket, notes, inv.code_hash);
+        tell(user, { what: notes !== inv.notes ? 'Saved for your bot' : basket ? `They'll be in ${basket}` : 'They\'ll be not sorted yet' });
+        return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket, notes })), true;
       }
 
       throw new HttpError(404, 'Page not found');

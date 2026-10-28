@@ -345,20 +345,20 @@ test('governance: owner-decision helpers compose inside a caller transaction wit
   assert.equal(e.relay.effectiveMode(e.row()), 'asks'); assert.equal(e.settings().pending_proposals.length, 0);
 });
 
-test('governance: learning requires three shares for matching peer, topic and weekday within 60 days', async (t) => {
+test('governance: answers become past answers per topic and answer, never rules by count, for 60 days', async (t) => {
   const e = await fixture(t);
   const report = (contact, answer = 'share', topic = 'location') => e.a.api('POST', '/v1/decisions', { contact, topic, answer });
-  assert.equal((await report('@bob')).json.learned_rules.length, 0);
-  await report('@carol'); await report('@bob', 'decline'); await report('@bob', 'share', 'wishlist');
+  for (let week = 0; week < 4; week++) { if (week) e.advance(7 * DAY); assert.equal((await report('@bob')).json.learned_rules.length, 0); }
+  await report('@carol'); await report('@bob', 'decline', 'money'); await report('@bob', 'share', 'wishlist');
   assert.equal(e.settings().new_learned_rules.length, 0);
-  e.advance(7 * DAY); assert.equal((await report('@bob')).json.learned_rules.length, 0);
-  e.advance(7 * DAY); assert.equal((await report('@bob')).json.learned_rules.length, 1);
-  assert.equal((await report('@bob')).json.learned_rules.length, 0, 'no duplicate active learned rule');
-  assert.equal(e.settings().new_learned_rules.length, 1);
-  const other = await fixture(t);
-  const body = { contact: '@bob', topic: 'location', answer: 'share' };
-  await other.a.api('POST', '/v1/decisions', body); other.advance(61 * DAY);
-  await other.a.api('POST', '/v1/decisions', body); assert.equal((await other.a.api('POST', '/v1/decisions', body)).json.learned_rules.length, 0);
+  assert.equal(e.settings().contacts.find((c) => c.handle === '@bob').rules.length, 0, 'no rule from a count');
+  const past = e.settings().contacts.find((c) => c.handle === '@bob').past_answers;
+  assert.deepEqual(past.map(({ topic, answer, times }) => [topic, answer, times]), [['wishlist', 'share', 1], ['money', 'decline', 1], ['location', 'share', 4]]);
+  assert.equal(new Set(past.flatMap((p) => p.days)).size, 1, 'the same weekday each week');
+  assert.match(past[0].last, /^\d{4}-\d\d-\d\d$/);
+  assert.deepEqual(e.settings().contacts.find((c) => c.handle === '@carol').past_answers.map((p) => p.times), [1], 'per person');
+  e.advance(61 * DAY);
+  assert.deepEqual(e.settings().contacts.find((c) => c.handle === '@bob').past_answers, [], 'older than 60 days drops out');
 });
 
 test('governance: always_days creates guidance immediately, announce until ack, remove learned safely', async (t) => {
@@ -493,7 +493,7 @@ test('fix: ownerless bots never join the pilot, including a mixed pilot and lega
   assert.equal((await e.b.api('POST', '/v1/messages', { to: '@alice', text: 'bad namespace', client_id: 'privacy:anything', approval: 'anything' })).status, 403);
 });
 
-test('fix: learning counts distinct owner-local dates and deduplicates client retries', async (t) => {
+test('fix: past answers use owner-local dates and deduplicate client retries', async (t) => {
   const e = await fixture(t);
   e.advance(Date.parse('2026-10-29T04:00:00Z') - e.now());
   e.db.prepare("UPDATE users SET tz = 'Pacific/Honolulu' WHERE id = ?").run(e.a.uid);
@@ -510,21 +510,21 @@ test('fix: learning counts distinct owner-local dates and deduplicates client re
   assert.equal(row.weekday, new Intl.DateTimeFormat('en', { timeZone: 'Pacific/Honolulu', weekday: 'short' }).format(new Date(row.created_at)).toLowerCase());
   e.advance(7 * DAY);
   await e.a.api('POST', '/v1/decisions', { ...body, client_id: 'next-week' });
-  assert.equal(e.settings().new_learned_rules.length, 0);
   e.advance(7 * DAY);
-  assert.equal((await e.a.api('POST', '/v1/decisions', { ...body, client_id: 'third-week' })).json.learned_rules.length, 1);
+  assert.equal((await e.a.api('POST', '/v1/decisions', { ...body, client_id: 'third-week' })).json.learned_rules.length, 0);
   assert.equal(e.db.prepare('SELECT count(*) AS n FROM owner_decisions').get().n, 8);
+  const [past] = e.settings().contacts.find((c) => c.handle === '@bob').past_answers;
+  assert.deepEqual([past.times, past.days, past.last], [8, ['wed'], '2026-11-11'], 'retries count once; weekdays and dates are the owner\'s');
 });
 
-test('fix: removing a learned rule starts its three-day learning count again', async (t) => {
+test('fix: a removed always rule does not come back from later yeses', async (t) => {
   const e = await fixture(t), body = { contact: '@bob', topic: 'location', answer: 'share' };
-  for (let i = 0; i < 3; i++) { if (i) e.advance(7 * DAY); await e.a.api('POST', '/v1/decisions', body); }
+  await e.a.api('POST', '/v1/decisions', { ...body, always_days: ['wed'] });
   const rule = e.settings().new_learned_rules[0];
   assert.ok(rule);
   await e.patch([{ op: 'remove_rule', rule: rule.id }]);
-  for (let i = 0; i < 2; i++) { e.advance(7 * DAY); assert.equal((await e.a.api('POST', '/v1/decisions', body)).json.learned_rules.length, 0); }
-  e.advance(7 * DAY);
-  assert.equal((await e.a.api('POST', '/v1/decisions', body)).json.learned_rules.length, 1);
+  for (let i = 0; i < 4; i++) { e.advance(7 * DAY); assert.equal((await e.a.api('POST', '/v1/decisions', body)).json.learned_rules.length, 0); }
+  assert.equal(e.settings().contacts.find((c) => c.handle === '@bob').rules.length, 0);
 });
 
 test('fix: cancelled and expired inbound requests reopen, decided drafts conflict', async (t) => {
@@ -758,8 +758,9 @@ test('governance: in handles mode the bot asks when it judges it should, and the
   const decisions = e.db.prepare("SELECT answer, weekday, via, client_id FROM owner_decisions WHERE owner_bot = ? AND topic = 'location'").all(e.a.id);
   assert.equal(decisions.length, 3);
   assert.ok(decisions.every((d) => d.answer === 'share' && d.weekday === 'wed' && d.via === 'owner_request' && d.client_id.startsWith('request:')));
-  const learned = e.settings().new_learned_rules;
-  assert.deepEqual(learned.map((r) => [r.topic, r.days, r.answer, r.source]), [['location', ['wed'], 'share', 'learned']]);
+  // They become past answers the bot judges from, not a rule.
+  assert.equal(e.settings().new_learned_rules.length, 0);
+  assert.deepEqual(e.settings().contacts.find((c) => c.handle === '@bob').past_answers.map(({ topic, answer, times, days }) => [topic, answer, times, days]), [['location', 'share', 3, ['wed']]]);
   // A no counts too, and a bot can't take the request's decision ID first.
   const money = await e.propose({ topic: 'money' });
   e.relay.decideRequest(e.a.id, money.id, { action: 'decline', revision: 1 });

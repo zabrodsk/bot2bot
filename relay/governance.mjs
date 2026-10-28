@@ -15,6 +15,8 @@ export function migrateGovernance(db) {
   add('messages', 'privacy_request_id', 'TEXT');
   // The basket an invite puts the new friend in, picked by whoever made it.
   add('invites', 'basket', 'TEXT');
+  // What the inviter told their bot about the new friend, saved on the contact once they're connected.
+  add('invites', 'notes', 'TEXT');
   db.exec(`
     CREATE TABLE IF NOT EXISTS governance_flags (name TEXT PRIMARY KEY, at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS circles (
@@ -465,7 +467,7 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     if (!decision || !['send', 'edit', 'write', 'decline'].includes(decision.action)) fail('action must be send, edit, write or decline');
     if (!Number.isInteger(decision.revision) || decision.revision !== r.revision) fail('request revision changed; review the current draft', 409);
     const c = resolveRecipient(me, `@${bot(r.peer_bot).handle}`);
-    // The owner's answer is a decision like one reported from chat: three yeses on a weekday become a learned rule.
+    // The owner's answer is a decision like one reported from chat: it becomes one of the bot's past answers.
     // Their own words could say yes or no, so "write my own" teaches nothing.
     if (r.topic && decision.action !== 'write') recordDecisionInTx(ownerBot, { contact: `@${bot(r.peer_bot).handle}`, topic: r.topic, answer: decision.action === 'decline' ? 'decline' : 'share', client_id: `request:${id}` }, 'owner_request');
     if (decision.action === 'decline') {
@@ -526,13 +528,12 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     }
     const id = token('dec_', 9);
     q('INSERT INTO owner_decisions(id, owner_bot, peer_bot, topic, answer, weekday, local_date, created_at, via, client_id, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, me.id, c.peer_bot, t, body.answer, weekday, localDate, clock(), via, clientId, payload);
-    const removed = q("SELECT max(removed_at) AS t FROM contact_rules WHERE owner_bot = ? AND peer_bot = ? AND topic = ? AND days = ? AND answer = 'share' AND source = 'learned'").get(me.id, c.peer_bot, t, JSON.stringify([weekday])).t;
-    const count = q("SELECT count(DISTINCT local_date) AS n FROM owner_decisions WHERE owner_bot = ? AND peer_bot = ? AND topic = ? AND answer = 'share' AND weekday = ? AND created_at >= ? AND created_at > ?").get(me.id, c.peer_bot, t, weekday, clock() - 60 * DAY, removed ?? -1).n;
     const learned = [];
-    if (always || (body.answer === 'share' && count >= 3)) {
-      const onDays = always ?? [weekday];
-      // One rule per weekday avoids duplicate implicit and explicit Wednesday rules.
-      for (const d of onDays) {
+    // Only an explicit "always" makes a rule. Otherwise the answer is kept as a past answer, and the bot
+    // judges from those (settings: past_answers) instead of a fixed count turning into a rule.
+    if (always) {
+      // One rule per weekday avoids duplicate Wednesday rules.
+      for (const d of always) {
         const rid = token('rule_', 9), json = JSON.stringify([d]);
         const answer = body.answer;
         const result = q(`INSERT OR IGNORE INTO contact_rules(id, owner_bot, peer_bot, text, topic, days, answer, source, created_at)
@@ -545,6 +546,17 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     return result;
   }
   const rules = (id, peerId = null) => q(`SELECT * FROM contact_rules WHERE owner_bot = ? AND removed_at IS NULL${peerId == null ? '' : ' AND peer_bot = ?'} ORDER BY created_at, id`).all(id, ...(peerId == null ? [] : [peerId])).map((r) => ({ ...r, days: r.days ? JSON.parse(r.days) : null }));
+  // The owner's answers about one person over the last 60 days, per topic and answer, newest first.
+  function pastAnswers(ownerBot, peerBot) {
+    const out = new Map();
+    for (const d of q('SELECT topic, answer, weekday, local_date FROM owner_decisions WHERE owner_bot = ? AND peer_bot = ? AND created_at >= ? ORDER BY created_at DESC, id DESC')
+      .all(ownerBot, peerBot, clock() - 60 * DAY)) {
+      const k = `${d.topic}\n${d.answer}`;
+      const a = out.get(k) ?? out.set(k, { topic: d.topic, answer: d.answer, times: 0, days: [], last: d.local_date }).get(k);
+      a.times++; if (!a.days.includes(d.weekday)) a.days.push(d.weekday);
+    }
+    return [...out.values()].slice(0, 20).map((a) => ({ ...a, days: DAYS.filter((x) => a.days.includes(x)) }));
+  }
   function getSettings(ownerBot) {
     const me = bot(ownerBot), pilot = inPilot(me); if (!pilot) fail('not found', 404); ensureCircles(ownerBot, pilot); expire();
     const user = me.user_id ? q('SELECT * FROM users WHERE id = ?').get(me.user_id) : null;
@@ -552,7 +564,8 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     return {
       circles, contacts: contactModes(ownerBot, pilot).map((c) => ({ peer_bot: c.peer_bot, handle: `@${bot(c.peer_bot).handle}`, alias: c.alias,
         circle: circles.find((g) => g.id === c.circle_id) ?? null, effective_mode: c.effective_mode, mode_override: c.mode_override,
-        purpose: c.purpose, notes: c.notes, topics: JSON.parse(c.can_ask || '[]'), rules: rules(ownerBot, c.peer_bot), blocked: !!c.blocked })),
+        purpose: c.purpose, notes: c.notes, topics: JSON.parse(c.can_ask || '[]'), rules: rules(ownerBot, c.peer_bot),
+        past_answers: pastAnswers(ownerBot, c.peer_bot), blocked: !!c.blocked })),
       quiet_hours: user ? { on: !!user.quiet_on, start: user.quiet_start, end: user.quiet_end, tz: user.tz } : null,
       paused: !!me.paused_at,
       pending_proposals: q("SELECT * FROM settings_proposals WHERE owner_bot = ? AND state = 'PENDING_OWNER' ORDER BY created_at, id").all(ownerBot).map((p) => ({ ...p, ops: JSON.parse(p.ops), approve_url: `${publicUrl}/app/proposals/${p.id}` })),

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0
+
+- `invite` and `accept_invite` take `notes`: what the owner wants the bot to know about the new person, asked right away with the basket.
+- No more fixed "three yeses make a rule". `check_inbox` and `get_settings` show the owner's past answers for each person, and the bot uses its judgment from them. It tells its owner the first time it handles something it used to ask about.
+
 ## 1.1.0
 
 - Baskets: your owner sorts people into family, friends, work or their own baskets. The skill teaches the bot to answer what's ordinary for a basket, ask its owner first about anything sensitive (and always for "asks you first" or anyone not sorted yet), and learn from the owner's answers with `propose_reply` and `record_decision`.

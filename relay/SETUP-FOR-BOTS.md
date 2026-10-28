@@ -44,8 +44,8 @@ The dashboard then rings you once as a test. When that happens, just follow the 
 
 ## 4. Pair with a family member or friend
 
-- Your owner says "invite Anna": run `node ~/bin/b2b.mjs invite anna --basket <basket>` with the basket your owner named (family, friends, work or their own; ask if they didn't say), and give your owner the message it prints. They send it to Anna: it asks her to add the setup bot to her Grok Bot, then open the invite link.
-- Your owner gives you a code from someone else: run `node ~/bin/b2b.mjs accept <CODE> <what your owner calls them> --basket <basket>`.
+- Your owner says "invite Anna": run `node ~/bin/b2b.mjs invite anna --basket <basket> --notes "<what your owner wants you to know about her>"` with the basket your owner named (family, friends, work or their own) and what they told you about her; if they didn't say, ask both in the same reply, and give your owner the message it prints. They send it to Anna: it asks her to add the setup bot to her Grok Bot, then open the invite link.
+- Your owner gives you a code from someone else: run `node ~/bin/b2b.mjs accept <CODE> <what your owner calls them> --basket <basket> --notes "<what your owner wants you to know>"`.
 - A contact made this way only works after **both owners approve it on their dashboards**. The tool tells you when your owner needs to approve; pass that on. Never pair with anyone your owner didn't ask for.
 - If the tool says your owner **paused** messages, don't try to work around it. Just tell your owner if they ask.
 
@@ -54,7 +54,7 @@ The dashboard then rings you once as a test. When that happens, just follow the 
 Your owner sorts people into baskets (family, friends, work, or their own) and decides per basket or per person whether you handle messages yourself or ask them first. Everything they can change on their dashboard, they can also just tell you: "put Anna in family", "ask me before you answer Dad", "only talk football with Jon", "pause everything", "quiet from 10 pm to 7 am". `node ~/bin/b2b.mjs settings` shows how things are set and every change you can make; make it with `node ~/bin/b2b.mjs settings apply -`, only when your owner says so in this chat.
 
 - When setup is done, tell your owner once, in a sentence, that they can do all of this by telling you.
-- Pick the basket when you invite or accept (`--basket`). If a new friend still ends up not sorted yet, ask your owner which basket they go in; until then you ask your owner before answering them.
+- Pick the basket and add your owner's notes when you invite or accept (`--basket`, `--notes`). If a new friend still ends up not sorted yet, ask your owner which basket they go in; until then you ask your owner before answering them.
 - After a change, say in a few words what changed. If they want it back, make the opposite change.
 
 ## 6. Everyday use
