@@ -186,10 +186,11 @@ export function openDb(path) {
   addColumn('contacts', 'gen', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('bots', 'tool_version', 'TEXT');
   addColumn('bots', 'removed_at', 'INTEGER');
+  addColumn('messages', 'want', 'TEXT');
   return db;
 }
 
-export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', stickersDir, redirectHosts = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
+export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', stickersDir, redirectHosts = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', changelog = null, dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
   if (!adminToken || adminToken.length < 16) throw new Error('ADMIN_TOKEN (16+ chars) is required');
   const L = { ...LIMITS, ...limits };
   // What an owner sends a friend: get a bot first (the setup bot does it all), then open the invite.
@@ -252,7 +253,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   // The one place that erases message content. Waiting messages become "not delivered".
   // Every content column is listed here so a new one can't be forgotten in some other path.
   const erase = (where, ...params) => q(`UPDATE messages SET status = CASE WHEN status IN ('pending', 'claimed') THEN 'dropped' ELSE status END,
-      next_ring_at = NULL, lease_until = NULL, text = '', links = '[]', choices = NULL, sealed = NULL, content_tag = NULL, topic = NULL, note = NULL, body_purged_at = coalesce(body_purged_at, ?)
+      next_ring_at = NULL, lease_until = NULL, text = '', links = '[]', choices = NULL, sealed = NULL, content_tag = NULL, topic = NULL, want = NULL, note = NULL, body_purged_at = coalesce(body_purged_at, ?)
       WHERE ${where}`).run(clock(), ...params);
   // Blocking or removing someone drops whatever is still waiting, in both directions.
   const dropBetween = (a, b) => erase(`status IN ('pending', 'claimed') AND ((from_bot = ? AND to_bot = ?) OR (from_bot = ? AND to_bot = ?))`, a, b, b, a);
@@ -596,9 +597,10 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     const id = token('msg_', 9);
     // Plain messages carry their "ask their bot" topic and "answered by the bot" mark in the open; sealed ones inside the seal.
     const topic = sealed === null && body.topic ? body.topic.trim().toLowerCase() : null;
-    q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag, topic, auto)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
-      choicesJson, ownerWeb ? 'web' : 'bot', sealed, sealed !== null ? tag : null, topic, sealed === null && body.auto && kind === 'reply' ? 1 : 0);
+    q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag, topic, auto, want)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
+      choicesJson, ownerWeb ? 'web' : 'bot', sealed, sealed !== null ? tag : null, topic, sealed === null && body.auto && kind === 'reply' ? 1 : 0,
+      sealed === null && typeof body.want === 'string' && body.want.trim() ? body.want.trim().slice(0, 160) : null);
     if (approval) governance.consumeApproval(approval, id);
     if (replyTo) q('UPDATE messages SET replied_at = ? WHERE id = ?').run(t, replyTo);
     log(me.id, 'sent', { message: id, to: peer.handle, kind, encrypted: sealed !== null });
@@ -923,11 +925,11 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       const from = url.searchParams.get('from');
       const peer = from ? resolveRecipientNoBlockCheck(me, from) : null;
       if (from && !peer) throw new HttpError(404, `no contact called "${from}"`);
-      const rows = q(`SELECT m.id, m.kind, m.text, m.sealed, m.reply_to, m.created_at, m.replied_at, c.alias, b.handle FROM messages m
+      const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.want, m.sealed, m.reply_to, m.created_at, m.replied_at, c.alias, b.handle FROM messages m
                       JOIN bots b ON b.id = m.from_bot LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot
                       WHERE m.to_bot = ? AND m.kind != 'probe' AND m.status = 'delivered' ${peer ? 'AND m.from_bot = ?' : ''}
                       ORDER BY m.created_at DESC LIMIT 10`).all(...(peer ? [me.id, peer.peer_bot] : [me.id]));
-      return { messages: rows.map((m) => ({ id: m.id, from: m.alias, from_handle: `@${m.handle}`, kind: m.kind, reply_to: m.reply_to, text: m.sealed ? undefined : m.text.slice(0, 200), sealed: m.sealed ?? undefined, at: iso(m.created_at), replied: !!m.replied_at })) };
+      return { messages: rows.map((m) => ({ id: m.id, from: m.alias, from_handle: `@${m.handle}`, kind: m.kind, reply_to: m.reply_to, text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), want: m.sealed ? undefined : m.want ?? undefined, sealed: m.sealed ?? undefined, at: iso(m.created_at), replied: !!m.replied_at })) };
     },
 
     'GET /v1/sent': ({ me }) => ({
@@ -968,7 +970,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
           id: m.id, lease: m.lease, kind: m.kind, from: m.kind === 'probe' ? 'b2b relay' : (m.from_alias ?? `@${m.from_handle}`), from_handle: `@${m.from_handle}`,
           text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links), reply_to: m.reply_to, urgent: !!m.urgent,
           sealed: m.sealed ?? undefined, from_keys: m.sealed && m.from_box ? { sign: m.from_sign, box: m.from_box } : undefined,
-          topic: m.topic ?? undefined, auto: m.auto ? true : undefined,
+          topic: m.topic ?? undefined, auto: m.auto ? true : undefined, want: m.want ?? undefined,
           choices: m.choices ? JSON.parse(m.choices) : undefined, typed_on_web: m.via === 'web',
           sent_at: iso(m.created_at), seen_before: m.claim_count > 0,
         })),
@@ -1106,13 +1108,17 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     // MCP Events store signing secrets: only offered when they can be encrypted at rest (or in local tests).
     events: keySecret || allowLocalWebhooks ? events : null });
   const site = makeSite(siteDir);
+  // What changed lately, from the site's changelog (site build: /changelog.json). Signed-in people see the newest
+  // day once, the first time they open the dashboard after it.
+  const whatsNew = changelog ?? (() => { try { return JSON.parse(readFileSync(join(siteDir, 'changelog.json'), 'utf8')); } catch { return null; } })();
+  const latestUpdate = whatsNew?.days?.[0] ?? null;
   const redirects = new Set(redirectHosts.map((h) => h.trim().toLowerCase()).filter(Boolean));
   const governance = createGovernance({ db, q, tx, clock, token, HttpError, publicUrl, privacyPilot,
     resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L });
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
   const handleApp = createApp({ events, governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
-    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, renameBot, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, renameBot, latestUpdate, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');

@@ -56,7 +56,7 @@ async function fakeRoutine(env, b, { onRing, behave = 'normal' } = {}) {
     if (behave === 'ignore') return;
     for (let i = 0; i < 5; i++) {
       const out = await b.cli('inbox', '--via', 'doorbell');
-      if (out.trim() === 'INBOX EMPTY. Nothing more to do.') break;
+      if (out.trim() === 'INBOX EMPTY. Stop here. Nothing more to tell your owner, and if no message came for them, say nothing at all.') break;
       for (const id of out.matchAll(/^[^|\n].*b2b\.mjs ack (msg_[\w~-]+)$/gm)) {
         told.push(out);
         if (behave !== 'claim-only') await b.cli('ack', id[1]);

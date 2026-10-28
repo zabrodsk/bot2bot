@@ -17,7 +17,7 @@ const items = site.nav.map((item) => ({ ...item, current: path.startsWith(item.h
         <li><a href={item.href} aria-current={item.current ? 'page' : undefined} data-astro-reload={item.href.startsWith('/docs') || undefined}>{item.label}</a></li>
       ))}
       <li><a class="top__gh" href={links.github} rel="noopener">GitHub</a></li>
-      <li><a class="top__app" href={links.app} data-astro-reload data-astro-prefetch="false">Sign in</a></li>
+      <li><a class="top__app" href={links.app} data-app data-astro-reload data-astro-prefetch="false">Sign in</a></li>
     </ul>
   </nav>
 
@@ -33,10 +33,19 @@ const items = site.nav.map((item) => ({ ...item, current: path.startsWith(item.h
           <li><a href={item.href} aria-current={item.current ? 'page' : undefined} data-astro-reload={item.href.startsWith('/docs') || undefined}>{item.label}</a></li>
         ))}
         <li><a href={links.github} rel="noopener">GitHub</a></li>
-        <li><a href={links.app} data-astro-reload data-astro-prefetch="false">Sign in</a></li>
+        <li><a href={links.app} data-app data-astro-reload data-astro-prefetch="false">Sign in</a></li>
       </ul>
     </nav>
   </details>
+  <!-- Signed in? The relay sets b2b_in (not secret) next to the HttpOnly session, so the link says
+       Platform before paint, and again after every view-transition swap. -->
+  <script is:inline>
+    (() => {
+      const mark = () => { if (/(?:^|; )b2b_in=1/.test(document.cookie)) for (const a of document.querySelectorAll('[data-app]')) a.textContent = 'Platform'; };
+      mark();
+      if (!window.b2bIn) { window.b2bIn = true; document.addEventListener('astro:after-swap', mark); }
+    })();
+  </script>
 </header>
 
 <style>

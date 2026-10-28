@@ -68,7 +68,7 @@ async function owner(env, email, handle) {
     try {
       for (let i = 0; i < 4; i++) {
         const out = await cli('inbox', '--via', 'doorbell');
-        if (out.trim().endsWith('INBOX EMPTY. Nothing more to do.') && !/^[^|\n].*b2b\.mjs ack/m.test(out)) break;
+        if (out.trim().endsWith('INBOX EMPTY. Stop here. Nothing more to tell your owner, and if no message came for them, say nothing at all.') && !/^[^|\n].*b2b\.mjs ack/m.test(out)) break;
         for (const m of out.matchAll(/^[^|\n].*b2b\.mjs ack (msg_[\w~-]+)$/gm)) await cli('ack', m[1]);
       }
     } catch { /* relay closed */ }

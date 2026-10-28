@@ -50,6 +50,8 @@ export function migrateApp(db) {
   addColumn('users', 'tz', 'TEXT');
   addColumn('users', 'infinite_at', 'INTEGER');
   addColumn('users', 'name_set_at', 'INTEGER');
+  addColumn('users', 'seen_update', 'TEXT');
+  addColumn('users', 'lang', 'TEXT');
   addColumn('users', 'quiet_on', 'INTEGER NOT NULL DEFAULT 1');
   addColumn('users', 'quiet_start', 'INTEGER NOT NULL DEFAULT 1320');
   addColumn('users', 'quiet_end', 'INTEGER NOT NULL DEFAULT 480');
@@ -114,7 +116,7 @@ const ago = (ms, now) => {
 };
 
 export function createApp(ctx) {
-  const { events = null, renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { events = null, latestUpdate = null, renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -128,7 +130,9 @@ export function createApp(ctx) {
     return q('SELECT * FROM users WHERE id = ?').get(s.user_id) || null;
   };
   const secure = origin.startsWith('https://');
-  const sessionCookie = (raw, maxAge) => `b2b_session=${raw}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
+  // b2b_in is a readable, non-secret marker that lives and dies with the session, so the static
+  // site can say "Platform" instead of "Sign in" without asking the server.
+  const sessionCookie = (raw, maxAge) => [`b2b_session=${raw}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`, `b2b_in=${raw ? 1 : ''}; Path=/; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`];
   function startSession(res, userId) {
     const raw = token('s_', 24);
     q('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)').run(sha(raw), userId, clock(), clock() + SESSION_MS);
@@ -162,14 +166,29 @@ export function createApp(ctx) {
     const ownH1 = /<h1[\s>]/.test(body);
     const pagehead = ownH1 ? (back ? `<header class="pagehead">${back}</header>` : '') : `<header class="pagehead"><div class="pagehead__text">${back}<h1>${esc(bar.title ?? title)}</h1>${bar.sub ? `<p class="pagehead__sub">${esc(bar.sub)}</p>` : ''}</div>${actions ? `<div class="pagehead__actions">${actions}</div>` : ''}</header>`;
     const note = takeNotice(user);
+    const news = latestUpdate && user.seen_update !== latestUpdate.iso && hasPicture(user) ? whatsNewDialog(user) : '';
     return `${head(title)}<body class="in"><header class="top"><div class="top__in">${brand('/app')}${nav}${me}</div></header>
-<main class="page">${sim}<div class="col col--${width}">${pagehead}${body}</div>${site ? LEGAL : ''}</main>${note ? toast(note) : ''}<script>${UI_JS}</script></body></html>`;
+<main class="page">${sim}<div class="col col--${width}">${pagehead}${body}</div>${site ? LEGAL : ''}</main>${note ? toast(note) : ''}${news}<script>${UI_JS}</script></body></html>`;
+  };
+  // Arc dialog: what changed since their last visit, once. One change is one line; more are a short list.
+  // Got it, Escape or a click outside closes it and remembers it was seen.
+  const whatsNewDialog = (user) => {
+    const cs = user.lang === 'cs';
+    const items = latestUpdate.items.map((i) => (typeof i === 'string' ? i : (cs && i.cs) || i.en));
+    const body = items.length === 1 ? `<p class="dlg__one">${esc(items[0])}</p>` : `<ul class="dlg__list">${items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>`;
+    return `<dialog class="dlg" id="whatsnew" aria-labelledby="wn-h"><form method="post" action="/app/whatsnew" class="dlg__in"><input type="hidden" name="id" value="${esc(latestUpdate.iso)}">
+<h2 id="wn-h" class="dlg__title">${cs ? 'Co je nového' : 'What&#39;s new'}</h2>${body}
+<div class="dlg__foot"><a class="link" href="/changelog/">${cs ? 'Všechny změny' : 'See all changes'}</a><button class="btn" autofocus>${cs ? 'Rozumím' : 'Got it'}</button></div></form></dialog>
+<script>(()=>{const d=document.getElementById('whatsnew');if(!d||!d.showModal)return;const f=d.querySelector('form');let done=false;
+const seen=()=>{if(done)return;done=true;fetch('/app/whatsnew',{method:'POST',body:new URLSearchParams(new FormData(f)),keepalive:true}).catch(()=>{});};
+f.addEventListener('submit',(e)=>{e.preventDefault();seen();d.close();});d.addEventListener('close',seen);
+d.addEventListener('click',(e)=>{if(e.target===d)d.close();});d.showModal();})();</script>`;
   };
   // Artwork made for bot2bot (isometric scenes). Only shown when the file is there.
   const art = (name, cls = '') => ART.has(name) ? `<div class="art ${cls}"><img src="/art/${name}.jpg" alt="" width="${name === 'asleep' ? 800 : name === 'home' ? 1536 : 1200}" height="${name === 'asleep' ? 800 : name === 'home' ? 864 : 800}" decoding="async"></div>` : '';
   const setupBot = setupBotUrl;
   // With the landing site on this server, its legal pages are one link away from every dashboard page.
-  const LEGAL = '<footer class="legal"><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a><a href="/cookies/">Cookies</a><a href="/legal/">Legal notice</a></footer>';
+  const LEGAL = '<footer class="legal"><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a><a href="/cookies/">Cookies</a><a href="/legal/">Legal notice</a><a href="/changelog/">What&#39;s new</a></footer>';
   const page = (res, status, html, headers = {}) => { res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin', ...headers }); res.end(html); };
   const redirect = (res, to) => { res.writeHead(303, { location: to, 'cache-control': 'no-store' }); res.end(); };
   const json = (res, status, data) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); };
@@ -231,7 +250,8 @@ export function createApp(ctx) {
     let user = q('SELECT * FROM users WHERE email = ?').get(email);
     if (!user) {
       const nm = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).slice(0, 40);
-      q('INSERT INTO users (email, name, created_at, email_verified_at) VALUES (?, ?, ?, ?)').run(email, nm, clock(), clock());
+      // New people start with nothing to catch up on: the "What's new" note is for those who were here before.
+      q('INSERT INTO users (email, name, created_at, email_verified_at, seen_update) VALUES (?, ?, ?, ?, ?)').run(email, nm, clock(), clock(), latestUpdate?.iso ?? null);
       user = q('SELECT * FROM users WHERE email = ?').get(email);
       log(null, 'user_created', { user: user.id });
     }
@@ -1366,6 +1386,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       }
 
       // Everything below needs a logged-in user.
+      if (!user && cookies(req).b2b_in) res.setHeader('set-cookie', sessionCookie('', 0)); // the session ended elsewhere: drop the marker too
       if (!user) return redirect(res, `/login?next=${encodeURIComponent(p)}`), true;
 
       // No picture yet: pick one first, then carry on to the page they asked for.
@@ -1813,6 +1834,12 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'private, max-age=31536000, immutable', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'" });
         res.end(Buffer.from(row.photo));
         return true;
+      }
+      if (p === '/app/whatsnew' && req.method === 'POST') {
+        const f = await form(req);
+        if (latestUpdate && f.id === latestUpdate.iso) q('UPDATE users SET seen_update = ? WHERE id = ?').run(latestUpdate.iso, user.id);
+        if (String(req.headers.accept || '').includes('text/html')) return redirect(res, '/app'), true;
+        res.writeHead(204).end(); return true;
       }
       if (p === '/app/account/name' && req.method === 'POST') {
         const f = await form(req);
@@ -2371,6 +2398,14 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .avatar--cut{border:0;background:none;box-shadow:none;filter:drop-shadow(0 1px 1px rgb(0 0 0 / .1)) drop-shadow(0 3px 5px rgb(0 0 0 / .12))}.avatar--cut img{border-radius:0;object-fit:contain}
 .me{display:flex;align-items:center;gap:14px;min-width:0}
 /* Picture picker: the chosen robot lands in the preview on a spring and blinks once. */
+.dlg{width:min(420px,calc(100vw - 32px));padding:0;border:0;border-radius:var(--radius-surface);background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-floating),0 0 0 1px rgb(26 34 48/.06)}
+.dlg[open]{animation:dlg-in 420ms var(--ease-spring) both}.dlg::backdrop{background:rgb(26 34 48/.36);animation:dlg-fade 200ms ease-out both}
+.dlg__in{display:grid;gap:14px;padding:24px}.dlg__title{margin:0;font:500 var(--text-xl)/1.15 var(--font-display);letter-spacing:var(--tracking-display)}
+.dlg__one{margin:0;font-size:var(--text-base)}.dlg__list{margin:0;padding:0;list-style:none;display:grid;gap:9px}
+.dlg__list li{position:relative;padding-left:18px}.dlg__list li::before{content:"";position:absolute;left:3px;top:.6em;width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.dlg__foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:6px}
+@keyframes dlg-in{from{opacity:0;transform:translateY(8px) scale(.97)}}@keyframes dlg-fade{from{opacity:0}}
+@media (prefers-reduced-motion:reduce){.dlg[open],.dlg::backdrop{animation:none}}
 .pfp{display:grid;gap:24px}.pfp__name{max-width:360px;width:100%;justify-self:center}.setrow>.grow{flex:1;min-width:0}.pfp__head{display:grid;justify-items:center;gap:8px;text-align:center}.pfp__head h1{margin:10px 0 0}
 .pfp__face{display:block;width:112px;height:112px;border:6px solid #fff;border-radius:var(--radius-pill);overflow:hidden;background:var(--surface-muted);filter:drop-shadow(0 1px 1px rgb(0 0 0 / .08)) drop-shadow(0 8px 14px rgb(0 0 0 / .1))}
 .pfp__face svg,.pfp__face img{display:block;width:100%;height:100%;object-fit:cover}

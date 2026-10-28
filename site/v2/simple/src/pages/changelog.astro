@@ -1,0 +1,38 @@
+---
+// What's new: a date, then what changed that day, in plain words.
+import Base from '../layouts/Base.astro';
+import Crumbs from '../components/Crumbs.astro';
+import { changelog as c } from '../data/changelog';
+import { webPage } from '../data/schema';
+const crumbs = [{ name: c.crumb, path: '/changelog/' }];
+---
+<Base title={c.seo.title} description={c.seo.description} crumbs={crumbs}
+  schema={[webPage({ path: '/changelog/', name: c.seo.title, description: c.seo.description })]}>
+  <section class="page-intro" aria-labelledby="log-title">
+    <Crumbs trail={crumbs} />
+    <h1 id="log-title" class="page-title">{c.headline}</h1>
+  </section>
+
+  <ol class="log">
+    {c.days.map((d) => (
+      <li class="day">
+        <h2 class="day__date"><time datetime={d.iso}>{d.label}</time></h2>
+        <ul class="day__items">{d.items.map((i) => <li>{i}</li>)}</ul>
+      </li>
+    ))}
+  </ol>
+</Base>
+
+<style>
+  .page-intro :global(.crumbs) { margin-bottom: 6px; }
+  .log { list-style: none; padding: 0; margin: clamp(56px, 9vh, 96px) var(--m) clamp(96px, 16vh, 160px); display: grid; gap: clamp(40px, 6vh, 64px); }
+  .day { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px var(--gap); padding-top: 20px; border-top: 1px solid var(--c-line); }
+  .day__date { grid-column: 1 / span 4; margin: 0; font-size: var(--t-s); font-weight: 500; color: var(--c-muted); font-variant-numeric: tabular-nums; }
+  .day__items { grid-column: 5 / span 8; margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+  .day__items li { position: relative; padding-left: 18px; max-width: 60ch; }
+  .day__items li::before { content: ""; position: absolute; left: 2px; top: .62em; width: 6px; height: 6px; border-radius: 50%; background: var(--c-signal); }
+  @media (max-width: 899px) {
+    .day { grid-template-columns: 1fr; }
+    .day__date, .day__items { grid-column: 1; }
+  }
+</style>

@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRelay } from '../server.mjs';
+import { setup } from './helpers.mjs';
 
 const listen = (h) => new Promise((ok) => { const s = http.createServer(h).listen(0, '127.0.0.1', () => ok({ s, url: `http://127.0.0.1:${s.address().port}` })); });
 const HTML = { accept: 'text/html,application/xhtml+xml' };
@@ -106,4 +107,36 @@ test('docs pages come as Markdown to agents that ask for it', async (t0) => {
   assert.match(await (await fetch(`${url}/docs/quickstart/`, { headers: { accept: 'text/html, text/markdown' } })).text(), /<h1>/);
   // No escaping the site folder through the Markdown lookup.
   assert.notEqual((await fetch(`${url}/docs/..%2f..%2f..%2fpackage`, { headers: { accept: 'text/markdown' } })).status, 200);
+});
+
+test('signed in, the site says Platform: a readable b2b_in marker lives and dies with the session', async (t0) => {
+  const env = await setup(t0);
+  const post = (path, form, cookie = '') => fetch(env.url + path, { method: 'POST', redirect: 'manual', headers: { origin: env.url, 'content-type': 'application/x-www-form-urlencoded', ...(cookie && { cookie }) }, body: new URLSearchParams(form).toString() });
+  const marker = (r) => r.headers.getSetCookie().find((c) => c.startsWith('b2b_in='));
+  const jar = (r) => r.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+  const signIn = async (email) => {
+    const asked = await post('/login', { email });
+    return post('/login/verify', { email, code: env.mail.at(-1).text.match(/code is (\d{6})/)[1] }, jar(asked));
+  };
+
+  const signedIn = await signIn('mia@example.com');
+  assert.equal(signedIn.status, 303);
+  const on = marker(signedIn);
+  assert.match(on, /^b2b_in=1; Path=\/; SameSite=Lax; Max-Age=2592000/, 'same life as the session');
+  assert.doesNotMatch(on, /HttpOnly/, 'the site script reads it');
+
+  const out = await post('/logout', {}, jar(signedIn));
+  assert.match(marker(out), /^b2b_in=; Path=\/; SameSite=Lax; Max-Age=0/);
+
+  // A session that ended elsewhere drops a leftover marker on the next dashboard visit.
+  const stale = await fetch(env.url + '/app', { redirect: 'manual', headers: { cookie: 'b2b_in=1; b2b_session=s_gone' } });
+  assert.equal(stale.status, 303);
+  assert.match(marker(stale), /Max-Age=0/);
+  assert.equal(marker(await fetch(env.url + '/app', { redirect: 'manual' })), undefined, 'no marker, nothing to clear');
+
+  // Deleting the account clears it too.
+  const again = await signIn('mia@example.com');
+  const gone = await post('/app/account/delete', { confirm: 'mia@example.com' }, jar(again));
+  assert.equal(gone.status, 200);
+  assert.match(marker(gone), /Max-Age=0/);
 });

@@ -173,3 +173,27 @@ test('your name: picked on the first step, changeable in Account, and your bot n
   assert.match(acc, /Name saved[^]*\/app\/account\/name[^]*name="name" value="Dušan Zabrodský"/);
   assert.match(acc, /<label class="field">Your name<input name="name" value="Dusan Jr"/);
 });
+
+test("what's new: shown once after an update to people who were already here, one line or a short list", async (t0) => {
+  const log = { days: [{ iso: '2026-11-01', label: '1 November 2026', items: [{ en: 'Rename your bots yourself.', cs: 'Své boty si přejmenujete sami.' }] }] };
+  const env = await setup(t0, { changelog: log });
+  const old = await login(env, 'old@example.com');
+  // Someone who signed up before this update.
+  env.relay.db.prepare("UPDATE users SET seen_update = NULL WHERE email = 'old@example.com'").run();
+  let home = (await old('/app')).text;
+  assert.match(home, /<dialog class="dlg" id="whatsnew"[^]*What&#39;s new[^]*<p class="dlg__one">Rename your bots yourself\.<\/p>[^]*Got it/);
+  assert.equal((await old('/app/whatsnew', { method: 'POST', form: { id: '2026-11-01' } })).status, 204);
+  assert.doesNotMatch((await old('/app')).text, /id="whatsnew"/, 'once');
+  // Czech, and nothing for someone who just signed up.
+  env.relay.db.prepare("UPDATE users SET seen_update = NULL, lang = 'cs' WHERE email = 'old@example.com'").run();
+  assert.match((await old('/app')).text, /Co je nového[^]*Své boty si přejmenujete sami\.[^]*Rozumím/);
+  const fresh = await login(env, 'new@example.com');
+  assert.doesNotMatch((await fresh('/app')).text, /id="whatsnew"/);
+});
+
+test("what's new: several changes are a list", async (t0) => {
+  const env = await setup(t0, { changelog: { days: [{ iso: '2026-11-02', items: [{ en: 'One.' }, { en: 'Two.' }] }] } });
+  const b = await login(env, 'list@example.com');
+  env.relay.db.prepare("UPDATE users SET seen_update = '2026-11-01' WHERE email = 'list@example.com'").run();
+  assert.match((await b('/app')).text, /<ul class="dlg__list"><li>One\.<\/li><li>Two\.<\/li><\/ul>/);
+});

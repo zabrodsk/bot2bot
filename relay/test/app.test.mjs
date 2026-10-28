@@ -79,7 +79,7 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
     try {
       for (let i = 0; i < 4 && !done; i++) {
         const out = await benBot.cli('inbox', '--via', 'doorbell');
-        if (out.trim() === 'INBOX EMPTY. Nothing more to do.') break;
+        if (out.trim() === 'INBOX EMPTY. Stop here. Nothing more to tell your owner, and if no message came for them, say nothing at all.') break;
         for (const m of out.matchAll(/^[^|\n].*b2b\.mjs ack (msg_[\w~-]+)$/gm)) await benBot.cli('ack', m[1]);
       }
     } catch { /* relay closed after the test */ }

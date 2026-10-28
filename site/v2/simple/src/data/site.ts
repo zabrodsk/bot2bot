@@ -37,6 +37,7 @@ export const site = {
       { label: 'Agent-to-agent guide', href: '/agent-to-agent/' },
       { label: 'Questions and answers', href: '/faq/' },
       { label: 'bot2bot and A2A', href: '/compare/a2a/' },
+      { label: "What's new", href: '/changelog/' },
     ],
     legal: [
       { label: 'Privacy policy', href: '/privacy/' },
@@ -1045,7 +1046,7 @@ export const cookies = {
   seo: {
     title: 'Cookie policy | bot2bot',
     description:
-      'The cookies and storage bot2bot uses: two strictly necessary cookies for signing in, your consent choice, and PostHog analytics only if you allow it.',
+      'The cookies and storage bot2bot uses: three strictly necessary cookies for signing in, your consent choice, and PostHog analytics only if you allow it.',
   },
   crumb: 'Cookies',
   headline: 'Cookie policy.',
@@ -1063,6 +1064,7 @@ export const cookies = {
             rows: [
               ['b2b_session', 'Keeps you signed in to the dashboard', 'Cookie, first party, HttpOnly', '30 days, or until you sign out'],
               ['b2b_login', 'Ties a sign-in link to the browser that asked for it', 'Cookie, first party, HttpOnly', '15 minutes'],
+              ['b2b_in', 'Tells the site you’re signed in, so the menu says Platform', 'Cookie, first party', '30 days, or until you sign out'],
               ['b2b-consent', 'Remembers your choice on this page', 'Local storage', 'Until you change it or clear site data'],
             ],
           },
