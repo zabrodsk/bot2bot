@@ -223,6 +223,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   B.perWord = B.freePeriod === 'day' ? 'a day' : 'a month';
   function coverage(user, t = clock()) {
     if (!hosted) return { state: 'self_hosted' };
+    if (user?.infinite_at) return { state: 'infinite' };
     if (user?.paid_until > t) return { state: 'paid', until: user.paid_until };
     const payer = user && q(`SELECT u.* FROM household_members h JOIN users u ON u.id = h.payer_user_id WHERE h.email = ? AND u.paid_until > ? ORDER BY u.paid_until DESC`).get(user.email, t);
     if (payer) return { state: 'covered', until: payer.paid_until, payer: payer.name };
@@ -628,6 +629,34 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       log(null, 'enroll_code', { handle });
       return { code, handle, expires_at: iso(clock() + L.codeTtlMs) };
     },
+    // Renames a bot. Its keys stay, so its own tool (0.19.1+) takes the new name and its contacts' tools move their
+    // pin to it. Older tools would set its messages aside, so the bot and every contact with keys must be on 0.19.1+.
+    'POST /admin/rename': ({ body, admin }) => {
+      if (!admin) throw new HttpError(401, 'admin token required');
+      const from = String(body.from || '').replace(/^@/, '').toLowerCase(), to = String(body.to || '').replace(/^@/, '').toLowerCase();
+      const b = q('SELECT * FROM bots WHERE handle = ?').get(from);
+      if (!b) throw new HttpError(404, 'no bot with that handle');
+      if (!HANDLE_RE.test(to)) throw new HttpError(400, 'handle must be 2-32 chars: a-z 0-9 _ -');
+      if (q('SELECT 1 FROM bots WHERE handle = ?').get(to)) throw new HttpError(409, 'that handle is taken');
+      const behind = [b, ...q('SELECT b.* FROM contacts c JOIN bots b ON b.id = c.owner_bot WHERE c.peer_bot = ?').all(b.id)]
+        .filter((x) => x.box_pub && x.vendor !== 'connector' && newerVersion('0.19.1', x.tool_version || SILENT_TOOL)).map((x) => `@${x.handle} (${x.tool_version || 'older than 0.19'})`);
+      if (behind.length && !body.force) throw new HttpError(409, `not yet: these bots need b2b 0.19.1 first (they update when their doorbell next runs): ${behind.join(', ')}`);
+      tx(() => {
+        q('UPDATE bots SET handle = ? WHERE id = ?').run(to, b.id);
+        q('UPDATE enroll_codes SET handle = ? WHERE handle = ? AND used_at IS NULL').run(to, from);
+      });
+      log(b.id, 'renamed', { from, to });
+      return { ok: true, from: `@${from}`, to: `@${to}` };
+    },
+    // Infinite plan: no limit, for good, given by the operator (family, friends). {email, off: true} takes it back.
+    'POST /admin/infinite': ({ body, admin }) => {
+      if (!admin) throw new HttpError(401, 'admin token required');
+      const u = q('SELECT id FROM users WHERE email = ?').get(String(body.email || '').trim().toLowerCase());
+      if (!u) throw new HttpError(404, 'no account with that email');
+      q('UPDATE users SET infinite_at = ? WHERE id = ?').run(body.off ? null : clock(), u.id);
+      log(null, body.off ? 'infinite_off' : 'infinite_on', { user: u.id });
+      return { ok: true, infinite: !body.off };
+    },
     'POST /admin/reissue': ({ body, admin }) => {
       if (!admin) throw new HttpError(401, 'admin token required');
       if (!adminEnroll) throw new HttpError(403, 'admin enrollment is off: owners reconnect their bots from the dashboard');
@@ -812,6 +841,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     'GET /v1/requests/:id': ({ me, params }) => governance.getRequest(me.id, params.id),
 
     'GET /v1/contacts': ({ me }) => ({
+      handle: me.handle,
       contacts: q(`SELECT c.*, b.handle, b.display_name, b.vendor, b.sign_pub, b.box_pub, b.keys_at, c.codes_compared_at, c.privacy_on, c.can_ask, back.can_ask AS they_let_me_ask, c.blocked, c.approved_at, back.approved_at AS their_ok, b.webhook_url IS NOT NULL AS has_doorbell
                    FROM contacts c JOIN bots b ON b.id = c.peer_bot LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot
                    WHERE c.owner_bot = ? ORDER BY c.alias`).all(me.id)
@@ -918,7 +948,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     }),
 
     // Each claim also says which tool is newest, so the doorbell run updates the tool on its own.
-    'POST /v1/inbox/claim': ({ me, body }) => ({ tool: toolInfo(), ...tx(() => {
+    'POST /v1/inbox/claim': ({ me, body }) => ({ tool: toolInfo(), handle: me.handle, ...tx(() => {
       const t = clock();
       if (me.paused_at) return { lease_seconds: L.leaseMs / 1000, paused: true, messages: [] };
       const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 25);

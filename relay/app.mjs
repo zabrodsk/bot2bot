@@ -44,6 +44,7 @@ export function migrateApp(db) {
   addColumn('users', 'last_notified_at', 'INTEGER');
   // Quiet hours (0.8): on by default, 22:00 to 08:00 in the person's own timezone.
   addColumn('users', 'tz', 'TEXT');
+  addColumn('users', 'infinite_at', 'INTEGER');
   addColumn('users', 'quiet_on', 'INTEGER NOT NULL DEFAULT 1');
   addColumn('users', 'quiet_start', 'INTEGER NOT NULL DEFAULT 1320');
   addColumn('users', 'quiet_end', 'INTEGER NOT NULL DEFAULT 480');
@@ -145,10 +146,11 @@ export function createApp(ctx) {
     const gov = govBots(user).length > 0;
     const waiting = gov ? pendingFor(user) : 0;
     const nav = `<nav class="tabs" aria-label="Main"><span class="tabs__sel" aria-hidden="true"></span>${place('home', '/app', 'Overview')}${gov ? place('people', '/app/people', 'People') + place('requests', '/app/requests', `Requests${waiting ? `<span class="tabs__count" aria-hidden="true">${waiting}</span><span class="sr"> (${waiting} waiting)</span>` : ''}`) : ''}${place('activity', '/app/activity', 'Activity')}${hasWeb ? place('inbox', '/app/inbox', 'Inbox') : ''}${place('account', '/app/account', 'Account')}${hosted ? place('plan', '/app/billing', 'Plan') : ''}</nav>`;
-    const planName = hosted ? { paid: 'Paid', covered: 'Covered' }[allowance(user).state] || 'Free' : '';
+    const planState_ = hosted ? allowance(user).state : '';
+    const planName = hosted ? { paid: 'Paid', covered: 'Covered', infinite: 'Infinite' }[planState_] || 'Free' : '';
     const face = avatar(user.name || user.email, 'md', photoUrl(user.id, user.photo_at, user.avatar));
     const me = `<details class="more umenu"><summary class="umenu__trigger" aria-label="Your account">${face}</summary>
-<div class="umenu__panel"><div class="umenu__head">${face}<div class="umenu__id"><span class="umenu__row"><span class="umenu__fullname">${esc(user.name)}</span>${planName ? `<span class="umenu__plan">${planName}</span>` : ''}</span><span class="umenu__email">${esc(user.email)}</span></div></div>
+<div class="umenu__panel"><div class="umenu__head">${face}<div class="umenu__id"><span class="umenu__row"><span class="umenu__fullname">${esc(user.name)}</span>${planName ? `<span class="umenu__plan${planState_ === 'infinite' ? ' umenu__plan--infinite' : ''}">${planName}</span>` : ''}</span><span class="umenu__email">${esc(user.email)}</span></div></div>
 <div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}Account</a>${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}Plan</a>` : ''}
 <div class="umenu__sep"></div><form method="post" action="/logout"><button class="umenu__item">${ICON.logout}Log out</button></form></div></details>`;
     const back = bar.back ? `<a class="crumb" href="${esc(bar.back)}">${ICON.back}${esc(bar.backLabel || 'Overview')}</a>` : '';
@@ -371,12 +373,13 @@ Give me the link it prints so I can approve you, then run the same join command 
     const c = allowance(user);
     const members = q('SELECT email FROM household_members WHERE payer_user_id = ? ORDER BY added_at').all(user.id);
     const canPay = !!(B.stripeKey && B.priceId);
-    const status = c.state === 'paid' ? `Paid until ${dateStr(c.until)}.`
+    const status = c.state === 'infinite' ? 'No limit, for good. Send as much as you like.'
+      : c.state === 'paid' ? `Paid until ${dateStr(c.until)}.`
       : c.state === 'covered' ? `Covered by ${esc(c.payer)} until ${dateStr(c.until)}.`
       : `Free plan: ${c.used} of ${c.limit} messages sent ${B.periodWord}. It starts again ${B.freePeriod === 'day' ? 'at midnight UTC' : `on ${dateStr(c.resets)}`}. Receiving is never limited.`;
-    return layout('Plan', `<section class="card"><h2>Your plan</h2>${paid ? '<p class="okmsg" role="status">Thanks! Payment received.</p>' : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
+    return layout('Plan', `<section class="card"><h2>Your plan${c.state === 'infinite' ? ' <span class="umenu__plan umenu__plan--infinite">Infinite</span>' : ''}</h2>${paid ? '<p class="okmsg" role="status">Thanks! Payment received.</p>' : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
 ${c.limited ? `<div class="card__block">${usageMeter(c)}</div>` : ''}<p>${status}</p>
-${c.state === 'covered' ? '' : canPay ? `<form method="post" action="/app/billing/checkout"><button class="btn">${c.state === 'paid' ? 'Add another year' : `Pay ${esc(B.priceLabel)}`}</button></form><p class="muted small">${c.state === 'paid' ? '' : 'No monthly limit for you and your household. '}One payment a year. No subscription, nothing renews by itself.</p>`
+${c.state === 'covered' || c.state === 'infinite' ? '' : canPay ? `<form method="post" action="/app/billing/checkout"><button class="btn">${c.state === 'paid' ? 'Add another year' : `Pay ${esc(B.priceLabel)}`}</button></form><p class="muted small">${c.state === 'paid' ? '' : 'No monthly limit for you and your household. '}One payment a year. No subscription, nothing renews by itself.</p>`
   : '<p class="muted small">The paid plan is coming soon.</p>'}</section>
 <section class="card"><h2>Your household</h2><p>A paid plan covers you and up to ${B.householdSize - 1} people. Add the email they sign in with. They never see your conversations.</p>
 ${members.map((m) => `<div class="row"><span>${esc(m.email)}</span><form method="post" action="/app/billing/members" class="more"><input type="hidden" name="remove" value="${esc(m.email)}"><button class="link danger">Remove</button></form></div>`).join('')}
@@ -2300,6 +2303,9 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .umenu__panel{position:absolute;right:0;top:calc(100% + 8px);z-index:60;width:15.5rem;padding:4px;border:.5px solid var(--border);border-radius:10px;background:var(--surface-raised);box-shadow:var(--shadow-floating);line-height:1.3;transform-origin:top right;animation:menu-in var(--duration-fast) var(--ease-standard)}
 .umenu__head{display:flex;align-items:center;gap:10px;padding:8px}.umenu__id{display:grid;gap:2px;min-width:0;flex:1}
 .umenu__row{display:flex;align-items:center;gap:6px;min-width:0}.umenu__fullname{min-width:0;overflow:hidden;font-size:13px;font-weight:500;text-overflow:ellipsis;white-space:nowrap}
+.umenu__plan--infinite{border-color:transparent;color:#1a2230;background:linear-gradient(90deg,#ffadad,#ffd6a5,#fdffb6,#caffbf,#9bf6ff,#a0c4ff,#bdb2ff,#ffc6ff,#ffadad) 0 0/300% 100%;animation:infinite-pill 8s linear infinite}
+@keyframes infinite-pill{to{background-position:300% 0}}@media (prefers-reduced-motion:reduce){.umenu__plan--infinite{animation:none}}
+h2 .umenu__plan{display:inline-block;vertical-align:2px;margin-left:6px}
 .umenu__plan{flex:none;height:17px;padding:0 5px;border:.5px solid color-mix(in oklab,var(--foreground) 9%,transparent);border-radius:4px;background:color-mix(in oklab,var(--foreground) 4%,transparent);color:var(--text-secondary);font-size:11px;font-weight:500;line-height:16px}
 .umenu__email{overflow:hidden;font-size:12px;color:var(--text-muted);text-overflow:ellipsis;white-space:nowrap}
 .umenu__sep{height:1px;margin:4px -4px;background:color-mix(in oklab,var(--foreground) 7%,transparent)}.umenu form{margin:0}

@@ -178,3 +178,23 @@ test('hosted: the free allowance can be per day (what the hosted relay runs)', a
   env.advance(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) + 60_000 - env.now());
   assert.match(await ben.cli('send', 'Mia', 'a new day'), /Sent msg_/);
 });
+
+test('hosted: the Infinite plan has no limit, shows a rainbow Infinite pill, and can be taken back', async (t0) => {
+  const env = await setup(t0, { hosted: true, billing: { freeMessages: 1, freePeriod: 'day' } });
+  const ben = await owner(env, t0, 'dad@example.com', 'dad');
+  const mia = await owner(env, t0, 'mia9@example.com', 'mia9');
+  const link = (await ben.b('/app/invites', { method: 'POST', form: { bot: ben.botId } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  await mia.b(`/i/${link}`, { method: 'POST', form: { bot: mia.botId, alias: 'Dad' } });
+  const admin = (body) => fetch(`${env.url}/admin/infinite`, { method: 'POST', headers: { authorization: 'Bearer admin-token-for-tests-123456', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await admin({ email: 'nobody@example.com' })).status, 404);
+  assert.equal((await admin({ email: 'Dad@example.com' })).status, 200);
+  for (const t of ['one', 'two', 'three']) assert.match(await ben.cli('send', 'Mia9', t), /Sent msg_/);
+  const home = (await ben.b('/app')).text;
+  assert.match(home, /umenu__plan umenu__plan--infinite">Infinite</);
+  assert.doesNotMatch(home, /free messages left/);
+  const plan = (await ben.b('/app/billing')).text;
+  assert.match(plan, /No limit, for good/);
+  assert.doesNotMatch(plan, /Pay €|coming soon/);
+  await admin({ email: 'dad@example.com', off: true });
+  await assert.rejects(ben.cli('send', 'Mia9', 'four'), /free messages for today are used up/);
+});

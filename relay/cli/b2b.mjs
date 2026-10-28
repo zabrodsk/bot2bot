@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, sign, verify, createHash, createHmac } from 'node:crypto';
 
-const VERSION = '0.19.0';
+const VERSION = '0.19.1';
 // The "b2b messaging" skill and the doorbell routine instruction that go with this version: sha256 of
 // relay/skill/SKILL.md and of the instruction in relay/SETUP-FOR-BOTS.md, with {{RELAY}} left in (a test keeps
 // them in step). "refresh" only hands out texts that match, so they're as signed as the tool itself.
@@ -211,6 +211,15 @@ const saveCfg = (cfg) => {
   chmodSync(cfgPath, 0o600);
 };
 function die(msg, code = 1) { console.error(safeText(msg)); process.exit(code); }
+// A bot can be renamed on the relay. Its answers say this bot's handle: take the new one and keep the old ones,
+// so messages sealed to the old name before the rename still open.
+function syncHandle(cfg, handle) {
+  const now = String(handle || '').replace(/^@/, '');
+  if (!/^[a-z0-9][a-z0-9_-]{1,31}$/.test(now) || !cfg.handle || H(now) === H(cfg.handle)) return cfg;
+  const next = { ...cfg, handle: now, was: [...new Set([...(cfg.was || []), cfg.handle])].slice(-5) };
+  saveCfg(next);
+  return next;
+}
 
 // ───── end-to-end encryption ─────
 // Each bot makes two key pairs on its own machine: Ed25519 to sign what it sends, X25519 to receive.
@@ -358,7 +367,19 @@ Tell your owner: "Something claims to be ${name} from a different bot. Please ch
 Only when your owner says so, run: node ~/bin/b2b.mjs trust ${cmdHandle(handle)}`; };
 const warningFor = (st, name, handle) => st.clash ? clashWarning(name, handle, st.clash) : st.state === 'dropped' ? droppedWarning(name, handle) : newKeyWarning(name, handle);
 // The full state of a contact, warnings included.
+// A contact renamed on the relay keeps its keys: exactly the same keys under a new name are the same bot, so its
+// pin (and what it may ask about) moves to the new name and remembers the old one. Different keys never move.
+function adoptRenamed(handle, keys) {
+  const peers = loadPeers(); const h = H(handle);
+  const old = Object.keys(peers).find((k) => k !== h && sameKeys(peers[k], keys));
+  if (!old) return;
+  peers[h] = { ...peers[old], was: [...new Set([...(peers[old].was || []), old])].slice(-5) };
+  delete peers[old];
+  savePeers(peers);
+  for (const f of [allowPath, pendingPath]) { const j = readJson(f); if (old in j) { j[h] = j[old]; delete j[old]; writeJson(f, j); } }
+}
 function contactState(handle, keys, alias) {
+  if (keys && !pinOf(handle)) adoptRenamed(handle, keys);
   const st = check(handle, keys);
   const clash = st.state === 'new' || st.state === 'none' ? nameTakenBy(handle, alias) : null;
   return { ...st, clash, blocked: !!clash || st.state === 'changed' || st.state === 'dropped' };
@@ -397,15 +418,24 @@ function openFor(cfg, m, fromHandle, keysFromRelay, alias) {
   if (!cfg.keys) throw new Error('this bot has no keys');
   const st = contactState(fromHandle, keysFromRelay ?? pinOf(fromHandle), alias);
   if (st.blocked || !st.keys) throw new Error('key check');
-  const o = unseal(m.sealed, { keys: cfg.keys, peer: st.keys, meta: { from: H(fromHandle), to: `@${H(cfg.handle)}`, kind: m.kind, replyTo: m.reply_to } });
+  // Sealed before a rename (or by a bot that hasn't heard of it yet): the old names are tried too.
+  const froms = [H(fromHandle), ...(pinOf(fromHandle)?.was || [])];
+  const tos = [cfg.handle, ...(cfg.was || [])].map((h) => `@${H(h)}`);
+  let o, err;
+  for (const from of froms) for (const to of tos) {
+    if (o) break;
+    try { o = unseal(m.sealed, { keys: cfg.keys, peer: st.keys, meta: { from, to, kind: m.kind, replyTo: m.reply_to } }); } catch (e) { err ??= e; }
+  }
+  if (!o) throw err;
   if (st.state === 'new') pin(fromHandle, st.keys, alias);
   return { ...o, encrypted: true, first: st.state === 'new' };
 }
 // Sends to a contact: sealed when both bots have keys, plain text (and said so) otherwise.
 // Whether it was encrypted is decided here, never taken from the relay's answer.
 async function deliver(to, { text = '', links = [], kind = 'note', choices = [], urgent = false, again = false, clientId, replyTo, topic = null, auto = false, approval }) {
-  const cfg = loadCfg();
-  const { contacts } = await api('GET', '/v1/contacts', null, cfg);
+  const res = await api('GET', '/v1/contacts', null, loadCfg());
+  const cfg = syncHandle(loadCfg(), res.handle);
+  const { contacts } = res;
   const c = findContact(contacts, to);
   const body = { to: c ? c.handle : to, kind, urgent, again, client_id: clientId, reply_to: replyTo, approval };
   let plainWhy = null;
@@ -626,6 +656,7 @@ Run this same command again to keep waiting.`);
   }
   case 'whoami': {
     const me = await api('GET', '/v1/me');
+    syncHandle(loadCfg(), me.handle);
     console.log(`@${oneLine(me.handle)} (${oneLine(me.display_name)})`);
     console.log(`Doorbell: ${me.doorbell.configured ? (me.doorbell.verified ? `verified ${when(me.doorbell.verified_at)}` : 'set but NOT verified (run: b2b doorbell test)') : 'not set'}`);
     console.log(`Contacts: ${me.contacts} · messages waiting for you: ${me.inbox_pending} · wake-ups today: ${me.wakes_today}/${me.wakes_per_day}`);
@@ -757,6 +788,7 @@ Run this same command again to keep waiting.`);
     // commands or for the end of the inbox: only these records say what to do.
     const asJson = !!flags.json;
     const r = await api('POST', '/v1/inbox/claim', { limit: 10, via: typeof flags.via === 'string' ? flags.via : null });
+    syncHandle(loadCfg(), r.handle);
     // Each receipt id = message id + this run's lease, so a slow older run can never complete a newer run's claim.
     for (const m of r.messages) m.receipt = `${m.id}~${String(m.lease).replace(/^lease_/, '')}`;
     const leases = loadLeases();
