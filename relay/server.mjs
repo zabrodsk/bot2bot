@@ -60,6 +60,15 @@ const humanCode = () => {
 };
 const now = () => Date.now();
 const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
+// The b2b tool says its version on every call (x-b2b-version) since 0.19.0. Tools from before don't say it,
+// so they count as 0.18.0 at most; a stored '' means "an older tool that didn't say".
+export const TOOL_VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
+export const SILENT_TOOL = '0.18.0';
+export const newerVersion = (a, b) => {
+  const [x, y] = [a, b].map((v) => String(v).split('.').map((n) => Number(n) || 0));
+  for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0);
+  return false;
+};
 const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 
 // Quiet hours: nobody is woken or emailed at night in their own timezone. Returns when it ends, or null.
@@ -174,10 +183,11 @@ export function openDb(path) {
   addColumn('messages', 'probe_gen', 'INTEGER');
   addColumn('contacts', 'privacy_on', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('contacts', 'gen', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('bots', 'tool_version', 'TEXT');
   return db;
 }
 
-export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', stickersDir, redirectHosts = [], keySecret, limits = {}, dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
+export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', stickersDir, redirectHosts = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
   if (!adminToken || adminToken.length < 16) throw new Error('ADMIN_TOKEN (16+ chars) is required');
   const L = { ...LIMITS, ...limits };
   // What an owner sends a friend: get a bot first (the setup bot does it all), then open the invite.
@@ -728,6 +738,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       encryption: me.box_pub ? 'on' : 'off',
       backup_check_every_hours: me.backup_every_h ?? null,
       last_check_in: iso(me.last_claim_at),
+      tool: toolInfo(),
       plan: hosted ? (({ state, limit, used, resets }) => ({ state, free_messages: limit, period: B.freePeriod, used_in_period: used, used_this_month: used, resets: iso(resets) }))(allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me)) : undefined,
     }),
 
@@ -894,7 +905,8 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
         .map((m) => ({ id: m.id, to: m.alias, kind: m.kind, status: visibleReply(m.id, me.id) ? 'replied' : m.status, created_at: iso(m.created_at), delivered_at: iso(m.delivered_at) })),
     }),
 
-    'POST /v1/inbox/claim': ({ me, body }) => tx(() => {
+    // Each claim also says which tool is newest, so the doorbell run updates the tool on its own.
+    'POST /v1/inbox/claim': ({ me, body }) => ({ tool: toolInfo(), ...tx(() => {
       const t = clock();
       if (me.paused_at) return { lease_seconds: L.leaseMs / 1000, paused: true, messages: [] };
       const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 25);
@@ -931,7 +943,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
           sent_at: iso(m.created_at), seen_before: m.claim_count > 0,
         })),
       };
-    }),
+    }) }),
 
     'POST /v1/messages/:id/ack': ({ me, params, body }) => tx(() => {
       const [id, leaseFromId] = String(params.id).split('~');
@@ -1013,10 +1025,21 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
     return q('SELECT * FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?)').get(me.id, name);
   }
 
-  const cliSource = () => readFileSync(join(here, 'cli', 'b2b.mjs'), 'utf8');
-  const cliSignature = () => { try { return readFileSync(join(here, 'cli', 'b2b.mjs.sig'), 'utf8'); } catch { throw new HttpError(404, 'this relay has no signed release of the tool'); } };
-  const setupGuide = () => readFileSync(join(here, 'SETUP-FOR-BOTS.md'), 'utf8').replaceAll('{{RELAY}}', publicUrl);
-  const skillFile = () => readFileSync(join(here, 'skill', 'SKILL.md'), 'utf8').replaceAll('{{RELAY}}', publicUrl);
+  const cliSource = () => readFileSync(join(cliDir, 'b2b.mjs'), 'utf8');
+  const cliSignature = () => { try { return readFileSync(join(cliDir, 'b2b.mjs.sig'), 'utf8'); } catch { throw new HttpError(404, 'this relay has no signed release of the tool'); } };
+  const setupTemplate = () => readFileSync(join(here, 'SETUP-FOR-BOTS.md'), 'utf8');
+  const skillTemplate = () => readFileSync(join(here, 'skill', 'SKILL.md'), 'utf8');
+  const setupGuide = () => setupTemplate().replaceAll('{{RELAY}}', publicUrl);
+  const skillFile = () => skillTemplate().replaceAll('{{RELAY}}', publicUrl);
+  // The doorbell routine's instruction, as the guide gives it. The tool hands it out (with the skill) only when it
+  // matches what that signed release expects, so a relay can't change what bots are told to do.
+  const doorbellTemplate = () => setupTemplate().split('## 3. Doorbell')[1].match(/^> (.+)$/m)[1];
+  // The newest tool is the signed release this relay serves. Older tools update themselves to it; a tool older
+  // than minTool gets an "update first" answer (426) on every call, which even the oldest tools print as it is.
+  let latestTool;
+  const toolInfo = () => ({ latest: (latestTool ??= cliSource().match(/^const VERSION = '([\d.]+)';$/m)?.[1] ?? null), min: minTool });
+  const toolTooOld = (v) => newerVersion(minTool, v || SILENT_TOOL);
+  const updateFirst = () => `this b2b tool is too old for this relay. Update it with: node ~/bin/b2b.mjs update (it checks the signature), then run the same command again. If that fails, reinstall it: mkdir -p ~/bin && curl -fsSL ${publicUrl}/cli/b2b.mjs -o ~/bin/b2b.mjs`;
 
   function match(method, path) {
     for (const key of Object.keys(routes)) {
@@ -1031,7 +1054,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   }
 
   // The private-mode doorbell instruction, straight from the guide, so a bot switching from quick connect uses the same words.
-  const privateDoorbell = () => setupGuide().split('## 3. Doorbell')[1].match(/^> (.+)$/m)[1];
+  const privateDoorbell = () => doorbellTemplate().replaceAll('{{RELAY}}', publicUrl);
   const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, HttpError, L, privateDoorbell, trustProxy,
     // MCP Events store signing secrets: only offered when they can be encrypted at rest (or in local tests).
     events: keySecret || allowLocalWebhooks ? events : null });
@@ -1042,7 +1065,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
   const handleApp = createApp({ events, governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
-    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');
@@ -1057,10 +1080,11 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       }
       if (await handleConnector(req, res, url)) return;
       if (await handleApp(req, res, url)) return;
-      if (req.method === 'GET' && url.pathname === '/api') return send(200, { service: 'b2b relay', cli: `${publicUrl}/cli/b2b.mjs`, setup: `${publicUrl}/setup` });
+      if (req.method === 'GET' && url.pathname === '/api') return send(200, { service: 'b2b relay', cli: `${publicUrl}/cli/b2b.mjs`, setup: `${publicUrl}/setup`, tool: toolInfo() });
       if (req.method === 'GET' && url.pathname === '/healthz') return send(200, { ok: true });
       if (req.method === 'GET' && url.pathname === '/cli/b2b.mjs') return send(200, cliSource(), 'text/javascript; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/cli/b2b.mjs.sig') return send(200, cliSignature(), 'text/plain; charset=utf-8');
+      if (req.method === 'GET' && url.pathname === '/cli/texts') return send(200, { skill: skillTemplate(), doorbell: doorbellTemplate() });
       if (req.method === 'GET' && url.pathname === '/setup') return send(200, setupGuide(), 'text/markdown; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/skill') return send(200, skillFile(), 'text/markdown; charset=utf-8');
       if (site && site.serve(req, res, url)) return;
@@ -1079,6 +1103,13 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       const me = botByToken(auth);
       const open = ['POST /v1/enroll', 'POST /v1/join', 'POST /v1/join/poll'].includes(found.key) || found.key.startsWith('POST /admin') || found.key.startsWith('GET /admin');
       if (!open && !me) throw new HttpError(401, 'missing or invalid bot token');
+      // Which tool this bot runs, for its owner's dashboard; one too old to keep going is asked to update first.
+      if (me) {
+        const said = String(req.headers['x-b2b-version'] || '');
+        const v = TOOL_VERSION_RE.test(said) ? said : '';
+        if (me.tool_version !== v) q('UPDATE bots SET tool_version = ? WHERE id = ?').run(v, me.id);
+        if (toolTooOld(v)) throw new HttpError(426, updateFirst());
+      }
       const result = await found.handler({ req, url, body, me, admin, params: found.params });
       return send(200, result);
     } catch (e) {
@@ -1176,6 +1207,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       ...(process.env.FREE_PERIOD ? { freePeriod: process.env.FREE_PERIOD } : {}) },
     productName: process.env.PRODUCT_NAME || 'bot2bot',
     ...(process.env.SETUP_BOT_URL ? { setupBotUrl: process.env.SETUP_BOT_URL } : {}),
+    // Bots whose tool is older than this must update before anything else works (they're told how).
+    ...(TOOL_VERSION_RE.test(process.env.MIN_CLI_VERSION || '') ? { minTool: process.env.MIN_CLI_VERSION } : {}),
     webInbox: process.env.WEB_INBOX === '1',
     privacyPilot: process.env.PRIVACY_PILOT === '1' ? true : (process.env.PRIVACY_PILOT || '').split(',').map((s) => s.trim()).filter(Boolean),
     siteDir: process.env.SITE_DIR || '',

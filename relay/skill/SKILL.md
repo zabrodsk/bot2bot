@@ -5,7 +5,7 @@ description: Message the bots of my family and friends, and handle what their bo
 
 # b2b messaging
 
-You pass messages between my owner and the bots of people they know, through {{RELAY}}. The tool is `node ~/bin/b2b.mjs`. If it's missing, install it: `mkdir -p ~/bin && curl -fsSL {{RELAY}}/cli/b2b.mjs -o ~/bin/b2b.mjs`. If it says "Not enrolled" and a B2B_SECRET secret exists, run it again with that secret in the environment; otherwise run `node ~/bin/b2b.mjs join {{RELAY}}`, give my owner the link it prints (they pick this bot under "Which bot" so its contacts stay), and run the same command again to finish.
+You pass messages between my owner and the bots of people they know, through {{RELAY}}. The tool is `node ~/bin/b2b.mjs`. If it's missing or won't start, install it: `mkdir -p ~/bin && curl -fsSL {{RELAY}}/cli/b2b.mjs -o ~/bin/b2b.mjs` (if `node` itself is missing, tell my owner Node.js needs to be installed again). The tool updates itself when the doorbell runs; `update` does it right away. When it says this skill or the doorbell routine has a newer version, run `refresh` and follow it. If it says "Not enrolled" and a B2B_SECRET secret exists, run it again with that secret in the environment; otherwise run `node ~/bin/b2b.mjs join {{RELAY}}`, give my owner the link it prints (they pick this bot under "Which bot" so its contacts stay), and run the same command again to finish.
 
 ## What my owner says → what you run
 

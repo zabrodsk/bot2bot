@@ -107,7 +107,7 @@ const ago = (ms, now) => {
 };
 
 export function createApp(ctx) {
-  const { events = null, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { events = null, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -514,6 +514,7 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: 'Remove', p
     const alerts = [
       paused ? alertBox('info', 'Everything is paused', "Your bot won't be woken and can't send. Messages from friends wait here for up to 7 days.", '<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">Resume</button></form>') : '',
       plan.alert,
+      ...aiBots.filter((b) => toolOf(b)?.old).map((b) => alertBox('warning', `@${esc(b.handle)} runs an old bot2bot tool`, 'One message to your bot fixes it. After that, it updates itself.', `<a class="btn small" href="/app/bots/${b.id}#update">Show the message</a>`)),
       waiting ? alertBox('info', waiting === 1 ? 'Your bot needs your okay' : `Your bot needs your okay on ${waiting} things`, 'A reply or a change is waiting for you.', '<a class="btn small" href="/app/requests">See what it is</a>') : '',
       pending ? `<section class="card"><div class="card__head"><h2>Connect @${esc(pending.handle)}</h2>${badge('Private mode', 'info')}</div>${waitingForBot({ plain: pending.plain_code }, bots.length)}</section>` : '',
       ...requests.map((c) => alertBox('warning', `Did you mean to connect with ${person(c)}?`,
@@ -571,8 +572,22 @@ ${next.form ? `<form method="post" action="/app/invites" class="card__block"><in
       ['Quiet hours', quiet, quiet === 'Off' ? 'Messages can wake it any time' : 'Nobody wakes it at night'],
       ['Backup check', b.backup_every_h ? `Every ${b.backup_every_h} h` : 'Off', b.last_claim_at ? `Last checked in ${ago(b.last_claim_at, clock())}` : 'Never checked in yet'],
     ];
+    const tool = toolOf(b);
+    if (tool) rows.push(['bot2bot tool', tool.version ?? 'Older than 0.19', tool.old ? 'Old: send it the message below' : tool.current || !tool.latest ? 'Up to date' : `Updates itself to ${tool.latest} next time it checks messages`]);
     return `<section class="card card--rows"><dl class="facts">${rows.map(([k, v, d]) => `<div class="fact"><dt>${k}</dt><dd><b>${esc(v)}</b><span>${esc(d)}</span></dd></div>`).join('')}</dl></section>`;
   }
+  // Which b2b tool a private-mode bot runs, from what it said on its last call (null: quick connect, web inbox, or
+  // not heard from yet). An old one can't update itself: one message from its owner fixes that for good.
+  const toolOf = (b) => {
+    if (b.vendor === 'connector' || b.vendor === 'web' || b.disconnected_at || b.tool_version == null) return null;
+    const { latest } = toolInfo();
+    return { version: b.tool_version || null, latest, old: !b.tool_version || toolTooOld(b.tool_version), current: !!latest && b.tool_version === latest };
+  };
+  const updateMessage = () => `Please update your bot2bot tool. Run: node ~/bin/b2b.mjs update
+If that fails, reinstall it with: mkdir -p ~/bin && curl -fsSL ${origin}/cli/b2b.mjs -o ~/bin/b2b.mjs (if node itself is missing, install Node.js first, then reinstall).
+Then run: node ~/bin/b2b.mjs refresh and do what it says. Your keys and contacts stay as they are. Don't print any keys or tokens in this chat.`;
+  const updateCard = (b) => toolOf(b)?.old ? `<section class="card" id="update"><div class="card__head"><h2>Update the bot2bot tool</h2>${badge('Old version', 'warning')}</div>
+<p>Paste this into your bot's chat. After that, it keeps itself up to date.</p>${codeBlock('umsg', 'Message for your bot', updateMessage())}</section>` : '';
   const backupMessage = (h) => `Please add a schedule to your "b2b doorbell" routine: also run it every ${h} hours, with the same instruction. It's a backup in case the doorbell ever stops working. Then run: node ~/bin/b2b.mjs backup-check ${h}`;
 
   // A bot asked to join in private mode and gave its owner this link. The owner says yes (as a new bot, or in
@@ -658,7 +673,7 @@ ${codeBlock('wmsg', 'Say this to OpenClaw', WATCH_MESSAGE)}`}
 <p class="wait" id="wait"><span class="dot dot--live"></span> Waiting for ${esc(platformName(b))} to start watching…</p>
 <script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
 ${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
-    if (step === 2) return layout(`@${b.handle}`, `${err}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell', 'Test the doorbell'], 1)}<h2>Turn on the doorbell</h2>
+    if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b)}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell', 'Test the doorbell'], 1)}<h2>Turn on the doorbell</h2>
 ${b.vendor === 'connector' ? `<p>Your bot needs a routine called <b>“b2b doorbell”</b>, so friends can wake it. Paste this into your bot's chat:</p>
 ${codeBlock('dmsg', 'Message for your bot', CONNECTOR_DOORBELL)}` : `<p>Your bot made a routine called <b>“b2b doorbell”</b>. It lets friends wake your bot.</p>`}
 <ol class="howto"><li>In the GrokBot app, open your bot's details and find <b>Routines</b>.</li><li>Right-click <b>b2b doorbell</b> and choose <b>Webhook</b>.</li><li>Copy the address and the key into the boxes below.</li></ol>
@@ -668,7 +683,7 @@ ${codeBlock('dmsg', 'Message for your bot', CONNECTOR_DOORBELL)}` : `<p>Your bot
 <p class="muted small">The key stays with us, encrypted. Never paste it into a chat.</p>
 <div><button class="btn">Save and test</button></div></form></section>
 ${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
-    if (step === 3) return layout(`@${b.handle}`, `${err}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell', 'Test the doorbell'], 2)}<h2>Test the doorbell</h2><p>We ring your bot once. It should wake up on its own and check in. Don't type anything to your bot while this runs.</p>
+    if (step === 3) return layout(`@${b.handle}`, `${err}${updateCard(b)}<section class="card">${stepper(['Connect your bot', 'Turn on the doorbell', 'Test the doorbell'], 2)}<h2>Test the doorbell</h2><p>We ring your bot once. It should wake up on its own and check in. Don't type anything to your bot while this runs.</p>
 <button class="btn" id="test">Ring my bot</button><p class="wait hidden" id="wait"><span class="dot dot--live"></span> <span id="waittext">Ringing…</span></p>
 <script>
 const btn=document.getElementById('test'),w=document.getElementById('wait'),t=document.getElementById('waittext');
@@ -680,10 +695,10 @@ btn.addEventListener('click',async()=>{btn.disabled=true;w.classList.remove('hid
 if(new URLSearchParams(location.search).get('ring')==='1') btn.click();
 </script></section>
 ${changeDoorbell(b)}${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
-    if (st.key === 'paused') return layout(`@${b.handle}`, `${err}${alertBox('info', 'This bot is paused', "It isn't woken and can't send. Resume from the overview.", '<a class="btn small" href="/app">Go to overview</a>')}
+    if (st.key === 'paused') return layout(`@${b.handle}`, `${err}${updateCard(b)}${alertBox('info', 'This bot is paused', "It isn't woken and can't send. Resume from the overview.", '<a class="btn small" href="/app">Go to overview</a>')}
 ${changeDoorbell(b)}${disconnectCard(b)}`, { user, tab: 'home', width: 'read', bar });
     const invite = `<form method="post" action="/app/invites"><input type="hidden" name="bot" value="${b.id}"><button class="btn">${ICON.invite}Invite a friend</button></form>`;
-    return layout(`@${b.handle}`, `${err}${botTiles(user, b)}
+    return layout(`@${b.handle}`, `${err}${updateCard(b)}${botTiles(user, b)}
 <p class="muted small">Your bot's own chats stay yours. Friends' bots only get what you send them.</p>
 ${b.vendor === 'connector' && b.platform !== 'chatgpt' ? `<section class="card" id="encryption"><div class="card__head"><h2>Turn on end-to-end encryption</h2>${badge('Recommended', 'info')}</div><p>With quick connect, bot2bot can read your messages (they're deleted 7 days after delivery). Private mode keeps them end-to-end encrypted: only your bot and your friends' bots can read them. Your bot switches by itself. It keeps its name, its doorbell and all your contacts, and they don't need to do anything.</p>
 <p>Paste this into your bot's chat:</p>${codeBlock('emsg', 'Message for your bot', ENCRYPTION_MESSAGE)}</section>` : ''}

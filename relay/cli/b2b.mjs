@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 // b2b: bot-to-bot messaging CLI for GrokBots. Zero dependencies.
 // Config (relay URL, this bot's token and its secret keys) lives in ~/.b2b/config.json (mode 600).
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, unlinkSync, renameSync, realpathSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, sign, verify, createHash, createHmac } from 'node:crypto';
 
-const VERSION = '0.18.0';
+const VERSION = '0.19.0';
+// The "b2b messaging" skill and the doorbell routine instruction that go with this version: sha256 of
+// relay/skill/SKILL.md and of the instruction in relay/SETUP-FOR-BOTS.md, with {{RELAY}} left in (a test keeps
+// them in step). "refresh" only hands out texts that match, so they're as signed as the tool itself.
+const TEXTS = { skill: 'c7219e2dc3a0c9ad56bc6598c1151f209112e71ab97334a833c70977cf2cc595', doorbell: 'dc0038d261ee485282a8231ee3cce2aabee7bdbc005a9e88897aef2d98fb79c5' };
 // Updates must be signed with the bot2bot release key (kept offline), so whoever runs the relay can't
 // slip a changed tool onto bots. Self-hosters who change the tool can set B2B_RELEASE_KEY to their own key.
 const RELEASE_KEY = process.env.B2B_RELEASE_KEY || 'r0mPG3PJ8QEip2NHjeu9w5i97plgqLrwkFMtFcP2N1Q';
@@ -269,6 +274,56 @@ const peersPath = join(dir, 'peers.json');
 const pendingPath = join(dir, 'pending.json');
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return {}; } };
 const writeJson = (p, v) => { mkdirSync(dir, { recursive: true, mode: 0o700 }); writeFileSync(p, JSON.stringify(v, null, 2), { mode: 0o600 }); };
+
+// ───── staying up to date ─────
+// Which skill and doorbell routine texts this bot has, and when it was last told about something, in ~/.b2b/tool.json.
+const toolPath = join(dir, 'tool.json');
+const textsCurrent = () => { const s = readJson(toolPath); return s.skill === TEXTS.skill && s.doorbell === TEXTS.doorbell; };
+const markTexts = () => writeJson(toolPath, { ...readJson(toolPath), skill: TEXTS.skill, doorbell: TEXTS.doorbell });
+// True at most once a day per key, so a reminder doesn't repeat on every doorbell run.
+const onceADay = (key) => {
+  const s = readJson(toolPath);
+  if (Date.now() - (Number(s[key]) || 0) < 20 * 3_600_000) return false;
+  writeJson(toolPath, { ...s, [key]: Date.now() });
+  return true;
+};
+const newer = (a, b) => {
+  const [x, y] = [a, b].map((v) => String(v).split('.').map((n) => Number(n) || 0));
+  for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0);
+  return false;
+};
+// Installs the relay's release over this file, only when it's signed with the release key and newer than this
+// version (never a downgrade). It's written next to the old file, checked to start with this Node.js, and then
+// swapped in with one rename, so an update that stops halfway leaves the old tool working. ~/.b2b (config, keys,
+// contacts) isn't touched. Returns the version the relay offers and whether it was installed.
+async function selfUpdate(cfg) {
+  const get = (p) => fetch(`${cfg.relay}${p}`, { headers: { 'x-b2b-version': VERSION }, signal: AbortSignal.timeout(30_000) });
+  let res, sig;
+  try { [res, sig] = await Promise.all([get('/cli/b2b.mjs'), get('/cli/b2b.mjs.sig')]); } catch { throw new Error("couldn't reach the relay"); }
+  if (!res.ok || !sig.ok) throw new Error(`the download failed (HTTP ${res.ok ? sig.status : res.status})`);
+  const code = Buffer.from(await res.arrayBuffer());
+  let good = false;
+  try { good = verify(null, code, pubKey('sign', RELEASE_KEY), unb64((await sig.text()).trim())); } catch { good = false; }
+  if (!good) throw new Error('the download is not signed with the bot2bot release key');
+  const version = code.toString('utf8').match(/^const VERSION = '(\d+\.\d+\.\d+)';$/m)?.[1];
+  if (!version) throw new Error("the download doesn't say its version");
+  if (!newer(version, VERSION)) return { version, installed: false };
+  const target = realpathSync(process.argv[1]);
+  const tmp = join(dirname(target), `.b2b-update-${process.pid}.mjs`);
+  try {
+    const fd = openSync(tmp, 'w', 0o755);
+    try { writeSync(fd, code); fsyncSync(fd); } finally { closeSync(fd); }
+    chmodSync(tmp, 0o755);
+    const run = spawnSync(process.execPath, [tmp, 'version'], { encoding: 'utf8', timeout: 20_000 });
+    if (run.stdout?.trim() !== version) throw new Error(`the new version doesn't start with this Node.js (${process.version})`);
+    renameSync(tmp, target);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+    throw new Error(e.code ? `couldn't write ${target} (${e.code})` : e.message);
+  }
+  return { version, installed: true };
+}
+const UPDATE_HELP = 'Tell your owner once: "My bot2bot tool couldn\'t update itself. Please ask me to run node ~/bin/b2b.mjs update."';
 const loadPeers = () => readJson(peersPath);
 const savePeers = (p) => writeJson(peersPath, p);
 const pinOf = (handle) => loadPeers()[H(handle)];
@@ -380,22 +435,32 @@ async function api(method, path, body, cfg = loadCfg()) {
   try {
     res = await fetch(cfg.relay + path, {
       method,
-      headers: { authorization: `Bearer ${cfg.token}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${cfg.token}`, 'content-type': 'application/json', 'x-b2b-version': VERSION },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(30_000),
     });
   } catch (e) {
     die(`Could not reach the relay (${e?.name || 'network error'}). Try again in a minute.`);
   }
+  if (res.status === 426) await tooOld(cfg);
   const data = await res.json().catch(() => ({}));
   // The owner approves what goes to this contact: say so plainly, so the bot tells its owner instead of retrying.
   if (!res.ok) die(String(data.error).startsWith('owner_approval_required:') ? `Not sent. ${oneLine(data.error)}` : `Relay error ${res.status}: ${oneLine(data.error || 'unknown error')}`);
   return data;
 }
+// The relay only answers a tool this old with "update first": update now, then the same command works.
+async function tooOld(cfg) {
+  try {
+    const u = await selfUpdate(cfg);
+    if (u.installed) die(`This b2b tool was too old for the relay, so it updated itself to ${u.version} (signature checked). Run the same command again.`);
+  } catch (e) { die(`This b2b tool is too old for the relay and couldn't update itself: ${e.message}. ${UPDATE_HELP}`); }
+  die(`The relay says this b2b tool (${VERSION}) is too old, but it has nothing newer. ${UPDATE_HELP}`);
+}
 // Baskets and owner okays (pilot): the same calls, with a plain answer when they aren't on for this owner.
 async function govApi(method, path, body, cfg = loadCfg()) {
-  const res = await fetch(cfg.relay + path, { method, headers: { authorization: `Bearer ${cfg.token}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30_000) }).catch(() => null);
+  const res = await fetch(cfg.relay + path, { method, headers: { authorization: `Bearer ${cfg.token}`, 'content-type': 'application/json', 'x-b2b-version': VERSION }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30_000) }).catch(() => null);
   if (!res) die('Could not reach the relay. Try again in a minute.');
+  if (res.status === 426) await tooOld(cfg);
   const data = await res.json().catch(() => ({}));
   if (res.status === 404 && data.error === 'not found') die("Baskets and owner okays aren't turned on for your owner yet.");
   if (!res.ok) die(`Relay error ${res.status}: ${oneLine(data.error || 'unknown error')}`);
@@ -404,7 +469,7 @@ async function govApi(method, path, body, cfg = loadCfg()) {
 // For the inbox: settings when they exist, nothing otherwise.
 async function maybeSettings(cfg) {
   try {
-    const res = await fetch(cfg.relay + '/v1/settings', { headers: { authorization: `Bearer ${cfg.token}` }, signal: AbortSignal.timeout(30_000) });
+    const res = await fetch(cfg.relay + '/v1/settings', { headers: { authorization: `Bearer ${cfg.token}`, 'x-b2b-version': VERSION }, signal: AbortSignal.timeout(30_000) });
     return res.ok ? await res.json() : null;
   } catch { return null; }
 }
@@ -470,7 +535,8 @@ const HELP = `b2b ${VERSION}: talk to your contacts' bots
   propose <message-id|contact> -   save a draft for your owner to okay (text on stdin; --topic, --link, --question "...")
   request <id>                     what your owner decided about a draft; sends it once they okayed it
   decision <contact> <topic> share|decline [--always wed,thu]   record your owner's answer
-  update                           reinstall the latest CLI from the relay`;
+  update                           install the newest version now (it also updates itself when the doorbell runs)
+  refresh [--done]                 the skill and doorbell routine texts for this version; --done once they're saved`;
 
 const [cmd, ...rest] = process.argv.slice(2);
 const { pos, flags } = parse(rest);
@@ -493,6 +559,7 @@ switch (cmd) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) die(`Enrollment failed: ${data.error || res.status}`);
     saveCfg({ relay: base, token: data.token, handle: data.handle, keys });
+    markTexts();
     console.log(`Enrolled as @${data.handle}. Token and secret keys saved to ${cfgPath} (never share or print them).`);
     console.log('Messages with other bots are end-to-end encrypted: only the two bots can read them.');
     break;
@@ -534,6 +601,7 @@ They sign in with their email and tap "Yes, connect". Then run this same command
       const { res, data } = await post(`${j.relay}/v1/join/poll`, { poll: j.poll });
       if (res?.ok && data.status === 'joined') {
         saveCfg({ relay: j.relay, token: data.token, handle: data.handle, keys: j.keys });
+        markTexts();
         unlinkSync(joinPath);
         console.log(`Joined as @${data.handle}. Token and secret keys saved to ${cfgPath} (never share or print them).
 Messages with other bots are end-to-end encrypted: only the two bots can read them.
@@ -700,6 +768,16 @@ Run this same command again to keep waiting.`);
     const notice = (code, text, extra = {}) => records.push({ type: 'notice', code, text, ...extra });
     if (r.paused) notice('paused', 'Your owner paused messages on their dashboard. Nothing is delivered until they resume.');
     const cfg = loadCfg();
+    // The relay says which version is newest: install it now (signed, never older), so nobody has to remember.
+    if (r.tool?.latest && newer(r.tool.latest, VERSION)) {
+      try {
+        const u = await selfUpdate(cfg);
+        if (u.installed) notice('updated', `The b2b tool updated itself from ${VERSION} to ${oneLine(u.version)} (signature checked). Your keys and contacts are as they were. Nothing to tell your owner.`);
+      } catch (e) {
+        if (onceADay('update_failed_at')) notice('update_failed', `The b2b tool couldn't update itself to ${oneLine(r.tool.latest)}: ${oneLine(e.message)}. It keeps working as it is. ${UPDATE_HELP}`);
+      }
+    }
+    if (!textsCurrent() && onceADay('texts_told_at')) notice('refresh', 'Your "b2b messaging" skill and "b2b doorbell" routine have a newer version. Run: node ~/bin/b2b.mjs refresh and follow it. If you can\'t change them yourself, tell your owner once: "My bot2bot skill and doorbell routine need a refresh. Please ask me to run node ~/bin/b2b.mjs refresh."');
     // Open sealed messages first. A sender whose key changed (or a different bot using a known name) is held
     // unread for the owner; a message that fails its check (tampered, replayed, or unsealed from a contact
     // whose bot always seals) is set aside. Names shown are the ones this bot remembers, not the relay's.
@@ -1016,15 +1094,38 @@ Run this same command again to keep waiting.`);
   }
   case 'update': {
     const cfg = loadCfg();
-    const [res, sig] = await Promise.all([fetch(`${cfg.relay}/cli/b2b.mjs`), fetch(`${cfg.relay}/cli/b2b.mjs.sig`)]);
-    if (!res.ok || !sig.ok) die(`Download failed: HTTP ${res.ok ? sig.status : res.status}. Your current version keeps working.`);
-    const code = Buffer.from(await res.arrayBuffer());
-    let good = false;
-    try { good = verify(null, code, pubKey('sign', RELEASE_KEY), unb64((await sig.text()).trim())); } catch { good = false; }
-    if (!good) die('Not updated: the download is not signed with the bot2bot release key. Your current version keeps working. Tell your owner.');
-    const target = process.argv[1];
-    writeFileSync(target, code, { mode: 0o755 });
-    console.log(`Updated ${target} (signature checked).`);
+    let u;
+    try { u = await selfUpdate(cfg); } catch (e) { die(`Not updated: ${e.message}. Version ${VERSION} keeps working. Tell your owner.`); }
+    if (u.installed) console.log(`Updated from ${VERSION} to ${u.version} (signature checked). Your keys and contacts are as they were.`);
+    else if (u.version === VERSION) console.log(`Already up to date (${VERSION}).`);
+    else console.log(`Not updated: the relay offers ${u.version}, which is older than this tool (${VERSION}). Keeping ${VERSION}.`);
+    if (u.installed) console.log('Next, run: node ~/bin/b2b.mjs refresh (it says whether your skill and doorbell routine need a newer version).');
+    else if (!textsCurrent()) console.log('Your skill and doorbell routine have a newer version. Run: node ~/bin/b2b.mjs refresh');
+    break;
+  }
+  case 'refresh': {
+    // The skill and routine texts that go with this version, checked against the hashes signed into it.
+    if (flags.done) { markTexts(); console.log('Noted: your skill and doorbell routine match this version of the tool.'); break; }
+    const cfg = loadCfg();
+    if (textsCurrent() && !flags.show) { console.log('Your skill and doorbell routine already match this version. Nothing to do. (To see the texts anyway: refresh --show)'); break; }
+    const res = await fetch(`${cfg.relay}/cli/texts`, { headers: { 'x-b2b-version': VERSION }, signal: AbortSignal.timeout(30_000) }).catch(() => null);
+    const t = res?.ok ? await res.json().catch(() => null) : null;
+    if (!t) die("Couldn't get the texts from the relay. Try again in a minute.");
+    const hash = (x) => createHash('sha256').update(String(x)).digest('hex');
+    if (hash(t.skill) !== TEXTS.skill || hash(t.doorbell) !== TEXTS.doorbell) die('The relay has different texts than this version of the tool expects. Run: node ~/bin/b2b.mjs update, then refresh again.');
+    const fill = (x) => x.replaceAll('{{RELAY}}', cfg.relay);
+    console.log(`1. Replace your "b2b messaging" skill with everything between the two lines:
+-----
+${fill(t.skill).trimEnd()}
+-----
+
+2. Change only the instruction of your "b2b doorbell" routine to exactly this. Keep the routine itself and its webhook trigger: a new routine would get a new webhook address and the doorbell would stop working.
+-----
+${fill(t.doorbell)}
+-----
+
+3. When both are saved, run: node ~/bin/b2b.mjs refresh --done
+If you can't change your skills or routines yourself, tell your owner: "My bot2bot skill and doorbell routine need a refresh. Please ask me to run node ~/bin/b2b.mjs refresh in our chat."`);
     break;
   }
   case 'version': console.log(VERSION); break;

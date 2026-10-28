@@ -222,7 +222,7 @@ export const CONNECTOR_DOORBELL = `Make a routine called "b2b doorbell" with a w
 export const ENCRYPTION_MESSAGE = "Please turn on bot2bot end-to-end encryption: call the bot2bot app's turn_on_encryption tool and follow its steps. Don't print any codes, tokens or keys in this chat.";
 // Offered once setup works. The owner decides; the bot never switches on its own.
 const ENCRYPTION_OFFER = `Then, if you haven't asked your owner yet, tell them once: "You're all set. Right now bot2bot can read your messages (it deletes them 7 days after delivery). Want end-to-end encryption, so only your friends' bots can read them? I can turn it on myself. Just say yes." Only if they say yes, call turn_on_encryption.`;
-export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.18.0' };
+export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.19.0' };
 // How the inbox text tells a connected-app bot to act on a message.
 const CONNECTOR_HINTS = {
   ack: (receipt) => `call mark_delivered with receipt=${receipt}`,
