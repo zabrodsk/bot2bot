@@ -65,8 +65,12 @@ function route(from: Cell, to: Cell, pitch: number, s: number, landOnBot: boolea
 }
 
 function build(root: HTMLElement) {
-  const svg = root.querySelector('svg')!;
+  // Two layers: the sleeping grid, painted once, and a small live layer on top that holds
+  // everything that moves. Animating inside one big SVG repainted all the bots every frame.
+  const svg = root.querySelector<SVGSVGElement>('.field__svg:not(.field__live)')!;
+  const live = root.querySelector<SVGSVGElement>('.field__live')!;
   svg.replaceChildren();
+  live.replaceChildren();
   const mode = root.dataset.field === 'miss' ? 'miss' : 'wake';
   const names: string[] = JSON.parse(root.dataset.names || '[]');
   const reduce = prefersReducedMotion();
@@ -78,9 +82,11 @@ function build(root: HTMLElement) {
   const pitch = (W - bw) / (cols - 1); // columns span exactly from the left to the right margin
   const rows = Math.max(5, Math.floor((H - bh) / pitch) + 1);
   const yLast = H - bh / 2; // the bottom row sits on the field's bottom edge
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.setAttribute('width', String(W));
-  svg.setAttribute('height', String(H));
+  for (const layer of [svg, live]) {
+    layer.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    layer.setAttribute('width', String(W));
+    layer.setAttribute('height', String(H));
+  }
 
   const defs = el('defs', {}, svg);
   const tile = el('g', { id: 'bot-asleep' }, defs);
@@ -93,9 +99,10 @@ function build(root: HTMLElement) {
     el('rect', { x: e.x, y: BOT.eyeCy - eh / 2, width: e.w, height: eh, rx: eh / 2, fill: C.sleep }, tile);
   }
 
-  const traces = el('g', {}, svg);
   const field = el('g', {}, svg);
-  const top = el('g', {}, svg);
+  const traces = el('g', {}, live);
+  const awake = el('g', {}, live);
+  const top = el('g', {}, live);
   const cells: Cell[][] = [];
   for (let r = 0; r < rows; r++) {
     cells[r] = [];
@@ -171,8 +178,9 @@ function build(root: HTMLElement) {
     let side: SVGElement[] = [];
     if (mode === 'wake') {
       cell.node!.remove();
-      bot = liveBot(field, cell, s);
+      bot = liveBot(awake, cell, s);
       side = neighbours(cell);
+      side.forEach((n) => awake.appendChild(n));
       name$ = label(cell, name);
       gsap.set(name$, { opacity: 0 });
     } else {

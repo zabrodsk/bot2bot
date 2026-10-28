@@ -47,11 +47,19 @@ const DOWN = { head: '#1b2540', edge: '#e7ecf3', eye: '#e7ecf3', light: '#3a4660
 type Cell = { x: number; y: number };
 
 function build(root: HTMLElement) {
-  const svg = root.querySelector<SVGSVGElement>('.qs__field')!;
-  svg.replaceChildren();
+  // Three layers: the sleeping field (painted once), the doorbell wave (shown only while it runs)
+  // and the live layer with everything that moves on scroll.
+  const svg = root.querySelector<SVGSVGElement>('.qs__field:not(.qs__day):not(.qs__wavebots):not(.qs__live)')!;
+  const daySvg = root.querySelector<SVGSVGElement>('.qs__day')!;
+  const waveSvg = root.querySelector<HTMLElement>('.qs__wave')!; // the growing mask
+  const waveInner = root.querySelector<HTMLElement>('.qs__waveinner')!; // counter-scaled, painted once
+  const waveBots = root.querySelector<SVGSVGElement>('.qs__wavebots')!;
+  const live = root.querySelector<SVGSVGElement>('.qs__live')!;
+  const layers = [svg, daySvg, waveBots, live];
+  for (const layer of layers) layer.replaceChildren();
   const W = root.clientWidth, H = root.clientHeight;
   const mob = isMobile() || W < 900;
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  for (const layer of layers) layer.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const rb = root.getBoundingClientRect();
   const rel = (e: Element | null, pad = 0) => {
     const r = e!.getBoundingClientRect();
@@ -87,16 +95,19 @@ function build(root: HTMLElement) {
   el('stop', { offset: 1, 'stop-color': '#fff', 'stop-opacity': 1 }, fade);
   const fadeMask = el('mask', { id: 'qs-fade-mask', maskUnits: 'userSpaceOnUse', x: 0, y: 0, width: W, height: H }, defs);
   el('rect', { x: 0, y: 0, width: W, height: H, fill: 'url(#qs-fade)' }, fadeMask);
-  const glow = el('filter', { id: 'qs-glow', x: '-50%', y: '-50%', width: '200%', height: '200%' }, defs);
-  el('feGaussianBlur', { stdDeviation: 4 }, glow);
+  // A soft glow without a blur filter: a radial gradient, cheap to move every frame.
+  const glow = el('radialGradient', { id: 'qs-glow' }, defs);
+  el('stop', { offset: 0, 'stop-color': '#4f6dff', 'stop-opacity': 0.9 }, glow);
+  el('stop', { offset: 1, 'stop-color': '#4f6dff', 'stop-opacity': 0 }, glow);
 
   const keepOut = ['.qs__clock', '.qs__foot', '.qs__copy', '.qs__queue', '.qs__bell', '.qs__name'].map((sel) => rel(root.querySelector(sel), mob ? 8 : 14));
   const cols = Math.floor((W - bw) / P) + 1;
   const pitch = (W - bw) / (cols - 1);
-  const traces = el('g', {}, svg);
   const field = el('g', { mask: 'url(#qs-fade-mask)' }, svg);
-  const wave = el('g', { mask: 'url(#qs-wave)', color: C.signal }, svg);
-  const over = el('g', {}, svg);
+  const day = el('g', { mask: 'url(#qs-fade-mask)' }, daySvg);
+  const wave = el('g', { color: C.signal }, waveBots);
+  const traces = el('g', {}, live);
+  const over = el('g', {}, live);
   const cells: Cell[] = [];
   for (let y = H - 14; y > horizon + 6; y -= pitch) {
     for (let c = 0; c < cols; c++) {
@@ -106,13 +117,18 @@ function build(root: HTMLElement) {
       cells.push({ x, y });
       const t = `translate(${x.toFixed(1)} ${(y + BOT.vc * s).toFixed(1)}) scale(${s})`;
       el('use', { href: '#qs-bot', transform: t }, field);
+      el('use', { href: '#qs-bot', transform: t }, day);
       el('use', { href: '#qs-bot', transform: t }, wave);
     }
   }
-  // The doorbell at 08:00: a band of light running out from your bot across the field.
-  const waveMask = el('mask', { id: 'qs-wave', maskUnits: 'userSpaceOnUse', x: 0, y: 0, width: W, height: H }, defs);
-  const waveRing = el('circle', { cx: ring.x, cy: ring.y, r: 0, fill: 'none', stroke: '#fff', 'stroke-width': mob ? 90 : 150 }, waveMask);
+  // The doorbell at 08:00: a band of light running out from your bot across the field. The mask is
+  // a 200px ring scaled up by k; the bots inside are scaled by 1/k around your bot, so they stay put.
   const far = Math.max(...[[0, 0], [W, 0], [0, H], [W, H]].map(([x, y]) => Math.hypot(x - ring.x, y - ring.y))) + 160;
+  const kMax = (2 * far) / 200, k0 = 0.05;
+  const waveAt = (k: number) => { gsap.set(waveSvg, { scale: k }); gsap.set(waveInner, { scale: 1 / k }); };
+  gsap.set(waveSvg, { x: ring.x - 100, y: ring.y - 100, transformOrigin: '50% 50%' });
+  gsap.set(waveInner, { left: 100 - ring.x, top: 100 - ring.y, width: W, height: H, transformOrigin: `${ring.x}px ${ring.y}px` });
+  waveAt(k0);
 
   // ── Friends: bots in the field that send in the night, all to the left of the ring.
   const meta = msgs.map((m) => ({
@@ -172,10 +188,10 @@ function build(root: HTMLElement) {
     const park = `M${hx} ${hy}L${ring.x + R2 * Math.cos(a0)} ${ring.y + R2 * Math.sin(a0)}A${R2} ${R2} 0 ${span > Math.PI ? 1 : 0} 1 ${ring.x + R2 * Math.cos(a1)} ${ring.y + R2 * Math.sin(a1)}L${tx} ${ty}`;
 
     const trace = el('path', { d, fill: 'none', stroke: C.signal, 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', opacity: 0 }, traces);
-    const bloom = el('path', { d, fill: 'none', stroke: '#4f6dff', 'stroke-width': 7, 'stroke-linecap': 'round', filter: 'url(#qs-glow)', opacity: 0 }, traces);
+    const bloom = el('path', { d, fill: 'none', stroke: '#4f6dff', 'stroke-width': 8, 'stroke-linecap': 'round', 'stroke-opacity': 0.28, opacity: 0 }, traces);
     const comet = el('path', { d, fill: 'none', stroke: '#b7c5ff', 'stroke-width': 2.4, 'stroke-linecap': 'round', opacity: 0 }, traces);
     const orbit = el('path', { d: park, fill: 'none' }, traces);
-    const halo = el('circle', { r: 12, fill: '#4f6dff', filter: 'url(#qs-glow)', opacity: 0 }, over);
+    const halo = el('circle', { r: 16, fill: 'url(#qs-glow)', opacity: 0 }, over);
     const dot = el('circle', { r: 3.4, fill: '#e3e9ff', opacity: 0 }, over);
     const len = trace.getTotalLength(), olen = orbit.getTotalLength();
     const tail = Math.min(90, len * 0.4);
@@ -198,9 +214,9 @@ function build(root: HTMLElement) {
   // ── DOM pieces.
   const q = <T extends Element = HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
   const sky = { dusk: q('.qs__sky--dusk'), morning: q('.qs__sky--morning') };
-  const ground = q('.qs__ground');
+  const groundDay = q('.qs__groundday');
   const dawnGlow = q('.qs__dawn');
-  const stars = q<SVGSVGElement>('.qs__stars');
+  const stars = q('.qs__stars');
   const shoot = q<SVGLineElement>('.qs__shoot');
   const moon = q<SVGSVGElement>('.qs__moon');
   const sun = q<SVGSVGElement>('.qs__sun');
@@ -246,7 +262,10 @@ function build(root: HTMLElement) {
 
   // The state at 21:40.
   const vars = (fg: string, muted: string, line: string, card: string) => ({ '--qs-fg': fg, '--qs-muted': muted, '--qs-line': line, '--qs-card': card });
-  gsap.set(root, vars('#e7ecf3', '#9aa6bb', 'rgba(231,236,243,0.22)', 'rgba(18,26,43,0.72)'));
+  // The colours flip on the words only: set on the stage root they reached thousands of SVG nodes
+  // and every frame of the dawn recalculated all of them.
+  const words = [q('.qs__copy'), q('.qs__clock'), q('.qs__dock'), q('.qs__foot')];
+  gsap.set(words, vars('#e7ecf3', '#9aa6bb', 'rgba(231,236,243,0.22)', 'rgba(18,26,43,0.9)'));
   gsap.set(sky.dusk, { opacity: 1 });
   gsap.set(stars, { opacity: 0.15 });
   gsap.set([...msgs, bubble], { opacity: 0 });
@@ -309,9 +328,10 @@ function build(root: HTMLElement) {
   tl.to(dawnGlow, { opacity: 1, scale: 1, duration: 0.05, ease: 'power2.out' }, D - 0.04)
     .to(sky.morning, { opacity: 1, duration: 0.05 }, D - 0.02)
     .to([stars, moon], { opacity: 0, duration: 0.035 }, D - 0.025)
-    .to(root, { ...vars('#1a2230', '#586377', 'rgba(26,34,48,0.12)', 'rgba(255,255,255,0.9)'), duration: 0.04 }, D - 0.01)
-    .to(ground, { '--g': 1, duration: 0.05 }, D - 0.02)
-    .to(svg, { color: '#c3cad5', duration: 0.04 }, D - 0.01)
+    .to(words, { ...vars('#1a2230', '#586377', 'rgba(26,34,48,0.12)', 'rgba(255,255,255,0.9)'), duration: 0.04 }, D - 0.01)
+    .to(groundDay, { opacity: 1, duration: 0.05 }, D - 0.02)
+    .to(svg, { opacity: 0, duration: 0.04 }, D - 0.01)
+    .to(daySvg, { opacity: 1, duration: 0.04 }, D - 0.01)
     .to(sends.map((f) => f.trace), { opacity: 0, duration: 0.02 }, D + 0.015)
     .to(sun, { opacity: 1, y: 0, duration: 0.07, ease: 'power2.out' }, D - 0.03)
     .to(swaps.hours, { opacity: 0, duration: 0.012 }, D)
@@ -331,10 +351,13 @@ function build(root: HTMLElement) {
 
   // Your bot wakes, the doorbell rings out across the field, and it tells you.
   const wake = D + 0.065;
+  const waveK = { k: k0 };
   paint(UP).forEach(([n, v]) => tl.to(n, { ...v, duration: 0.02 }, wake));
   eyes.forEach((e, i) => tl.to(e, { attr: open[i], fill: UP.eye, duration: 0.018, ease: 'expo.out' }, wake + 0.004));
   tl.fromTo(ping, { attr: { r: BOT.light.r }, opacity: 0.9 }, { attr: { r: 10 }, opacity: 0, duration: 0.03, immediateRender: false }, wake)
-    .fromTo(waveRing, { attr: { r: 0 } }, { attr: { r: far }, duration: 0.08, ease: 'power1.out', immediateRender: false }, wake)
+    .set(waveSvg, { visibility: 'visible' }, wake)
+    .fromTo(waveK, { k: k0 }, { k: kMax, duration: 0.08, ease: 'power1.out', immediateRender: false, onUpdate: () => waveAt(waveK.k) }, wake)
+    .set(waveSvg, { visibility: 'hidden' }, wake + 0.08)
     .to(bubble, { opacity: 1, y: 0, duration: 0.03, ease: 'expo.out' }, wake + 0.02);
 
   const st = ScrollTrigger.create({
@@ -346,7 +369,7 @@ function build(root: HTMLElement) {
     destroy() {
       st.kill(true);
       tl.kill();
-      gsap.set([sky.dusk, sky.morning, ground, dawnGlow, stars, shoot, moon, sun, ringLine, ringPulse, ringSvg, head, ant, light, ping, ...eyes, zz, bubble, ...msgs, ...Object.values(swaps), root, svg], { clearProps: 'all' });
+      gsap.set([sky.dusk, sky.morning, dawnGlow, stars, shoot, moon, sun, ringLine, ringPulse, ringSvg, head, ant, light, ping, ...eyes, zz, bubble, ...msgs, ...Object.values(swaps), ...words, svg, daySvg, waveSvg, waveInner, groundDay], { clearProps: 'all' });
       eyes.forEach((e, i) => { e.setAttribute('y', shut[i].y); e.setAttribute('height', shut[i].height); e.setAttribute('rx', shut[i].rx); });
       time.textContent = '07:10';
       moon.style.translate = '';
@@ -374,6 +397,9 @@ export function quietModule() {
       if (Math.abs(root.clientWidth - lastW) < 2) return;
       rebuild.restart(true);
     });
+    // The stars and the zz only twinkle while the night is on screen.
+    const io = new IntersectionObserver(([e]) => root.classList.toggle('is-near', e.isIntersecting), { rootMargin: '200px 0px' });
+    io.observe(root);
     document.fonts.ready.then(() => {
       if (!alive) return;
       make();
@@ -382,6 +408,8 @@ export function quietModule() {
     return () => {
       alive = false;
       ro.disconnect();
+      io.disconnect();
+      root.classList.remove('is-near');
       rebuild.kill();
       current?.destroy();
       current = null;

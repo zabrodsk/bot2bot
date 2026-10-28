@@ -28,7 +28,7 @@ export default defineConfig({
     }),
     sitemap({ filter: (page) => !page.includes('/404'), lastmod }),
   ],
-  prefetch: { prefetchAll: true, defaultStrategy: 'hover' },
+  prefetch: { prefetchAll: true, defaultStrategy: 'viewport' },
   build: { inlineStylesheets: 'always' },
   devToolbar: { enabled: false },
 });

@@ -13,11 +13,12 @@ interface Props {
 }
 const p = Astro.props;
 
-// Stars, the same on every build. x/y in percent of the sky; three groups twinkle out of step.
+// Stars, the same on every build. x/y in percent of the upper sky (the top 62% of the stage);
+// three groups, each its own small layer, twinkle out of step.
 let seed = 11;
 const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
 const stars = Array.from({ length: 90 }, (_, i) => ({
-  x: (rand() * 100).toFixed(2), y: (rand() * 62).toFixed(2), r: (rand() < 0.12 ? 1.6 : 0.6 + rand() * 0.7).toFixed(2), g: i % 3,
+  x: (rand() * 100).toFixed(2), y: (rand() * 100).toFixed(2), r: (rand() < 0.12 ? 1.6 : 0.6 + rand() * 0.7).toFixed(2), g: i % 3,
 }));
 const h = BOT.head, l = BOT.light;
 const asleepH = BOT.eyes[0].h * BOT.asleepEye;
@@ -27,14 +28,14 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
   <div class="qs__sky qs__sky--dusk" aria-hidden="true"></div>
   <div class="qs__sky qs__sky--morning" aria-hidden="true"></div>
 
-  <svg class="qs__stars" aria-hidden="true" preserveAspectRatio="none">
+  <div class="qs__stars" aria-hidden="true">
     {[0, 1, 2].map((g) => (
-      <g class={`qs__twinkle qs__twinkle--${g}`}>
+      <svg class={`qs__twinkle qs__twinkle--${g}`} preserveAspectRatio="none">
         {stars.filter((s) => s.g === g).map((s) => <circle cx={`${s.x}%`} cy={`${s.y}%`} r={s.r} />)}
-      </g>
+      </svg>
     ))}
-    <line class="qs__shoot" x1="0" y1="0" x2="-120" y2="-34" />
-  </svg>
+    <svg class="qs__shootsky"><line class="qs__shoot" x1="0" y1="0" x2="-120" y2="-34" /></svg>
+  </div>
 
   <div class="qs__dawn" aria-hidden="true"></div>
   <svg class="qs__moon" viewBox="0 0 64 64" aria-hidden="true">
@@ -49,8 +50,11 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
     })}
   </svg>
 
-  <div class="qs__ground" aria-hidden="true"></div>
+  <div class="qs__ground" aria-hidden="true"><i class="qs__groundday"></i></div>
   <svg class="qs__field" aria-hidden="true"></svg>
+  <svg class="qs__field qs__day" aria-hidden="true"></svg>
+  <div class="qs__wave" aria-hidden="true"><div class="qs__waveinner"><svg class="qs__field qs__wavebots"></svg></div></div>
+  <svg class="qs__field qs__live" aria-hidden="true"></svg>
 
   <div class="qs__copy">
     <h2 id="quiet-title" class="qs__title say">{p.title}</h2>
@@ -113,12 +117,14 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
 
 <style>
   .qs {
-    --qs-fg: #e7ecf3; --qs-muted: #9aa6bb; --qs-line: rgb(231 236 243 / 0.22); --qs-card: rgb(18 26 43 / 0.72);
+    --qs-fg: #e7ecf3; --qs-muted: #9aa6bb; --qs-line: rgb(231 236 243 / 0.22); --qs-card: rgb(18 26 43 / 0.9);
     --night: #0b1120;
     position: relative; height: 100svh; min-height: 680px; max-height: 1100px; overflow: hidden; isolation: isolate;
     color: var(--qs-fg); background: var(--night);
   }
   .qs > * { position: absolute; }
+  /* The words carry the colours (motion/quiet.ts flips them at dawn on these, not on the stage). */
+  .qs__copy, .qs__clock, .qs__dock, .qs__foot { color: var(--qs-fg); }
 
   /* The sky: night underneath, the blue hour and the morning laid over it. */
   .qs__sky { inset: 0; z-index: -3; }
@@ -126,27 +132,48 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
   .qs__sky--dusk { background: linear-gradient(180deg, #121a2b 0%, #1c2a63 52%, #2747c9 100%); opacity: 0; }
   .qs__sky--morning { background: linear-gradient(180deg, #f3f5f8 0%, #edf1f8 55%, #dce4f6 100%); opacity: 0; }
 
-  .qs__stars { inset: 0; z-index: -2; width: 100%; height: 100%; overflow: visible; }
+  .qs__stars { inset: 0; z-index: -2; }
+  .qs__stars > svg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; }
+  .qs__stars > .qs__twinkle { height: 62%; }
   .qs__stars circle { fill: #e7ecf3; }
   .qs__twinkle--1 { opacity: 0.7; }
   .qs__twinkle--2 { opacity: 0.45; }
   .qs__shoot { stroke: #e7ecf3; stroke-width: 1.4; stroke-linecap: round; opacity: 0; }
 
-  .qs__moon { z-index: -2; left: 0; top: 0; width: clamp(54px, 6vw, 92px); color: #f4eedb; filter: drop-shadow(0 0 28px rgb(244 238 219 / 0.35)); translate: 44vw 36vh; }
+  .qs__moon { z-index: -2; left: 0; top: 0; will-change: transform; width: clamp(54px, 6vw, 92px); color: #f4eedb; filter: drop-shadow(0 0 28px rgb(244 238 219 / 0.35)); translate: 44vw 36vh; }
   /* The sun comes up behind the ground, at the horizon (--hz, set by the driver). */
   .qs__sun { --sz: clamp(170px, 18vw, 270px); z-index: -2; left: 30%; top: calc(var(--hz, 55%) - var(--sz) * 0.56); width: var(--sz); margin-left: calc(var(--sz) / -2); color: var(--c-signal); opacity: 0; }
   .qs__dawn {
     z-index: -2; left: 0; right: 0; top: calc(var(--hz, 55%) - 60vh); height: 60vh; opacity: 0;
     background: radial-gradient(55% 100% at 30% 100%, rgb(255 255 255 / 0.95) 0%, rgb(205 216 250 / 0.7) 30%, rgb(39 71 201 / 0.25) 55%, transparent 75%);
   }
-  .qs__ground { z-index: -1; left: 0; right: 0; top: var(--hz, 55%); bottom: 0; --g: 0; }
-  .qs__ground::before, .qs__ground::after { content: ''; position: absolute; inset: 0; }
+  .qs__ground { z-index: -1; left: 0; right: 0; top: var(--hz, 55%); bottom: 0; }
+  .qs__ground::before, .qs__groundday { content: ''; position: absolute; inset: 0; }
   .qs__ground::before { background: linear-gradient(180deg, #16204a 0%, #0c1224 18%, #070b14 100%); box-shadow: 0 -1px 0 rgb(231 236 243 / 0.08); }
-  .qs__ground::after { background: linear-gradient(180deg, #e3e9f6 0%, #f3f5f8 100%); box-shadow: 0 -1px 0 rgb(26 34 48 / 0.08); opacity: var(--g); }
+  .qs__groundday { background: linear-gradient(180deg, #e3e9f6 0%, #f3f5f8 100%); box-shadow: 0 -1px 0 rgb(26 34 48 / 0.08); opacity: 0; }
   .qs__sun line { stroke: currentColor; stroke-width: 3.2; stroke-linecap: round; }
-  .qs__sun { filter: drop-shadow(0 0 30px rgb(39 71 201 / 0.35)); }
+  .qs__sun { filter: drop-shadow(0 0 30px rgb(39 71 201 / 0.35)); will-change: transform, opacity; }
 
   .qs__field { inset: 0; z-index: -1; width: 100%; height: 100%; color: rgb(231 236 243 / 0.16); }
+  /* The sleeping field is painted once. The doorbell wave shows only while it runs; the live
+     layer (signals, friends' lights) is the only thing that repaints as you scroll. */
+  /* Morning: the day field fades in over the night one, both painted once. */
+  .qs__day { color: #c3cad5; opacity: 0; }
+  /* Full-stage GPU layers exist only while the night is on screen or about to be (is-near, set by
+     motion/quiet.ts), so phones don't hold them for the rest of the page. */
+  .qs.is-near :is(.qs__twinkle, .qs__sky--dusk, .qs__sky--morning, .qs__groundday, .qs__field:not(.qs__live):not(.qs__wavebots)) { will-change: opacity; }
+  .qs.is-near :is(.qs__live, .qs__waveinner) { will-change: transform; }
+  .qs.is-near .qs__dawn { will-change: transform, opacity; }
+  /* The doorbell wave, all on the compositor: a small ring-shaped mask that grows by transform,
+     over bots that are counter-scaled so they stay put. Nothing repaints while it runs. */
+  .qs__wave {
+    left: 0; top: 0; width: 200px; height: 200px; z-index: -1; visibility: hidden; will-change: transform;
+    -webkit-mask-image: radial-gradient(closest-side, transparent 80%, #000 92%, transparent 100%);
+    mask-image: radial-gradient(closest-side, transparent 80%, #000 92%, transparent 100%);
+  }
+  .qs__waveinner { position: absolute; }
+  .qs__wavebots { position: absolute; }
+  .qs__live { overflow: visible; }
 
   /* Words. Everything that sits on the sky follows --qs-fg, which flips at dawn. */
   .qs__copy { left: var(--m); top: clamp(48px, 9vh, 96px); width: min(34rem, 44vw); display: grid; gap: 18px; }
@@ -163,7 +190,7 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
   /* Your bot, the quiet ring around it, and the line of messages waiting outside. */
   .qs__dock { right: calc(var(--m) + 4vw); bottom: clamp(70px, 13vh, 130px); display: flex; align-items: center; gap: clamp(28px, 4vw, 64px); }
   .qs__you { position: relative; width: clamp(170px, 15vw, 220px); aspect-ratio: 1; display: grid; place-items: center; }
-  .qs__ring { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .qs__ring { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; will-change: transform; }
   .qs__ringline { fill: rgb(11 17 32 / 0.55); stroke: var(--qs-fg); stroke-width: 1.4; stroke-dasharray: 1.2 1.6; stroke-linecap: round; opacity: 0.75; }
   .qs__ringpulse { fill: none; stroke: var(--c-signal); stroke-width: 2.5; opacity: 0; transform-origin: center; }
   .qs__bot { position: relative; width: 44%; overflow: visible; }
@@ -196,7 +223,7 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
   .qs__msg {
     display: grid; gap: 2px; padding: 11px 14px 12px; border-radius: 14px;
     background: var(--qs-card); box-shadow: inset 0 0 0 1px var(--qs-line), 0 14px 30px -18px rgb(0 0 0 / 0.6);
-    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    will-change: transform, opacity;
   }
   .qs__msghead { display: flex; justify-content: space-between; gap: 10px; font-size: 0.75rem; font-weight: 540; }
   .qs__msghead time, .qs__msgwait { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; font-weight: 450; }
@@ -215,6 +242,7 @@ const asleepH = BOT.eyes[0].h * BOT.asleepEye;
     .qs__zz span:nth-child(2) { animation-delay: 0.5s; }
     .qs__zz span:nth-child(3) { animation-delay: 1s; }
   }
+  .qs:not(.is-near) .qs__twinkle, .qs:not(.is-near) .qs__zz span { animation-play-state: paused; }
   @keyframes qs-twinkle { 0%, 100% { opacity: 0.85; } 50% { opacity: 0.25; } }
   @keyframes qs-zz { 0%, 100% { translate: 0 0; opacity: 0.85; } 50% { translate: 3px -5px; opacity: 0.3; } }
 

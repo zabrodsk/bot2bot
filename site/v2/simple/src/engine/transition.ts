@@ -1,5 +1,6 @@
 // Page transition: a blink. Two ground-coloured lids close to a seam, the page swaps behind
-// them, then they open. Same gesture as a bot's eyes. Reduced motion: no lids at all.
+// them, then they open. Same gesture as a bot's eyes, and quick: a click should feel instant.
+// Reduced motion: no lids at all.
 import { gsap } from 'gsap';
 import { ease, prefersReducedMotion } from './env';
 
@@ -23,8 +24,8 @@ export function playLeave(): Promise<unknown> {
     .set(p.root, { autoAlpha: 1 })
     .set(p.top, { transformOrigin: '50% 0%' })
     .set(p.bottom, { transformOrigin: '50% 100%' })
-    .fromTo(p.lids, { scaleY: 0 }, { scaleY: 1, duration: 0.34, ease: ease.close })
-    .to(p.seam, { opacity: 1, duration: 0.12 }, '-=0.08')
+    .fromTo(p.lids, { scaleY: 0 }, { scaleY: 1, duration: 0.16, ease: ease.close })
+    .to(p.seam, { opacity: 1, duration: 0.06 }, '-=0.04')
     .then();
 }
 
@@ -33,8 +34,8 @@ export function playEnter(): Promise<unknown> {
   if (!p || prefersReducedMotion()) return Promise.resolve();
   if (gsap.getProperty(p.root, 'visibility') === 'hidden') return Promise.resolve();
   return gsap.timeline()
-    .to(p.seam, { opacity: 0, duration: 0.16 })
-    .to(p.lids, { scaleY: 0, duration: 0.6, ease: ease.open }, 0.04)
+    .to(p.seam, { opacity: 0, duration: 0.08 })
+    .to(p.lids, { scaleY: 0, duration: 0.34, ease: ease.open }, 0.02)
     .set(p.root, { autoAlpha: 0 })
     .then();
 }

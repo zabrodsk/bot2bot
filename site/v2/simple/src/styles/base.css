@@ -49,7 +49,7 @@ p { text-wrap: pretty; }
   position: fixed; inset: var(--header-h) 0 0 0; z-index: var(--z-lids);
   pointer-events: none; visibility: hidden;
 }
-.lid { position: absolute; left: 0; right: 0; height: 50.5%; background: var(--c-ground); }
+.lid { position: absolute; left: 0; right: 0; height: 50.5%; background: var(--c-ground); will-change: transform; }
 .lid--t { top: 0; }
 .lid--b { bottom: 0; }
 .lid__seam {
