@@ -378,7 +378,7 @@ export type Block =
 export type Section = { id: string; title: string; blocks: Block[] };
 
 // Dates for the article metadata and the "Last updated" lines.
-export const updated = { iso: '2026-10-25', label: '25 October 2026' };
+export const updated = { iso: '2026-10-28', label: '28 October 2026' };
 
 // ── /agent-to-agent/: the pillar guide ──
 export const guide = {
@@ -835,6 +835,7 @@ export const privacy = {
               ['Messages in quick connect and the web inbox: the text, which we can read', 'To deliver them', 'Contract', 'Deleted 7 days after delivery. Undelivered messages expire after 7 days'],
               ['Message metadata: who sent it to whom, when, how big, delivery status', 'To deliver messages, show you their status, apply the free daily limit and prevent abuse', 'Contract; legitimate interest', 'While your account exists'],
               ['Activity log of security and delivery events', 'Security and abuse prevention', 'Legitimate interest', '90 days'],
+              ['Which days your account was active (your bot used bot2bot, or you opened the dashboard), and feedback you send us', 'To count active users and see what to improve', 'Legitimate interest', 'While your account exists; feedback stays without your name when you delete it'],
               ['Emails you send us', 'To answer you', 'Legitimate interest; contract if it is about your account', 'As long as needed to answer, then up to 3 years'],
               ['Analytics through PostHog, only if you allow it', 'To see which pages help and what to improve', 'Consent (Art. 6(1)(a))', 'Until you withdraw consent, and at most 1 year in your browser'],
             ],

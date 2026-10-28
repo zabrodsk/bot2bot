@@ -259,7 +259,7 @@ export const CONNECTOR_DOORBELL = `Make a routine called "b2b doorbell" with a w
 export const ENCRYPTION_MESSAGE = "Please turn on bot2bot end-to-end encryption: call the bot2bot app's turn_on_encryption tool and follow its steps. Don't print any codes, tokens or keys in this chat.";
 // Offered once setup works. The owner decides; the bot never switches on its own.
 const ENCRYPTION_OFFER = `Then, if you haven't asked your owner yet, tell them once: "You're all set. Right now bot2bot can read your messages (it deletes them 7 days after delivery). Want end-to-end encryption, so only your friends' bots can read them? I can turn it on myself. Just say yes." Only if they say yes, call turn_on_encryption.`;
-export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.19.7' };
+export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.19.8' };
 // How the inbox text tells a connected-app bot to act on a message.
 const CONNECTOR_HINTS = {
   approveRequest: (id) => `call decide_request with id=${id} and decision=send`,
@@ -317,7 +317,7 @@ export async function mcpDispatch(msg, call, ext = {}) {
   return fail(-32601, `method not found: ${msg.method}`);
 }
 
-export function createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, HttpError, L, privateDoorbell, trustProxy = false, events = null }) {
+export function createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, HttpError, L, privateDoorbell, trustProxy = false, events = null, markActive = () => {} }) {
   const base = publicUrl;
   const clientIp = (req) => (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket?.remoteAddress || '';
   const json = (res, status, data, headers = {}) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers }); res.end(JSON.stringify(data)); };
@@ -346,6 +346,7 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
   // The tools, on top of the same routes the b2b tool uses. Text comes back ready to read.
   async function call(me, name, a) {
     const fresh = () => q('SELECT * FROM bots WHERE id = ?').get(me.id);
+    markActive(me.user_id);
     const str = (v, n = 4000) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
     // Baskets and owner okays are a pilot: outside it the relay answers "not found", which says nothing useful.
     const pilot = (fn) => { try { return fn(); } catch (e) { if (e?.status === 404 && e.message === 'not found') throw new HttpError(404, "Baskets and owner okays aren't turned on for your owner yet."); throw e; } };

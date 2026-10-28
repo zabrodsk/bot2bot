@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setup, login, cliHome } from './helpers.mjs';
+import { setup, login, cliHome, waitFor, sleep } from './helpers.mjs';
 
 const run = promisify(execFile);
 const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'b2b.mjs');
@@ -152,4 +152,42 @@ test('backup carries the pinned contacts and restores them after a reset', async
   assert.match((await runIn(fresh, { B2B_SECRET: secret })('whoami')).out, /@ben/);
   assert.deepEqual(JSON.parse(readFileSync(join(fresh, 'peers.json'), 'utf8')), pinned);
   assert.ok(!('peers' in JSON.parse(readFileSync(join(fresh, 'config.json'), 'utf8'))));
+});
+
+test('join: the bot is handed its doorbell routine right away, reminded until it has one, and its owner gets one email', async (t0) => {
+  const env = await setup(t0);
+  const ben = await login(env, 'ben@example.com');
+  const { home } = cliHome();
+  const cli = runIn(home);
+  const link = linkIn((await cli('join', env.url, '--name', 'ben-bot')).out);
+  await ben(link, { method: 'POST', form: { decision: 'allow', bot: 'new', handle: 'ben-bot' } });
+
+  // Joining ends with the exact routine to make on this bot, its instruction straight from the signed texts.
+  const steps = /NEXT STEP, do it now[^]*on yourself \(this bot, not another one\) named "b2b doorbell", with a webhook trigger[^]*-----\nb2b messages may be waiting for my owner\. Run `B2B_HOME=\S+ node ~\/bin\/b2b\.mjs inbox --via doorbell`[^]*make the routine first, then add a webhook trigger[^]*Never ask for the key/;
+  const done = await cli('join');
+  assert.equal(done.code, 0);
+  assert.match(done.out, /Joined as @ben-bot[^]*/);
+  assert.match(done.out, steps);
+  assert.match((await cli('whoami')).out, steps);
+  assert.match((await cli('doorbell', 'make')).out, steps);
+
+  // Checking messages reminds it at most once a day.
+  assert.match((await cli('inbox')).out, /You have no doorbell yet[^]*doorbell make/);
+  assert.doesNotMatch((await cli('inbox')).out, /You have no doorbell yet/);
+
+  // An hour in with no doorbell, its owner gets one email pointing to the bot's page. Never a second one.
+  const id = env.relay.db.prepare("SELECT id FROM bots WHERE handle = 'ben-bot'").get().id;
+  const reminders = () => env.mail.filter((m) => /can't wake @ben-bot/.test(m.subject));
+  await sleep(300);
+  assert.equal(reminders().length, 0);
+  env.advance(61 * 60_000);
+  await waitFor(() => reminders().length === 1);
+  assert.match(reminders()[0].text, new RegExp(`no doorbell routine yet[^]*/app/bots/${id}`));
+  env.advance(3 * 3_600_000);
+  await sleep(300);
+  assert.equal(reminders().length, 1);
+
+  // With its doorbell set, the steps stop.
+  assert.equal((await cli('doorbell', 'set', `${env.url}/automations/webhook/1`, '--key', 'k-12345678')).code, 0);
+  assert.doesNotMatch((await cli('whoami')).out, /NEXT STEP/);
 });

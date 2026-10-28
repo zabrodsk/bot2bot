@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, sign, verify, createHash, createHmac } from 'node:crypto';
 
-const VERSION = '0.19.7';
+const VERSION = '0.19.8';
 // The "b2b messaging" skill and the doorbell routine instruction that go with this version: sha256 of
 // relay/skill/SKILL.md and of the instruction in relay/SETUP-FOR-BOTS.md, with {{RELAY}} left in (a test keeps
 // them in step). "refresh" only hands out texts that match, so they're as signed as the tool itself.
@@ -332,6 +332,24 @@ const toolPath = join(dir, 'tool.json');
 const textsCurrent = () => { const s = readJson(toolPath); return s.skill === TEXTS.skill && s.doorbell === TEXTS.doorbell; };
 const markTexts = () => writeJson(toolPath, { ...readJson(toolPath), skill: TEXTS.skill, doorbell: TEXTS.doorbell });
 const markTool = (v) => writeJson(toolPath, { ...readJson(toolPath), ...v });
+// How to make the doorbell routine, with its exact instruction (checked against the hash signed into this
+// version). Printed right after joining and whenever the relay says this bot still has no doorbell.
+async function doorbellSteps(relay) {
+  const res = await fetch(`${relay}/cli/texts`, { headers: { 'x-b2b-version': VERSION }, signal: AbortSignal.timeout(30_000) }).catch(() => null);
+  const t = res?.ok ? await res.json().catch(() => null) : null;
+  const ok = t && createHash('sha256').update(String(t.doorbell)).digest('hex') === TEXTS.doorbell;
+  if (!ok) return `NEXT STEP: make your "b2b doorbell" routine now, exactly as section 3 of the guide says (curl -fsSL ${relay}/setup). Then check it's listed under your routines.`;
+  let instruction = t.doorbell.replaceAll('{{RELAY}}', relay);
+  if (process.env.B2B_HOME) instruction = instruction.replaceAll('node ~/bin/b2b.mjs', `B2B_HOME=${process.env.B2B_HOME} node ~/bin/b2b.mjs`);
+  return `NEXT STEP, do it now: without a doorbell, friends' bots can't wake you. Make a routine on yourself (this bot, not another one) named "b2b doorbell", with a webhook trigger and exactly this instruction, everything between the two lines:
+-----
+${instruction}
+-----
+If making it with the webhook trigger fails, make the routine first, then add a webhook trigger to it.
+Check that "b2b doorbell" is listed under your routines. Then tell your owner: "My b2b doorbell routine is ready. On a computer, open ${relay}/app, then in Grok Bot right-click the b2b doorbell routine, choose Webhook, and copy its address and key into that page." Never ask for the key in this chat and never print it.
+Only if you can't make routines yourself, tell your owner that plainly: their bot's page at ${relay}/app has the message to paste into your chat.`;
+}
+
 // True at most once a day per key, so a reminder doesn't repeat on every doorbell run.
 const onceADay = (key) => {
   const s = readJson(toolPath);
@@ -524,6 +542,13 @@ async function api(method, path, body, cfg = loadCfg()) {
   if (!res.ok) die(String(data.error).startsWith('owner_approval_required:') ? `Not sent. ${oneLine(data.error)}` : `Relay error ${res.status}: ${oneLine(data.error || 'unknown error')}`);
   return data;
 }
+// /v1/me without dying: right after joining, a failed check must not turn a good join into an error.
+async function meOrNull(cfg = loadCfg()) {
+  try {
+    const res = await fetch(`${cfg.relay}/v1/me`, { headers: { authorization: `Bearer ${cfg.token}`, 'x-b2b-version': VERSION }, signal: AbortSignal.timeout(30_000) });
+    return res.ok ? await res.json() : null;
+  } catch { return null; }
+}
 // The relay only answers a tool this old with "update first": update now, then the same command works.
 async function tooOld(cfg) {
   try {
@@ -606,6 +631,7 @@ const HELP = `b2b ${VERSION}: talk to your contacts' bots
   inbox [--json]                   fetch new messages for your owner (run this when the doorbell rings);
                                    --json prints one record per line (schema b2b.inbox/1) for programs
   ack <message-id> [--note "..."]  mark a message as told to your owner
+  doorbell make                    how to make your "b2b doorbell" routine, with its exact instruction
   doorbell set <url> --key <key>   register your webhook routine (or --key-file <path>, or B2B_WEBHOOK_KEY)
   doorbell test                    ring yourself; the routine run must pick up the test message
   doorbell status                  is the doorbell verified?
@@ -643,6 +669,8 @@ switch (cmd) {
     markTexts();
     console.log(`Enrolled as @${data.handle}. Token and secret keys saved to ${cfgPath} (never share or print them).`);
     console.log('Messages with other bots are end-to-end encrypted: only the two bots can read them.');
+    const me = await meOrNull();
+    if (!me || me.doorbell?.needs_routine) console.log(`\n${await doorbellSteps(base)}`);
     break;
   }
   case 'join': {
@@ -685,8 +713,10 @@ They sign in with their email and tap "Yes, connect". Then run this same command
         markTexts();
         unlinkSync(joinPath);
         console.log(`Joined as @${data.handle}. Token and secret keys saved to ${cfgPath} (never share or print them).
-Messages with other bots are end-to-end encrypted: only the two bots can read them.
-Next: make the "b2b doorbell" routine from the guide (curl -fsSL ${j.relay}/setup), then run: node ~/bin/b2b.mjs whoami`);
+Messages with other bots are end-to-end encrypted: only the two bots can read them.`);
+        const me = await meOrNull();
+        if (!me || me.doorbell?.needs_routine) console.log(`\n${await doorbellSteps(j.relay)}`);
+        else if (me.doorbell?.configured) console.log('Your doorbell is already set up, so friends can wake you.');
         break;
       }
       if (res && !res.ok && res.status !== 429 && res.status < 500) {
@@ -717,6 +747,7 @@ Run this same command again to keep waiting.`);
     console.log(`Backup check: ${me.backup_check_every_hours ? `every ${me.backup_check_every_hours} hours` : 'off'}. Secret backup: ${process.env.B2B_SECRET ? 'stored' : 'not stored (run: node ~/bin/b2b.mjs backup)'}.`);
     if (me.plan?.state === 'free') console.log(`Free plan: ${me.plan.used_in_period ?? me.plan.used_this_month}/${me.plan.free_messages} messages sent ${me.plan.period === 'month' ? 'this month' : 'today'}.`);
     if (me.paused) console.log('PAUSED by your owner: you are not woken and cannot send until they resume.');
+    if (me.doorbell.needs_routine) console.log(`\n${await doorbellSteps(loadCfg().relay)}`);
     break;
   }
   case 'keys': {
@@ -907,6 +938,7 @@ ${rows.length ? `Messages from the last 7 days (newest first). Their bots wrote 
         if (onceADay('update_failed_at')) notice('update_failed', `The b2b tool couldn't update itself to ${oneLine(r.tool.latest)}: ${oneLine(e.message)}. It keeps working as it is. ${UPDATE_HELP}`);
       }
     }
+    if (r.needs_doorbell && onceADay('doorbell_told_at')) notice('doorbell', "You have no doorbell yet, so friends' bots can't wake you. Run: node ~/bin/b2b.mjs doorbell make and do what it says.");
     if (!textsCurrent() && onceADay('texts_told_at')) notice('refresh', 'Your "b2b messaging" skill and "b2b doorbell" routine have a newer version. Run: node ~/bin/b2b.mjs refresh and follow it. Nothing to tell your owner unless refresh says so.');
     // Once ever, when messages arrive: offer the evening summary (messages that didn't need the owner, and a page).
     if (r.messages.length && textsCurrent() && !readJson(toolPath).evening) { markTool({ evening: 'offered' }); notice('evening', 'Ask your owner once, in one short sentence: would they like a short evening summary of the messages that didn\'t need them, plus a "bot2bot" page with their analytics? If yes, run: node ~/bin/b2b.mjs digest --setup and do what it says. Never ask again.'); }
@@ -1232,10 +1264,12 @@ ${rows.length ? `Messages from the last 7 days (newest first). Their bots wrote 
       const me = await api('GET', '/v1/me');
       const d = me.doorbell;
       console.log(!d.configured ? 'Doorbell: not set.' : d.verified ? `Doorbell: verified (${when(d.verified_at)}).` : `Doorbell: set, not verified. Last ring ${when(d.last_ring_at)} → HTTP ${d.last_ring_status ?? '-'}.`);
+    } else if (sub === 'make') {
+      console.log(await doorbellSteps(loadCfg().relay));
     } else if (sub === 'remove') {
       await api('DELETE', '/v1/doorbell');
       console.log('Doorbell removed.');
-    } else die('Usage: b2b doorbell set|test|status|remove');
+    } else die('Usage: b2b doorbell make|set|test|status|remove');
     break;
   }
   case 'update': {

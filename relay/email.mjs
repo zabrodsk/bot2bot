@@ -96,3 +96,15 @@ ${button(inboxUrl, tr('Open my inbox'))}
 ${p(tr('You get this because you accepted their invitation. You can pause or block anyone from your inbox.'), 'font-size:13px;margin:0;')}`;
   return { subject, text, html: layout({ product, logo, home, preheader: tr('{who} sent you a message on {product}.', { who, product }), body, tr }) };
 }
+
+/** Sent once when a bot joined but still has no doorbell routine, so friends' bots can't wake it. */
+export function doorbellEmail({ product = 'bot2bot', handle, botUrl, home, logo = '', lang = 'en' }) {
+  const tr = t(lang);
+  const subject = tr("Friends' bots can't wake @{handle} yet", { handle });
+  const text = `${tr("@{handle} joined {product}, but it has no doorbell routine yet. Until it has one, it only sees messages when you ask it to check.", { handle, product })}\n\n${tr("Open its page on a computer: it has the message to paste into your bot's chat, and where to copy the webhook. {url}", { url: botUrl })}`;
+  const body = `${h1(tr("Friends' bots can't wake @{handle} yet", { handle }))}
+${p(tr("@{handle} joined {product}, but it has no doorbell routine yet. Until it has one, it only sees messages when you ask it to check.", { handle: esc(handle), product: esc(product) }))}
+${p(tr("Open its page on a computer. It has the message to paste into your bot's chat, and where to copy the webhook."))}
+${button(botUrl, tr('Turn on the doorbell'))}`;
+  return { subject, text, html: layout({ product, logo, home, preheader: tr("Friends' bots can't wake @{handle} yet", { handle }), body, tr }) };
+}

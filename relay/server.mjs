@@ -8,7 +8,7 @@ import { dirname, join, resolve, sep, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp, migrateApp } from './app.mjs';
 import { createConnector, migrateConnector } from './connector.mjs';
-import { messageEmail } from './email.mjs';
+import { messageEmail, doorbellEmail } from './email.mjs';
 import { migrateGovernance, createGovernance } from './governance.mjs';
 import { migrateEvents, createEvents } from './events.mjs';
 import { createSafePost, checkCallbackUrl } from './doorbells.mjs';
@@ -27,6 +27,8 @@ export const LIMITS = {
   backoffMs: [0, 30_000, 120_000, 300_000, 900_000, 3_600_000, 3_600_000, 3_600_000],
   codeTtlMs: 24 * 3_600_000,
   joinTtlMs: 15 * 60_000,        // a bot's "approve me" link (private mode setup without a code)
+  doorbellNudgeMs: 3_600_000,    // a bot still without its doorbell this long after joining: one email to its owner
+  doorbellNudgeMaxAgeMs: 14 * 86_400_000, // ...but never for bots older than this (set up long ago, left on purpose)
   joinsOpenMax: 500,             // open join links across the whole relay
   inviteTtlMs: 7 * 24 * 3_600_000,
   probeTtlMs: 10 * 60_000,
@@ -141,6 +143,9 @@ export function openDb(path) {
     );
     -- Anonymous daily counts (no people, no content), kept for good even when message rows go.
     CREATE TABLE IF NOT EXISTS telemetry (day TEXT NOT NULL, metric TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (day, metric));
+    -- Which days an account was active (its bot used bot2bot, or they opened the dashboard), for usage statistics.
+    -- Only the account and the day: no names, no content. Deleted with the account.
+    CREATE TABLE IF NOT EXISTS active_days (user_id INTEGER NOT NULL, day TEXT NOT NULL, PRIMARY KEY (user_id, day));
     CREATE TABLE IF NOT EXISTS invites (
       code_hash TEXT PRIMARY KEY, from_bot INTEGER NOT NULL REFERENCES bots(id),
       alias TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, used_by INTEGER
@@ -189,10 +194,11 @@ export function openDb(path) {
   addColumn('bots', 'tool_version', 'TEXT');
   addColumn('bots', 'removed_at', 'INTEGER');
   addColumn('messages', 'want', 'TEXT');
+  addColumn('bots', 'doorbell_nudged_at', 'INTEGER');
   return db;
 }
 
-export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', stickersDir, redirectHosts = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', changelog = null, feedbackTo = '', dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
+export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', stickersDir, redirectHosts = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', changelog = null, feedbackTo = '', adminEmails = [], dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
   if (!adminToken || adminToken.length < 16) throw new Error('ADMIN_TOKEN (16+ chars) is required');
   const L = { ...LIMITS, ...limits };
   // What an owner sends a friend: the invite link first. The invite page signs in people who already have
@@ -397,6 +403,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     const t = clock();
     governance.expire(t);
     retention(t);
+    void nudgeDoorbells(t);
     const expired = q("SELECT id, to_bot FROM messages WHERE status = 'claimed' AND lease_until <= ?").all(t);
     for (const m of expired) {
       q("UPDATE messages SET status = 'pending', lease_until = NULL, next_ring_at = ? WHERE id = ? AND status = 'claimed'").run(t, m.id);
@@ -443,6 +450,29 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     return Promise.all(results);
   }
 
+  // A Grok bot that joined but never made its doorbell routine only sees messages when its owner asks it to
+  // check. An hour in, its owner gets one email pointing to the bot's page, which has the message to paste.
+  let nudgeCheckedAt = 0;
+  async function nudgeDoorbells(t) {
+    if (t - nudgeCheckedAt < 60_000) return;
+    nudgeCheckedAt = t;
+    const due = q(`SELECT b.id, b.handle, u.email, u.lang FROM bots b JOIN users u ON u.id = b.user_id
+                   WHERE b.webhook_url IS NULL AND b.platform = 'grok' AND b.vendor != 'web' AND b.disconnected_at IS NULL
+                     AND b.removed_at IS NULL AND b.paused_at IS NULL AND b.doorbell_nudged_at IS NULL
+                     AND b.created_at BETWEEN ? AND ? AND u.email_verified_at IS NOT NULL`).all(t - L.doorbellNudgeMaxAgeMs, t - L.doorbellNudgeMs);
+    for (const b of due) {
+      // Marked first, so an owner never gets it twice, even if sending fails.
+      q('UPDATE bots SET doorbell_nudged_at = ? WHERE id = ?').run(t, b.id);
+      try {
+        await mailer({ to: b.email, ...doorbellEmail({ product: productName, handle: b.handle, botUrl: `${publicUrl}/app/bots/${b.id}`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', lang: b.lang }) });
+        log(b.id, 'doorbell_nudged');
+      } catch { log(b.id, 'doorbell_nudge_failed'); }
+    }
+  }
+
+  // A Grok bot with no doorbell yet: its tool hands it the exact routine to make (other platforms wake differently).
+  const needsRoutine = (b) => !b.webhook_url && b.platform === 'grok' && b.vendor !== 'web';
+
   // People without a bot get a short email (never the message itself) and read it in their web inbox.
   async function notifyWeb(bot, t) {
     if (bot.disconnected_at || inflight.has(bot.id)) return;
@@ -474,7 +504,45 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
 
   // Telemetry: anonymous counts per UTC day (today and the two days before, so late deliveries land), written
   // over again each time, so the numbers stay when message text and, one day, message rows are deleted.
+  // An account was active today: written once a day per account (a small cache keeps it to one write).
+  const activeSeen = new Map();
+  function markActive(userId, t = clock()) {
+    if (!userId) return;
+    const day = new Date(t).toISOString().slice(0, 10);
+    if (activeSeen.get(userId) === day) return;
+    activeSeen.set(userId, day);
+    if (activeSeen.size > 50_000) activeSeen.clear();
+    q('INSERT OR IGNORE INTO active_days (user_id, day) VALUES (?, ?)').run(userId, day);
+  }
+  // Usage: active users per day, week and month, retention by signup day, and growth month on month.
+  function usageMetrics(t = clock()) {
+    const DAY = 86_400_000, dayOf = (ms) => new Date(ms).toISOString().slice(0, 10), today = Math.floor(t / DAY) * DAY;
+    const users = new Map(q('SELECT id, created_at FROM users').all().map((u) => [u.id, u.created_at]));
+    const byUser = new Map();
+    for (const r of q('SELECT user_id, day FROM active_days WHERE day >= ?').all(dayOf(today - 130 * DAY))) { if (!byUser.has(r.user_id)) byUser.set(r.user_id, new Set()); byUser.get(r.user_id).add(r.day); }
+    const activeIn = (end, days) => { let n = 0; const from = end - (days - 1) * DAY; for (const set of byUser.values()) for (const d of set) { const ms = Date.parse(d); if (ms >= from && ms <= end) { n++; break; } } return n; };
+    const series = Array.from({ length: 90 }, (_, i) => { const d = today - (89 - i) * DAY; return { day: dayOf(d), dau: activeIn(d, 1), wau: activeIn(d, 7), mau: activeIn(d, 30), new_users: [...users.values()].filter((c) => c >= d && c < d + DAY).length }; });
+    // Retention: of people who signed up at least N days ago (in the last 90 days), the share active exactly N days later.
+    const retention = (n) => { let base = 0, kept = 0; for (const [id, created] of users) { const start = Math.floor(created / DAY) * DAY; if (start + n * DAY > today || start < today - 90 * DAY) continue; base++; if (byUser.get(id)?.has(dayOf(start + n * DAY))) kept++; } return { base, kept, rate: base ? kept / base : null }; };
+    const inWindow = (end) => { const from = end - 29 * DAY, set = new Set(); for (const [id, days] of byUser) for (const d of days) { const ms = Date.parse(d); if (ms >= from && ms <= end) { set.add(id); break; } } return set; };
+    const thisMonth = inWindow(today), lastMonth = inWindow(today - 30 * DAY), kept = [...lastMonth].filter((id) => thisMonth.has(id)).length;
+    const usersAt = (end) => [...users.values()].filter((c) => c < end + DAY).length;
+    const last = series.at(-1), monthAgo = series.at(-31);
+    const growth = (a, b) => (b ? (a - b) / b : null);
+    return {
+      now: { users: users.size, dau: last.dau, wau: last.wau, mau: last.mau, stickiness: last.mau ? last.dau / last.mau : null },
+      retention: { d1: retention(1), d7: retention(7), d30: retention(30), monthly: { base: lastMonth.size, kept, rate: lastMonth.size ? kept / lastMonth.size : null } },
+      growth: { users: growth(users.size, usersAt(today - 30 * DAY)), mau: growth(last.mau, monthAgo.mau), users_month_ago: usersAt(today - 30 * DAY), mau_month_ago: monthAgo.mau },
+      series,
+    };
+  }
   function telemetryRollup(t) {
+    // Once: the days before tracking began, from who sent and received messages (that history is kept).
+    if (!q("SELECT 1 FROM telemetry WHERE day = '0000-00-00' AND metric = 'active_days_backfilled'").get()) tx(() => {
+      q(`INSERT OR IGNORE INTO active_days (user_id, day) SELECT b.user_id, strftime('%Y-%m-%d', m.created_at / 1000, 'unixepoch') FROM messages m JOIN bots b ON b.id = m.from_bot WHERE b.user_id IS NOT NULL AND m.kind != 'probe'`).run();
+      q(`INSERT OR IGNORE INTO active_days (user_id, day) SELECT b.user_id, strftime('%Y-%m-%d', m.delivered_at / 1000, 'unixepoch') FROM messages m JOIN bots b ON b.id = m.to_bot WHERE b.user_id IS NOT NULL AND m.delivered_at IS NOT NULL AND m.kind != 'probe'`).run();
+      q("INSERT INTO telemetry (day, metric, n) VALUES ('0000-00-00', 'active_days_backfilled', 1)").run();
+    });
     const tables = new Set(q("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
     for (let back = 0; back < 3; back++) {
       const start = Math.floor(t / 86_400_000) * 86_400_000 - back * 86_400_000, end = start + 86_400_000;
@@ -717,7 +785,8 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
       telemetryRollup(clock());
       const days = {};
       for (const r of q('SELECT day, metric, n FROM telemetry WHERE day >= ? ORDER BY day').all(new Date(clock() - 90 * 86_400_000).toISOString().slice(0, 10))) (days[r.day] ??= {})[r.metric] = r.n;
-      return { days };
+      const { series, ...usage } = usageMetrics();
+      return { usage, days };
     },
     'GET /admin/feedback': ({ admin }) => {
       if (!admin) throw new HttpError(401, 'admin token required');
@@ -825,7 +894,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     },
     'GET /v1/me': ({ me }) => ({
       handle: me.handle, display_name: me.display_name,
-      doorbell: { configured: !!me.webhook_url, verified: !!me.doorbell_verified_at, verified_at: iso(me.doorbell_verified_at), last_ring_at: iso(me.last_ring_at), last_ring_status: me.last_ring_status },
+      doorbell: { configured: !!me.webhook_url, needs_routine: needsRoutine(me), verified: !!me.doorbell_verified_at, verified_at: iso(me.doorbell_verified_at), last_ring_at: iso(me.last_ring_at), last_ring_status: me.last_ring_status },
       inbox_pending: q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status IN ('pending','claimed')").get(me.id).n,
       wakes_today: me.wake_day === today() ? me.wake_count : 0, wakes_per_day: L.wakesPerDay,
       contacts: q('SELECT count(*) AS n FROM contacts WHERE owner_bot = ?').get(me.id).n,
@@ -1018,7 +1087,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     }),
 
     // Each claim also says which tool is newest, so the doorbell run updates the tool on its own.
-    'POST /v1/inbox/claim': ({ me, body }) => ({ tool: toolInfo(), handle: me.handle, ...tx(() => {
+    'POST /v1/inbox/claim': ({ me, body }) => ({ tool: toolInfo(), handle: me.handle, needs_doorbell: needsRoutine(me), ...tx(() => {
       const t = clock();
       if (me.paused_at) return { lease_seconds: L.leaseMs / 1000, paused: true, messages: [] };
       const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 25);
@@ -1184,7 +1253,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
 
   // The private-mode doorbell instruction, straight from the guide, so a bot switching from quick connect uses the same words.
   const privateDoorbell = () => doorbellTemplate().replaceAll('{{RELAY}}', publicUrl);
-  const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, HttpError, L, privateDoorbell, trustProxy,
+  const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, HttpError, L, privateDoorbell, trustProxy, markActive,
     // MCP Events store signing secrets: only offered when they can be encrypted at rest (or in local tests).
     events: keySecret || allowLocalWebhooks ? events : null });
   const site = makeSite(siteDir);
@@ -1206,7 +1275,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
   const handleApp = createApp({ events, governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
-    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, privateDoorbell, renameBot, latestUpdate, feedbackTo, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, privateDoorbell, renameBot, latestUpdate, feedbackTo, markActive, usageMetrics, telemetryRollup, adminEmails, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');
@@ -1249,6 +1318,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
       if (!open && !me) throw new HttpError(401, 'missing or invalid bot token');
       // Which tool this bot runs, for its owner's dashboard; one too old to keep going is asked to update first.
       if (me) {
+        markActive(me.user_id);
         const said = String(req.headers['x-b2b-version'] || '');
         const v = TOOL_VERSION_RE.test(said) ? said : '';
         if (me.tool_version !== v) q('UPDATE bots SET tool_version = ? WHERE id = ?').run(v, me.id);
@@ -1355,6 +1425,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     ...(TOOL_VERSION_RE.test(process.env.MIN_CLI_VERSION || '') ? { minTool: process.env.MIN_CLI_VERSION } : {}),
     // Where new feedback is emailed (optional; it's always kept for GET /admin/feedback).
     feedbackTo: process.env.FEEDBACK_TO || '',
+    // Who sees the service dashboard at /app/admin (comma-separated emails).
+    adminEmails: (process.env.ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
     webInbox: process.env.WEB_INBOX === '1',
     privacyPilot: process.env.PRIVACY_PILOT === '1' ? true : (process.env.PRIVACY_PILOT || '').split(',').map((s) => s.trim()).filter(Boolean),
     siteDir: process.env.SITE_DIR || '',

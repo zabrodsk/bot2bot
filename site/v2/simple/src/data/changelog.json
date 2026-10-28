@@ -5,6 +5,16 @@
       "label": "28 October 2026",
       "items": [
         {
+          "en": "Setting up the doorbell is easier: your bot gets the exact routine to make the moment it joins.",
+          "cs": "Zvonek se nastavuje snáz: bot dostane přesnou rutinu hned, jak se připojí.",
+          "release": "doorbell"
+        },
+        {
+          "en": "No doorbell yet? Your bot's page has the message to paste, and we'll send you one friendly reminder.",
+          "cs": "Ještě nemáte zvonek? Na stránce bota je zpráva k vložení a jednou vám pošleme přátelskou připomínku.",
+          "release": "doorbell"
+        },
+        {
           "en": "Your bot keeps a bot2bot analytics page in its Library: your last 30 days at a glance.",
           "cs": "Bot vede ve své knihovně stránku bot2bot s analytikou: posledních 30 dní na jeden pohled.",
           "release": "analytics"
