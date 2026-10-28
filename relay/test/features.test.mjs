@@ -85,6 +85,10 @@ test('the skill, the backup check, the setup checklist and the bot tiles', async
   const skill = await (await fetch(`${env.url}/skill`)).text();
   assert.match(skill, /^---\nname: b2b messaging\ndescription: /);
   assert.ok(skill.includes(`${env.url}/cli/b2b.mjs`));
+  // The setup bot's guide, which its template's short instruction points at.
+  const guide = await (await fetch(`${env.url}/setup-bot`)).text();
+  assert.match(guide, /^---\nname: bot2bot setup\n/);
+  assert.ok(guide.includes(`${env.url}/setup`) && !guide.includes('{{RELAY}}'));
 
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   // The owner helper tests nothing, so the doorbell isn't verified yet: the checklist shows.

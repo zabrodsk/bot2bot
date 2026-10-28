@@ -1099,6 +1099,9 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       if (req.method === 'GET' && url.pathname === '/cli/texts') return send(200, { skill: skillTemplate(), doorbell: doorbellTemplate() });
       if (req.method === 'GET' && url.pathname === '/setup') return send(200, setupGuide(), 'text/markdown; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/skill') return send(200, skillFile(), 'text/markdown; charset=utf-8');
+      // The setup bot's full guide. A Grok Bot template copy can arrive without its skill, so the template's short
+      // instruction tells the bot to read this first.
+      if (req.method === 'GET' && url.pathname === '/setup-bot') return send(200, readFileSync(join(here, 'setup-bot', 'SKILL.md'), 'utf8').replaceAll('{{RELAY}}', publicUrl), 'text/markdown; charset=utf-8');
       if (site && site.serve(req, res, url)) return;
       const found = match(req.method, url.pathname);
       if (!found && site && isPageVisit(req, url)) return site.notFound(req, res);

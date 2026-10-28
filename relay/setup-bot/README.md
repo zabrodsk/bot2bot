@@ -5,8 +5,8 @@ A Grok Bot that sets bot2bot up for someone, shared as a public template link (`
 ## Publish it (once, by the bot2bot maintainer)
 
 1. In Grok Bot, create a new Bot named **bot2bot Setup**.
-2. Paste [INSTRUCTIONS.md](INSTRUCTIONS.md) as its instructions (replace `{{RELAY}}` with the relay's public address).
-3. Add the skill in [SKILL.md](SKILL.md) (same replacement).
+2. Paste [SHORT-INSTRUCTIONS.md](SHORT-INSTRUCTIONS.md) as its instructions (replace `{{RELAY}}` with the relay's public address). It tells the bot to read its full guide from `{{RELAY}}/setup-bot` (the [SKILL.md](SKILL.md) here), because a template copy can arrive without its skills.
+3. Optionally also add [SKILL.md](SKILL.md) as a skill (same replacement).
 4. Settings → **Share as template** → review: no secrets, keys, internal links or personal memories → **make it public** → copy the `https://x.ai/bot/…` link.
 5. Put the link on the website ("Add the setup bot") and in the main README.
 
