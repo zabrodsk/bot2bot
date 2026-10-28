@@ -34,6 +34,9 @@ export function migrateApp(db) {
   // Consent and control (0.6). Contacts made before approvals existed count as approved.
   if (addColumn('contacts', 'approved_at', 'INTEGER')) db.exec('UPDATE contacts SET approved_at = created_at WHERE approved_at IS NULL');
   addColumn('invites', 'by_owner', 'INTEGER NOT NULL DEFAULT 0');
+  // Dashboard invites keep their code until used, so the overview can list them and open them again.
+  addColumn('invites', 'plain_code', 'TEXT');
+  addColumn('invites', 'created_at', 'INTEGER');
   addColumn('bots', 'paused_at', 'INTEGER');
   addColumn('bots', 'disconnected_at', 'INTEGER');
   addColumn('messages', 'body_purged_at', 'INTEGER');
@@ -528,10 +531,19 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: 'Remove', p
 <form method="post" action="/app/contacts/remove"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small ghost">No, remove</button></form>`)),
     ].filter(Boolean).join('');
     const first = (user.name || '').trim().split(/\s+/)[0];
+    // Invites sent from here that nobody has used yet: who they're for (the note), where they'll go, how long left.
+    const open = live.length ? q(`SELECT i.*, b.handle FROM invites i JOIN bots b ON b.id = i.from_bot WHERE i.from_bot IN (${live.map(() => '?').join(',')})
+      AND i.by_owner = 1 AND i.plain_code IS NOT NULL AND i.used_at IS NULL AND i.expires_at > ? ORDER BY i.created_at DESC`).all(...live.map((b) => b.id), clock()) : [];
+    const daysLeft = (i) => Math.max(1, Math.ceil((i.expires_at - clock()) / 86_400_000));
+    const inviteRow = (i) => `<li><a class="line line--link" href="/app/invites/${esc(i.plain_code)}"><span class="pdot" data-status="away" aria-hidden="true"></span>
+<span class="line__main"><span class="line__title">${i.notes ? esc(i.notes.length > 48 ? `${i.notes.slice(0, 47)}…` : i.notes) : 'Invite link'}</span><span class="line__sub">Waiting for them · ${i.basket ? esc(i.basket) : 'not sorted yet'} · ${daysLeft(i) === 1 ? '1 day left' : `${daysLeft(i)} days left`}</span></span>${ICON.chev}</a></li>`;
+    const invitesGroup = open.length ? `<section class="group" aria-labelledby="inv-h"><div class="group__head"><h2 id="inv-h">Invites sent <span class="count">${open.length}</span></h2></div>
+<div class="card card--list"><ul class="list">${open.map(inviteRow).join('')}</ul></div></section>` : '';
     return layout('Overview', `${alerts ? `<div class="stack-alerts">${alerts}</div>` : ''}
 ${checklist(live, settled, paused)}
 <section class="group" aria-labelledby="friends-h"><div class="group__head"><h2 id="friends-h">Friends <span class="count">${settled.length}</span></h2></div>
 <div class="card card--list">${settled.length ? `<ul class="list">${settled.map(friendRow).join('')}</ul>` : emptyState('people', 'No friends yet', 'Invite someone and their bot can message yours.', inviteForm('small'))}</div></section>
+${invitesGroup}
 <section class="group" aria-labelledby="bots-h"><div class="group__head"><h2 id="bots-h">Your bots <span class="count">${bots.length}</span></h2><form method="post" action="/app/bots/new"><button class="btn small ghost">${ICON.plus}Add a bot</button></form></div>
 <div class="card card--list"><ul class="list">${bots.map(botRow).join('')}</ul></div></section>
 ${plan.meter}
@@ -763,14 +775,18 @@ ${error ? `<p class="error center" role="alert">${esc(error)}</p>` : ''}${action
   }
 
   // The inviter's side: a message to send that puts the setup bot first, then the link.
-  function invitedPage(user, b, link, { code = '', basket = null, notes = null } = {}) {
+  function invitedPage(user, b, link, { code = '', basket = null, notes = null, saved = false } = {}) {
     const names = code ? basketsOf(b.id) : [];
-    const pick = names.length ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">${basketPick(names, basket, ' data-autosave')}${notesField('them', notes)}<div><button class="btn small">Save</button></div></form>` : '';
+    // After Save, say what happened right where they clicked, and offer the way back.
+    const savedLine = saved ? `<p class="okmsg" role="status">${ICON.check}<span>Saved. When they join, they go in ${basket ? `<b>${esc(basket)}</b>` : '<b>not sorted yet</b>'}${notes ? ', and your bot gets your instructions' : ''}. Now send them the message above.</span></p>` : '';
+    const pick = names.length ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">${basketPick(names, basket)}${notesField('them', notes)}${savedLine}<div class="actions">${saved ? '<a class="btn small" href="/app">Done</a><button class="btn small ghost">Save again</button>' : '<button class="btn small">Save</button>'}</div></form>` : '';
     return layout('Invite a friend', `${art('invite', 'small')}<section class="card"><h2>Send this to your friend</h2>
 <p class="muted">It asks them to add the setup bot to their Grok Bot first, then open your invite.</p>
 ${codeBlock('msg', 'Message for your friend', inviteMessage(link))}${pick}
-<details class="diy"><summary>Just the link</summary>${codeBlock('link', 'Invite link', link)}</details></section>
-<p class="muted small">The link works once and expires in 7 days. They'll see your name and that your email is verified.</p>`, { user, tab: 'home', width: 'read', bar: { back: '/app', title: 'Invite a friend', sub: `From @${b.handle}` } });
+<details class="diy"><summary>Already on bot2bot? Send just the link</summary>${codeBlock('link', 'Invite link', link)}</details></section>
+<p class="muted small">The link works once and expires in 7 days. They'll see your name and that your email is verified.</p>
+${code ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">Cancel this invite</p><p class="setrow__desc">The link stops working.</p></div>
+${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">`, label: 'Cancel invite', prompt: 'Cancel this invite?', confirm: 'Cancel invite', pending: 'Cancelling' })}</div></section>` : ''}`, { user, tab: 'home', width: 'read', bar: { back: '/app', title: 'Invite a friend', sub: `From @${b.handle}` } });
   }
 
   // ───── web inbox ─────
@@ -1049,7 +1065,7 @@ ${chip('', 'not sorted yet', !c.circle, true)}${s.circles.map((g) => chip(g.id, 
 <noscript><div><button class="btn small ghost">Save</button></div></noscript></form>
 <form method="post" action="${base}/about" class="pblock" id="about">
 <label>Who they are<input name="purpose" maxlength="60" autocomplete="off" value="${esc(c.purpose || '')}" placeholder="football friend"></label>
-<label>Notes for your bot<textarea name="notes" maxlength="280" rows="3" placeholder="Only football. Anything else, ask me.">${esc(c.notes || '')}</textarea></label>
+<label>Special instructions for talking to ${esc(c.alias)}<textarea name="notes" maxlength="280" rows="3" placeholder="Only football. Anything else, ask me.">${esc(c.notes || '')}</textarea></label>
 <div><button class="btn small ghost">Save</button></div></form>
 <section class="pblock" id="topics" aria-labelledby="topics-h"><h2 class="row-label" id="topics-h">${esc(c.alias)} can ask about</h2><div class="tchips">
 ${c.topics.map((t) => `<form method="post" action="${base}/topics" class="tchip"><span>${esc(t)}</span><input type="hidden" name="remove" value="${esc(t)}"><button aria-label="Stop ${esc(c.alias)} asking about ${esc(t)}">${HAND.x}</button></form>`).join('')}
@@ -1780,9 +1796,32 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (b.disconnected_at) throw new HttpError(400, 'Reconnect this bot first.');
         // New friends start in friends unless the owner picks another basket on the next page.
         const basket = pickBasket(b.id, f.basket ?? 'friends');
-        q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner, basket) VALUES (?, ?, ?, ?, 1, ?)').run(sha(plain), b.id, `friend-${plain.slice(0, 4).toLowerCase()}`, clock() + L.inviteTtlMs, basket);
+        q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner, basket, plain_code, created_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)').run(sha(plain), b.id, `friend-${plain.slice(0, 4).toLowerCase()}`, clock() + L.inviteTtlMs, basket, plain, clock());
         log(b.id, 'invite_created', { via: 'link' });
         return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket })), true;
+      }
+      const openInv = p.match(/^\/app\/invites\/([A-Z0-9]{4}-[A-Z0-9]{4})$/);
+      if (openInv && req.method === 'GET') {
+        const inv = q('SELECT * FROM invites WHERE plain_code = ? AND used_at IS NULL AND expires_at > ?').get(openInv[1], clock());
+        const b = inv && myBots(user).find((x) => x.id === inv.from_bot);
+        if (!b) throw new HttpError(404, 'That invite was used, cancelled or has expired.');
+        return page(res, 200, invitedPage(user, b, `${origin}/i/${inv.plain_code}`, { code: inv.plain_code, basket: inv.basket, notes: inv.notes })), true;
+      }
+      if (p === '/app/invites/cancel' && req.method === 'POST') {
+        const f = await form(req);
+        const b = ownBot(user, f.bot);
+        const plain = String(f.code || '').trim().toUpperCase();
+        const inv = q('SELECT * FROM invites WHERE code_hash = ? AND from_bot = ? AND used_at IS NULL').get(sha(plain), b.id);
+        if (!inv) throw new HttpError(404, 'That invite was already used.');
+        if (f.undo === '1') {
+          q('UPDATE invites SET expires_at = ? WHERE code_hash = ?').run(Math.max(Number(f.until) || 0, clock() + 60_000), inv.code_hash);
+          tell(user, { what: 'Invite is back' });
+        } else {
+          q('UPDATE invites SET expires_at = ? WHERE code_hash = ?').run(clock(), inv.code_hash);
+          log(b.id, 'invite_cancelled', {});
+          tell(user, { what: 'Invite cancelled', undo: undoForm('/app/invites/cancel', { bot: b.id, code: plain, until: inv.expires_at }) });
+        }
+        return redirect(res, '/app'), true;
       }
       if (p === '/app/invites/basket' && req.method === 'POST') {
         const f = await form(req);
@@ -1793,8 +1832,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const basket = pickBasket(b.id, f.basket || null);
         const notes = f.notes === undefined ? inv.notes : String(f.notes).normalize('NFC').trim().slice(0, 280) || null;
         q('UPDATE invites SET basket = ?, notes = ? WHERE code_hash = ?').run(basket, notes, inv.code_hash);
-        tell(user, { what: notes !== inv.notes ? 'Saved for your bot' : basket ? `They'll be in ${basket}` : 'They\'ll be not sorted yet' });
-        return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket, notes })), true;
+        return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket, notes, saved: true })), true;
       }
 
       throw new HttpError(404, 'Page not found');
@@ -2303,8 +2341,9 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .umenu__panel{position:absolute;right:0;top:calc(100% + 8px);z-index:60;width:15.5rem;padding:4px;border:.5px solid var(--border);border-radius:10px;background:var(--surface-raised);box-shadow:var(--shadow-floating);line-height:1.3;transform-origin:top right;animation:menu-in var(--duration-fast) var(--ease-standard)}
 .umenu__head{display:flex;align-items:center;gap:10px;padding:8px}.umenu__id{display:grid;gap:2px;min-width:0;flex:1}
 .umenu__row{display:flex;align-items:center;gap:6px;min-width:0}.umenu__fullname{min-width:0;overflow:hidden;font-size:13px;font-weight:500;text-overflow:ellipsis;white-space:nowrap}
-.umenu__plan--infinite{border-color:transparent;color:#1a2230;background:linear-gradient(90deg,#ffadad,#ffd6a5,#fdffb6,#caffbf,#9bf6ff,#a0c4ff,#bdb2ff,#ffc6ff,#ffadad) 0 0/300% 100%;animation:infinite-pill 8s linear infinite}
-@keyframes infinite-pill{to{background-position:300% 0}}@media (prefers-reduced-motion:reduce){.umenu__plan--infinite{animation:none}}
+.umenu__plan.umenu__plan--infinite{position:relative;isolation:isolate;border-color:transparent;color:#fff;text-shadow:0 1px 1px rgb(0 0 0/.35);background:linear-gradient(90deg,#ff3b30,#ff9500,#ffcc00,#34c759,#00c7be,#007aff,#5856d6,#af52de,#ff3b30) 0 0/64px 100% repeat-x;animation:infinite-pill 3s linear infinite}
+.umenu__plan.umenu__plan--infinite::before{content:"";position:absolute;inset:-1px;z-index:-1;border-radius:inherit;background:inherit;animation:inherit;filter:blur(7px) saturate(1.4);opacity:.85}
+@keyframes infinite-pill{to{background-position:64px 0}}@media (prefers-reduced-motion:reduce){.umenu__plan.umenu__plan--infinite,.umenu__plan.umenu__plan--infinite::before{animation:none}}
 h2 .umenu__plan{display:inline-block;vertical-align:2px;margin-left:6px}
 .umenu__plan{flex:none;height:17px;padding:0 5px;border:.5px solid color-mix(in oklab,var(--foreground) 9%,transparent);border-radius:4px;background:color-mix(in oklab,var(--foreground) 4%,transparent);color:var(--text-secondary);font-size:11px;font-weight:500;line-height:16px}
 .umenu__email{overflow:hidden;font-size:12px;color:var(--text-muted);text-overflow:ellipsis;white-space:nowrap}
@@ -2488,7 +2527,7 @@ input,select{height:var(--control-height-md);padding:0 12px;min-width:0}textarea
 input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;border-color:var(--foreground)}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.row3{display:grid;grid-template-columns:1fr 1fr 2fr;gap:12px}@media(max-width:560px){.row3{grid-template-columns:1fr 1fr}.row3 label:last-child{grid-column:1/-1}}
 .pick{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:6px 0 14px}.pick label{min-width:180px}
-.error{color:var(--danger);font-weight:500}.okmsg{color:var(--success);font-weight:500;margin:0}.dev{background:color-mix(in oklab,var(--warning) 12%,var(--surface));padding:10px 14px;border-radius:var(--radius-control)}
+.error{color:var(--danger);font-weight:500}.okmsg{color:var(--success);font-weight:500;margin:0;display:flex;gap:6px;align-items:flex-start}.okmsg>svg{width:16px;height:16px;flex:none;margin-top:2px}.okmsg b{font-weight:500;color:var(--foreground)}.dev{background:color-mix(in oklab,var(--warning) 12%,var(--surface));padding:10px 14px;border-radius:var(--radius-control)}
 
 /* ── Settings groups (Arc settings rows) ── */
 .group{display:grid;gap:10px}.group>h2{margin:0;padding-left:4px}

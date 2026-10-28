@@ -815,7 +815,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       if (q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?)').get(inv.from_bot, inv.alias)) throw new HttpError(409, 'the inviter already used that alias; ask for a new invite');
       const basket = governance.basketName(me.id, body.basket);
       const notes = inviteNotes(body.notes);
-      q('UPDATE invites SET used_at = ?, used_by = ? WHERE code_hash = ?').run(clock(), me.id, inv.code_hash);
+      q('UPDATE invites SET used_at = ?, used_by = ?, plain_code = NULL WHERE code_hash = ?').run(clock(), me.id, inv.code_hash);
       const inviter = q('SELECT * FROM bots WHERE id = ?').get(inv.from_bot);
       const t = clock();
       const inviterOk = !inviter.user_id || inv.by_owner ? t : null;

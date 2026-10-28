@@ -671,10 +671,12 @@ test('inviting picks the basket: friends by default, changeable, and a bot can n
   const ann = await quietBot(env, 'ann@example.com', 'ann'), ben = await quietBot(env, 'ben@example.com', 'ben'), cat = await quietBot(env, 'cat@example.com', 'cat');
   // The dashboard link: friends unless Ann picks another basket; Ben picks for his side when he says yes.
   const made = await ann.b('/app/invites', { method: 'POST', form: { bot: ann.botId } });
-  assert.match(made.text, /<label>Their basket<select name="basket" data-autosave><option>family<\/option><option selected>friends<\/option>/);
+  assert.match(made.text, /<label>Their basket<select name="basket"><option>family<\/option><option selected>friends<\/option>/);
   const code = made.text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   const picked = await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'family' } });
-  assert.match(picked.text, /<span class="toast__what">They&#39;ll be in family<\/span>|<span class="toast__what">They'll be in family<\/span>/);
+  assert.match(picked.text, /class="okmsg" role="status">[^]*Saved\. When they join, they go in <b>family<\/b>\. Now send them the message above\./);
+  assert.match(picked.text, /href="\/app">Done<\/a>/);
+  assert.match(picked.text, /Already on bot2bot\? Send just the link/);
   assert.match(picked.text, /<option selected>family<\/option>/);
   const page = await ben.b(`/i/${code}`);
   assert.match(page.text, /<label>Their basket<select name="basket"><option>family<\/option><option selected>friends<\/option>/);
@@ -703,7 +705,7 @@ test('inviting asks right away what the bot should know about the new friend, on
   assert.match(made.text, /<label>Anything your bot should know about them\?<textarea name="notes" maxlength="280"/);
   const code = made.text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   const saved = await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'friends', notes: '  My neighbour. Garden and pickups are fine.  ' } });
-  assert.match(saved.text, /<span class="toast__what">Saved for your bot<\/span>/);
+  assert.match(saved.text, /they go in <b>friends<\/b>, and your bot gets your instructions/);
   assert.match(saved.text, />My neighbour\. Garden and pickups are fine\.<\/textarea>/);
   // Changing only the basket keeps the notes.
   await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'family', notes: 'My neighbour. Garden and pickups are fine.' } });
@@ -723,4 +725,27 @@ test('inviting asks right away what the bot should know about the new friend, on
   await cat.cli('accept', out.match(/accept ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1], 'Ann', '--notes=Old boss. Ask me first about money.');
   assert.equal(contactOf(env, ann, cat).notes, 'Colleague, design team');
   assert.equal(contactOf(env, cat, ann).notes, 'Old boss. Ask me first about money.');
+});
+
+test('invites you sent wait on the overview until used: open one again, cancel it, undo', async (t) => {
+  const env = await setup(t, { privacyPilot: true });
+  const ann = await quietBot(env, 'ann5@example.com', 'ann5'), ben = await quietBot(env, 'ben5@example.com', 'ben5');
+  const code = (await ann.b('/app/invites', { method: 'POST', form: { bot: ann.botId } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'family', notes: 'My uncle' } });
+  let home = (await ann.b('/app')).text;
+  assert.match(home, /Invites sent <span class="count">1<\/span>/);
+  assert.match(home, new RegExp(`href="/app/invites/${code}"[^]*My uncle[^]*Waiting for them · family · 7 days left`));
+  const again = (await ann.b(`/app/invites/${code}`)).text;
+  assert.ok(again.includes(`/i/${code}`) && /Cancel this invite/.test(again));
+  assert.equal((await ben.b(`/app/invites/${code}`)).status, 404, 'only the inviter opens it');
+
+  await ann.b('/app/invites/cancel', { method: 'POST', form: { bot: ann.botId, code } });
+  home = (await ann.b('/app')).text;
+  assert.doesNotMatch(home, /Invites sent/);
+  await ann.b('/app/invites/cancel', { method: 'POST', form: { bot: ann.botId, code, undo: '1', until: String(Date.now() + 86_400_000) } });
+  assert.match((await ann.b('/app')).text, /Invites sent <span class="count">1<\/span>/);
+
+  // Used: gone from the list.
+  await ben.b(`/i/${code}`, { method: 'POST', form: { bot: ben.botId, alias: 'Ann' } });
+  assert.doesNotMatch((await ann.b('/app')).text, /Invites sent/);
 });
