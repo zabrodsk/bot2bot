@@ -37,6 +37,7 @@ export function migrateApp(db) {
   // Dashboard invites keep their code until used, so the overview can list them and open them again.
   addColumn('invites', 'plain_code', 'TEXT');
   addColumn('invites', 'created_at', 'INTEGER');
+  addColumn('invites', 'saved_at', 'INTEGER');
   addColumn('bots', 'paused_at', 'INTEGER');
   addColumn('bots', 'disconnected_at', 'INTEGER');
   addColumn('messages', 'body_purged_at', 'INTEGER');
@@ -48,6 +49,7 @@ export function migrateApp(db) {
   // Quiet hours (0.8): on by default, 22:00 to 08:00 in the person's own timezone.
   addColumn('users', 'tz', 'TEXT');
   addColumn('users', 'infinite_at', 'INTEGER');
+  addColumn('users', 'name_set_at', 'INTEGER');
   addColumn('users', 'quiet_on', 'INTEGER NOT NULL DEFAULT 1');
   addColumn('users', 'quiet_start', 'INTEGER NOT NULL DEFAULT 1320');
   addColumn('users', 'quiet_end', 'INTEGER NOT NULL DEFAULT 480');
@@ -251,6 +253,15 @@ Then install the tool and join with code ${code}. Add the "b2b messaging" skill 
     : !b.webhook_url ? { key: 'needs_doorbell', label: 'Doorbell off' } : b.doorbell_verified_at ? { key: 'ready', label: 'Ready' } : { key: 'needs_test', label: 'Doorbell not tested' };
   // Arc badge tones: success for ready, warning for a step that's missing, info for paused.
   const toneOf = (key) => key === 'ready' ? 'success' : key === 'needs_doorbell' || key === 'needs_test' ? 'warning' : key === 'paused' ? 'info' : 'neutral';
+  // Arc input: a labelled single-line field with optional helper copy and an error row (role=alert, aria-invalid).
+  let fieldN = 0;
+  const field = ({ label, name, value = '', description = '', error = '', attrs = '' }) => {
+    const id = `f${++fieldN}`;
+    const desc = description ? `<span class="field__desc" id="${id}-d">${description}</span>` : '';
+    const err = error ? `<span class="field__error" id="${id}-e" role="alert">${esc(error)}</span>` : '';
+    const by = [description && `${id}-d`, error && `${id}-e`].filter(Boolean).join(' ');
+    return `<label class="field">${esc(label)}<input name="${name}" value="${esc(value)}"${by ? ` aria-describedby="${by}"` : ''}${error ? ' aria-invalid="true"' : ''} ${attrs}>${desc}${err}</label>`;
+  };
   const badge = (label, tone = 'neutral') => `<span class="badge badge--${tone}">${esc(label)}</span>`;
   // Arc avatar: initials on a muted disc.
   // Arc avatar: the initial sits underneath, so a photo that fails to load falls back to it.
@@ -259,6 +270,21 @@ Then install the tool and join with code ${code}. Add the "b2b messaging" skill 
   const stickers = stickerSet(stickersDir || fileURLToPath(new URL('./public/stickers/', import.meta.url)));
   const isSticker = (pic) => typeof pic === 'string' && pic.startsWith('sticker:') && stickers().has(pic.slice(8));
   const photoUrl = (userId, at, pic) => pic && ROBOT.has(pic) ? `/avatars/${pic}.svg` : isSticker(pic) ? `/stickers/${pic.slice(8)}.png` : userId && at ? `/app/photo/${userId}?v=${at}` : '';
+  // A person's name as they write it: one line, up to 40 characters.
+  const cleanName = (v) => String(v ?? '').normalize('NFC').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+  // Their bots introduce them by this name too (a bot keeps a name its owner gave it on purpose).
+  const setName = (u, name) => tx(() => {
+    q('UPDATE bots SET display_name = ? WHERE user_id = ? AND display_name = ?').run(name, u.id, u.name);
+    q('UPDATE users SET name = ?, name_set_at = ? WHERE id = ?').run(name, clock(), u.id);
+    u.name = name;
+  });
+  // A bot name to suggest: their first name plus -bot (diacritics dropped), with a number if that's taken.
+  const suggestHandle = (u) => {
+    const slug = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+    const base = `${slug(String(u.name || '').trim().split(/\s+/)[0]) || slug(u.email.split('@')[0]) || 'my'}-bot`;
+    for (let n = 1; n < 100; n++) { const h = n === 1 ? base : `${base}-${n}`; if (!q('SELECT 1 FROM bots WHERE handle = ?').get(h)) return h; }
+    return base;
+  };
   const hasPicture = (u) => !!(u.photo_at && (u.photo || ROBOT.has(u.avatar) || isSticker(u.avatar)));
   // Arc presence dot: shape and colour change together, so a bot's state never rests on colour alone.
   const presence = (key) => `<span class="pdot" data-status="${key === 'ready' ? 'available' : key === 'needs_doorbell' || key === 'needs_test' ? 'away' : 'offline'}" aria-hidden="true"></span>`;
@@ -311,7 +337,7 @@ Then install the tool and join with code ${code}. Add the "b2b messaging" skill 
   function authorizePage(user, client, params, { error = '' } = {}) {
     const bots = myBots(user).filter((b) => b.vendor === 'connector');
     const hidden = Object.entries(params).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
-    const suggested = (user.email.split('@')[0].toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 24) || 'my') + '-bot';
+    const suggested = suggestHandle(user);
     // A disconnected bot waiting to come back is the likely choice; otherwise a new bot, so nobody hands an
     // existing bot to an app by accident. Apps name themselves (Grok Bot signs in as "Cursor"), so that's small print.
     const back = bots.find((b) => b.disconnected_at);
@@ -531,13 +557,13 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: 'Remove', p
 <form method="post" action="/app/contacts/remove"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small ghost">No, remove</button></form>`)),
     ].filter(Boolean).join('');
     const first = (user.name || '').trim().split(/\s+/)[0];
-    // Invites sent from here that nobody has used yet: who they're for (the note), where they'll go, how long left.
+    // Invites saved from here that nobody has used yet (opening Invite a friend and going back lists nothing): who they're for (the note), where they'll go, how long left.
     const open = live.length ? q(`SELECT i.*, b.handle FROM invites i JOIN bots b ON b.id = i.from_bot WHERE i.from_bot IN (${live.map(() => '?').join(',')})
-      AND i.by_owner = 1 AND i.plain_code IS NOT NULL AND i.used_at IS NULL AND i.expires_at > ? ORDER BY i.created_at DESC`).all(...live.map((b) => b.id), clock()) : [];
+      AND i.by_owner = 1 AND i.plain_code IS NOT NULL AND i.saved_at IS NOT NULL AND i.used_at IS NULL AND i.expires_at > ? ORDER BY i.created_at DESC`).all(...live.map((b) => b.id), clock()) : [];
     const daysLeft = (i) => Math.max(1, Math.ceil((i.expires_at - clock()) / 86_400_000));
     const inviteRow = (i) => `<li><a class="line line--link" href="/app/invites/${esc(i.plain_code)}"><span class="pdot" data-status="away" aria-hidden="true"></span>
-<span class="line__main"><span class="line__title">${i.notes ? esc(i.notes.length > 48 ? `${i.notes.slice(0, 47)}…` : i.notes) : 'Invite link'}</span><span class="line__sub">Waiting for them · ${i.basket ? esc(i.basket) : 'not sorted yet'} · ${daysLeft(i) === 1 ? '1 day left' : `${daysLeft(i)} days left`}</span></span>${ICON.chev}</a></li>`;
-    const invitesGroup = open.length ? `<section class="group" aria-labelledby="inv-h"><div class="group__head"><h2 id="inv-h">Invites sent <span class="count">${open.length}</span></h2></div>
+<span class="line__main"><span class="line__title">${!i.alias.startsWith('friend-') ? esc(i.alias) : i.notes ? esc(i.notes.length > 48 ? `${i.notes.slice(0, 47)}…` : i.notes) : 'Invite link'}</span><span class="line__sub">Waiting for them · ${i.basket ? esc(i.basket) : 'not sorted yet'} · ${daysLeft(i) === 1 ? '1 day left' : `${daysLeft(i)} days left`}</span></span>${ICON.chev}</a></li>`;
+    const invitesGroup = open.length ? `<section class="group" aria-labelledby="inv-h"><div class="group__head"><h2 id="inv-h">Invites pending <span class="count">${open.length}</span></h2></div>
 <div class="card card--list"><ul class="list">${open.map(inviteRow).join('')}</ul></div></section>` : '';
     return layout('Overview', `${alerts ? `<div class="stack-alerts">${alerts}</div>` : ''}
 ${checklist(live, settled, paused)}
@@ -617,7 +643,7 @@ Then run: node ~/bin/b2b.mjs refresh and do what it says. Your keys and contacts
     if (r.approved_at) return layout('Connect your bot', `${art('setup', 'small')}<section class="card narrow center"><h1>Your bot is connected</h1><p class="muted">Go back to your bot's chat. It finishes the setup on its own.</p><a class="btn wide" href="/app">Go to your dashboard</a></section>`, opts);
     const mine = myBots(user).filter((b) => !(b.disconnected_at && b.vendor === 'web'));
     const label = (b) => `@${b.handle} (${b.vendor === 'connector' ? 'switch from quick connect' : b.vendor === 'web' ? 'replace the web inbox' : 'reconnect'})`;
-    const suggested = handle || r.name || user.email.split('@')[0].toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
+    const suggested = handle || r.name || suggestHandle(user);
     const mins = Math.max(1, Math.round((r.expires_at - clock()) / 60_000));
     return layout('Connect your bot', `${art('setup', 'small')}<section class="card narrow"><h1>Connect your bot</h1>
 ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
@@ -661,7 +687,7 @@ ${codeBlock('msg', 'Message for your bot', setupMessage(code.plain || 'XXXX-XXXX
 <form method="post" action="/app/bots/cancel"><button class="link">Use a different name</button></form>
 <script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>${had}) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`;
   }
-  const addBotForm = (user, { error = '', handle = '' } = {}) => layout('Add a bot', `<section class="card"><h1>Add another bot</h1>${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}<form method="post" action="/app/bots" class="stack"><label>Bot name<input name="handle" required pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(handle)}"></label><p class="muted small">2 to 32 lowercase letters, numbers, - or _.</p><button class="btn">Continue</button></form></section>`, { user, tab: 'home', width: 'narrow', bar: { back: '/app' } });
+  const addBotForm = (user, { error = '', handle = '' } = {}) => layout('Add a bot', `<section class="card"><h1>Add another bot</h1>${error ? alertBox('danger', esc(error), '') : ''}<form method="post" action="/app/bots" class="stack">${field({ label: 'Bot name', name: 'handle', value: handle || suggestHandle(user), description: '2 to 32 lowercase letters, numbers, - or _.', attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off"' })}<div><button class="btn">Continue</button></div></form></section>`, { user, tab: 'home', width: 'narrow', bar: { back: '/app' } });
 
   function botPage(user, b, { error = '' } = {}) {
     const st = botStatus(b);
@@ -775,9 +801,11 @@ ${error ? `<p class="error center" role="alert">${esc(error)}</p>` : ''}${action
   }
 
   // The inviter's side: a message to send that puts the setup bot first, then the link.
-  function invitedPage(user, b, link, { code = '', basket = null, notes = null } = {}) {
+  function invitedPage(user, b, link, { code = '', basket = null, notes = null, alias = '', error = '' } = {}) {
     const names = code ? basketsOf(b.id) : [];
-    const pick = names.length ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">${basketPick(names, basket)}${notesField('them', notes)}<div><button class="btn small">Save</button></div></form>` : '';
+    const named = alias && !alias.startsWith('friend-') ? alias : '';
+    const pick = code ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">
+${field({ label: 'What do you call them?', name: 'alias', value: named, description: 'Left empty, they get their own first name when they join.', error: error && /name|someone called/i.test(error) ? error : '', attrs: 'maxlength="32" autocomplete="off" placeholder="Uncle Marek"' })}${names.length ? basketPick(names, basket) + notesField('them', notes) : ''}<div><button class="btn small">Save</button></div></form>` : '';
     return layout('Invite a friend', `<section class="card"><h2>Send this to your friend</h2>
 <p class="muted">It asks them to add the setup bot to their Grok Bot first, then open your invite.</p>
 ${codeBlock('msg', 'Message for your friend', inviteMessage(link))}${pick}
@@ -844,7 +872,7 @@ ${cards ? `<div class="convos">${cards}</div><p class="muted small">Not end-to-e
 
   // Onboarding: everyone picks a picture before the dashboard. A drawn robot, or their own photo.
   // Onboarding: everyone picks a picture before the dashboard. A sticker from the set, a drawn robot, or their own photo.
-  function picturePage(user, next, { error = '' } = {}) {
+  function picturePage(user, next, { error = '', nameError = '' } = {}) {
     const set = [...stickers().values()];
     const pick = ROBOT.has(user.avatar) || isSticker(user.avatar) ? user.avatar : !user.photo ? ROBOTS[user.id % ROBOTS.length].key : '';
     const face = ROBOT.has(pick) ? ROBOT_SVG.get(pick) : `<img src="${esc(photoUrl(user.id, user.photo_at, pick))}" alt="">`;
@@ -853,7 +881,8 @@ ${cards ? `<div class="convos">${cards}</div><p class="muted small">Not end-to-e
     const sheet = set.length ? `<fieldset class="pfp__set"><legend class="pfp__legend">Stickers</legend><div class="pfp__grid">${set.map((x) => opt(`sticker:${x.key}`, `<img src="/stickers/${esc(x.key)}.png" alt="" loading="lazy" decoding="async">`, x.name, true)).join('')}</div></fieldset>` : '';
     return layout('Your picture', `<form method="post" action="/app/picture" class="pfp" data-pick>
 <input type="hidden" name="next" value="${esc(next)}"><input type="hidden" name="photo">
-<div class="pfp__head"><span class="pfp__face" data-face${isSticker(pick) ? ' data-cut' : ''}>${face}</span><h1>${first ? 'Change your picture' : 'Pick your picture'}</h1><p class="pagehead__sub">Friends see it next to your name. You can change it any time in Account.</p></div>
+<div class="pfp__head"><span class="pfp__face" data-face${isSticker(pick) ? ' data-cut' : ''}>${face}</span><h1>${first ? 'Change your picture' : 'Your name and picture'}</h1><p class="pagehead__sub">Friends see them when you invite them. You can change both any time in Account.</p></div>
+${first ? '' : `<div class="pfp__name">${field({ label: 'Your name', name: 'name', value: user.name_set_at ? user.name : '', description: 'What friends know you as.', error: nameError, attrs: 'required maxlength="40" autocomplete="name" autofocus' })}</div>`}
 ${sheet}<fieldset class="pfp__set"><legend class="${set.length ? 'pfp__legend' : 'sr'}">Robots</legend><div class="pfp__grid">${ROBOTS.map((r) => opt(r.key, ROBOT_SVG.get(r.key), r.name)).join('')}</div></fieldset>
 ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}<p class="error" role="alert" data-photo-error hidden>That photo couldn't be opened. Try a JPEG or PNG.</p>
 <div class="pfp__foot"><input type="file" accept="image/*" hidden tabindex="-1" aria-hidden="true" data-own-file><button type="button" class="btn ghost" data-own hidden>${ICON.photo}Upload a photo</button>
@@ -861,10 +890,11 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}<p class="error
   }
 
   // Arc settings: one group per section, label and description on the left, the control on the right.
-  function accountPage(user, { error = '', quietError = '' } = {}) {
+  function accountPage(user, { error = '', quietError = '', nameError = '' } = {}) {
     const quietNow = quietUntil(user, clock());
     return layout('Account', `<section class="group" aria-labelledby="you-h"><h2 id="you-h">You</h2><div class="card card--rows">
 <div class="setrow"><div class="me">${avatar(user.name || user.email, 'lg', photoUrl(user.id, user.photo_at, user.avatar))}<div><p class="setrow__label">${esc(user.name)}</p><p class="setrow__desc">${esc(user.email)}</p></div></div>${verifiedPill(user.email_verified_at)}</div>
+<form method="post" action="/app/account/name" class="setrow"><div class="grow">${field({ label: 'Your name', name: 'name', value: user.name, description: 'Friends see it when you invite them.', error: nameError, attrs: 'required maxlength="40" autocomplete="name"' })}</div><button class="btn small ghost">Save</button></form>
 <div class="setrow"><div><p class="setrow__label">Profile picture</p><p class="setrow__desc">Only friends you said yes to can see it.</p></div><a class="btn small ghost" href="/app/picture?next=/app/account">Change</a></div>
 <div class="setrow"><p class="setrow__desc">Friends see your name, your picture and that your email is verified. They never see the address itself.</p></div>
 ${hosted ? '<div class="setrow"><div><p class="setrow__label">Plan</p><p class="setrow__desc">What you can send and who your plan covers.</p></div><a class="btn small ghost" href="/app/billing">See my plan</a></div>' : ''}</div></section>
@@ -1062,6 +1092,7 @@ ${chip('', 'not sorted yet', !c.circle, true)}${s.circles.map((g) => chip(g.id, 
 <label class="switch"><input type="checkbox" role="switch" name="mode" value="asks" aria-labelledby="ask-first" data-autosave${own || held ? ' checked' : ''}${held ? ' disabled' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label></div>
 <noscript><div><button class="btn small ghost">Save</button></div></noscript></form>
 <form method="post" action="${base}/about" class="pblock" id="about">
+${field({ label: 'What you call them', name: 'alias', value: c.alias, description: 'Your bot uses this name for them. They never see it.', attrs: 'required maxlength="32" autocomplete="off"' })}
 <label>Who they are<input name="purpose" maxlength="60" autocomplete="off" value="${esc(c.purpose || '')}" placeholder="football friend"></label>
 <label>Special instructions for talking to ${esc(c.alias)}<textarea name="notes" maxlength="280" rows="3" placeholder="Only football. Anything else, ask me.">${esc(c.notes || '')}</textarea></label>
 <div><button class="btn small ghost">Save</button></div></form>
@@ -1121,6 +1152,7 @@ ${own('edit', 'Edit', d?.text || '')}${own('write', 'Write my own', '')}
       case 'delete_circle': return `Remove the ${grp} basket`;
       case 'set_purpose': return o.purpose ? `Note who ${who} is: ${o.purpose}` : `Clear who ${who} is`;
       case 'set_notes': return `Change your notes for ${who}`;
+      case 'rename': return `Call ${who} ${o.name}`;
       case 'add_topic': return `Let ${who} ask about ${o.topic}`;
       case 'remove_topic': return `Stop ${who} asking about ${o.topic}`;
       case 'add_rule': return `Add a rule for ${who}: ${o.text}`;
@@ -1609,7 +1641,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           // One line each: the relay keeps purpose and notes on a single line.
           const line = (v) => String(v ?? '').replace(/\s*[\r\n]+\s*/g, ' ');
           const ops = pm[3] === 'basket' ? [{ op: 'move', contact: peer, circle: f.circle ? Number(f.circle) : null }, { op: 'set_mode', contact: peer, mode: f.mode === '' || f.mode == null ? null : f.mode }]
-            : pm[3] === 'about' ? [{ op: 'set_purpose', contact: peer, purpose: line(f.purpose) }, { op: 'set_notes', contact: peer, notes: line(f.notes) }]
+            : pm[3] === 'about' ? [...(f.alias != null && line(f.alias).trim() !== was.alias ? [{ op: 'rename', contact: peer, name: line(f.alias) }] : []), { op: 'set_purpose', contact: peer, purpose: line(f.purpose) }, { op: 'set_notes', contact: peer, notes: line(f.notes) }]
             : pm[3] === 'topics' ? [f.remove != null ? { op: 'remove_topic', contact: peer, topic: String(f.remove) } : { op: 'add_topic', contact: peer, topic: String(f.add ?? '') }]
             : [f.remove != null ? { op: 'remove_rule', rule: String(f.remove) } : { op: 'add_rule', contact: peer, text: line(f.add) }];
           if (pm[3] === 'rules' && f.remove != null && !q('SELECT 1 FROM contact_rules WHERE id = ? AND owner_bot = ? AND peer_bot = ?').get(String(f.remove), b.id, peer)) throw new HttpError(404, 'Rule not found');
@@ -1622,7 +1654,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             tell(user, { what: now.mode_override === 'asks' ? 'Asks you first' : now.circle ? `Moved to ${now.circle.name}` : 'Moved to not sorted yet',
               ...back(undoForm(`${base}/basket`, { circle: was.circle?.id ?? '', mode: was.mode_override ?? '' })) });
           } else if (pm[3] === 'about') {
-            tell(user, { what: 'Saved', ...back(undoForm(`${base}/about`, { purpose: was.purpose ?? '', notes: was.notes ?? '' })) });
+            tell(user, { what: now.alias !== was.alias ? `Now called ${now.alias}` : 'Saved', ...back(undoForm(`${base}/about`, { alias: was.alias, purpose: was.purpose ?? '', notes: was.notes ?? '' })) });
           } else if (pm[3] === 'topics') {
             const t = ops[0].topic.trim().toLowerCase();
             tell(user, f.remove != null ? { what: `Removed ${t}`, ...back(undoForm(`${base}/topics`, { add: t })) }
@@ -1740,6 +1772,12 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       if (p === '/app/picture' && req.method === 'POST') {
         const f = await form(req, 400_000);
         const next = safeNext(f.next);
+        // First visit: their name comes with it (it used to be guessed from the email).
+        if (f.name !== undefined) {
+          const name = cleanName(f.name);
+          if (!name) return page(res, 400, picturePage(user, next, { nameError: 'Tell us what to call you.' })), true;
+          setName(user, name);
+        }
         if (f.photo) {
           const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(f.photo));
           const jpg = m && Buffer.from(m[1], 'base64');
@@ -1763,6 +1801,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'private, max-age=31536000, immutable', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'" });
         res.end(Buffer.from(row.photo));
         return true;
+      }
+      if (p === '/app/account/name' && req.method === 'POST') {
+        const f = await form(req);
+        const name = cleanName(f.name), was = user.name;
+        if (!name) return page(res, 400, accountPage(user, { nameError: 'Tell us what to call you.' })), true;
+        setName(user, name);
+        tell(user, { what: 'Name saved', undo: f.undo === '1' || was === name ? null : undoForm('/app/account/name', { name: was }) });
+        return redirect(res, '/app/account'), true;
       }
       if (p === '/app/account/quiet' && req.method === 'POST') {
         const f = await form(req);
@@ -1803,7 +1849,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const inv = q('SELECT * FROM invites WHERE plain_code = ? AND used_at IS NULL AND expires_at > ?').get(openInv[1], clock());
         const b = inv && myBots(user).find((x) => x.id === inv.from_bot);
         if (!b) throw new HttpError(404, 'That invite was used, cancelled or has expired.');
-        return page(res, 200, invitedPage(user, b, `${origin}/i/${inv.plain_code}`, { code: inv.plain_code, basket: inv.basket, notes: inv.notes })), true;
+        return page(res, 200, invitedPage(user, b, `${origin}/i/${inv.plain_code}`, { code: inv.plain_code, basket: inv.basket, notes: inv.notes, alias: inv.alias })), true;
       }
       if (p === '/app/invites/cancel' && req.method === 'POST') {
         const f = await form(req);
@@ -1827,11 +1873,17 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const plain = String(f.code || '').trim().toUpperCase();
         const inv = q('SELECT * FROM invites WHERE code_hash = ? AND from_bot = ? AND used_at IS NULL AND expires_at > ?').get(sha(plain), b.id, clock());
         if (!inv) throw new HttpError(404, 'That invite was used or has expired.');
-        const basket = pickBasket(b.id, f.basket || null);
+        const basket = f.basket === undefined ? inv.basket : pickBasket(b.id, f.basket || null);
         const notes = f.notes === undefined ? inv.notes : String(f.notes).normalize('NFC').trim().slice(0, 280) || null;
-        q('UPDATE invites SET basket = ?, notes = ? WHERE code_hash = ?').run(basket, notes, inv.code_hash);
-        // Saved: back to the overview, where the invite now waits under "Invites sent".
-        tell(user, { what: `Invite saved · ${basket || 'not sorted yet'}`, undo: f.undo === '1' ? null : undoForm('/app/invites/basket', { bot: b.id, code: plain, basket: inv.basket ?? '', notes: inv.notes ?? '' }) });
+        // The name they'll have for you right away; left empty, it becomes their own first name when they say yes.
+        const said = String(f.alias ?? '').normalize('NFC').trim();
+        const alias = said ? said : inv.alias.startsWith('friend-') || f.alias === undefined ? inv.alias : `friend-${plain.slice(0, 4).toLowerCase()}`;
+        const invalid = said && !/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,31}$/u.test(said) ? 'A name is 1-32 letters or numbers.'
+          : said && q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?)').get(b.id, said) ? `You already have someone called "${said}".` : '';
+        if (invalid) return page(res, 400, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket, notes, alias: said, error: invalid })), true;
+        q('UPDATE invites SET basket = ?, notes = ?, alias = ?, saved_at = coalesce(saved_at, ?) WHERE code_hash = ?').run(basket, notes, alias, clock(), inv.code_hash);
+        // Saved: back to the overview, where the invite now waits under "Invites pending".
+        tell(user, { what: `Invite saved${alias.startsWith('friend-') ? '' : ` for ${alias}`} · ${basket || 'not sorted yet'}`, undo: f.undo === '1' ? null : undoForm('/app/invites/basket', { bot: b.id, code: plain, basket: inv.basket ?? '', notes: inv.notes ?? '', alias: inv.alias.startsWith('friend-') ? '' : inv.alias }) });
         return redirect(res, '/app'), true;
       }
 
@@ -2307,7 +2359,7 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .avatar--cut{border:0;background:none;box-shadow:none;filter:drop-shadow(0 1px 1px rgb(0 0 0 / .1)) drop-shadow(0 3px 5px rgb(0 0 0 / .12))}.avatar--cut img{border-radius:0;object-fit:contain}
 .me{display:flex;align-items:center;gap:14px;min-width:0}
 /* Picture picker: the chosen robot lands in the preview on a spring and blinks once. */
-.pfp{display:grid;gap:24px}.pfp__head{display:grid;justify-items:center;gap:8px;text-align:center}.pfp__head h1{margin:10px 0 0}
+.pfp{display:grid;gap:24px}.pfp__name{max-width:360px;width:100%;justify-self:center}.setrow>.grow{flex:1;min-width:0}.pfp__head{display:grid;justify-items:center;gap:8px;text-align:center}.pfp__head h1{margin:10px 0 0}
 .pfp__face{display:block;width:112px;height:112px;border:6px solid #fff;border-radius:var(--radius-pill);overflow:hidden;background:var(--surface-muted);filter:drop-shadow(0 1px 1px rgb(0 0 0 / .08)) drop-shadow(0 8px 14px rgb(0 0 0 / .1))}
 .pfp__face svg,.pfp__face img{display:block;width:100%;height:100%;object-fit:cover}
 .pfp__face[data-cut]{width:132px;height:132px;border:0;border-radius:0;overflow:visible;background:none}.pfp__face[data-cut] img{object-fit:contain}
@@ -2521,6 +2573,8 @@ transition:color var(--duration-fast) var(--ease-standard),background-color var(
 /* ── Forms ── */
 .stack{display:grid;gap:14px;margin-top:12px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
 label{display:grid;gap:6px;font-weight:500;font-size:var(--text-sm)}
+.field__desc{color:var(--text-secondary);font-size:var(--text-xs);font-weight:400}.field__error{color:var(--danger);font-size:var(--text-xs);font-weight:500}
+.field input[aria-invalid=true]{border-color:var(--danger)}
 input,select,textarea{font:inherit;font-size:16px;color:var(--foreground);background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-control);transition:border-color var(--duration-fast) var(--ease-standard),background-color var(--duration-fast) var(--ease-standard)}
 input::placeholder,textarea::placeholder{color:var(--text-muted)}
 select{appearance:none;padding-right:36px;cursor:pointer;background:var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7588' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 12px center/16px}

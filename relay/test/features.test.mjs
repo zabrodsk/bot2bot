@@ -119,7 +119,7 @@ test('profile pictures: picked before the dashboard, shown to friends who said y
   await b('/login/verify', { method: 'POST', form: { email: 'new@example.com', code: env.mail.at(-1).text.match(/code is (\d{6})/)[1] } });
   assert.equal((await b('/app/activity')).location, '/app/picture?next=%2Fapp%2Factivity');
   const picker = (await b('/app/picture?next=/app/activity')).text;
-  assert.match(picker, /Pick your picture/);
+  assert.match(picker, /Your name and picture/);
   assert.equal((picker.match(/name="avatar" value="[a-z]+"/g) || []).length, 12, 'the twelve robots, next to any stickers');
   assert.equal((await b('/app/picture', { method: 'POST', form: { next: '/app/activity' } })).status, 400, 'a picture is required');
   assert.equal((await b('/app/picture', { method: 'POST', form: { avatar: 'nope', next: '/app/activity' } })).status, 400);
@@ -150,4 +150,26 @@ test('profile pictures: picked before the dashboard, shown to friends who said y
   await anna.b('/app/picture', { method: 'POST', form: { avatar: 'mint' } });
   assert.equal((await anna.b(src)).status, 404);
   assert.match((await anna.b('/app/account')).text, /src="\/avatars\/mint\.svg"/);
+});
+
+test('your name: picked on the first step, changeable in Account, and your bot name is suggested from it', async (t0) => {
+  const env = await setup(t0);
+  const b = browser(env.url);
+  await b('/login', { method: 'POST', form: { email: 'd.zabrodsky.88@example.com' } });
+  await b('/login/verify', { method: 'POST', form: { email: 'd.zabrodsky.88@example.com', code: env.mail.at(-1).text.match(/code is (\d{6})/)[1] } });
+  const first = (await b('/app/picture?next=/app')).text;
+  assert.match(first, /Your name and picture/);
+  assert.match(first, /<label class="field">Your name<input name="name" value=""/);
+  const empty = await b('/app/picture', { method: 'POST', form: { avatar: 'classic', name: '  ', next: '/app' } });
+  assert.equal(empty.status, 400);
+  assert.match(empty.text, /role="alert">Tell us what to call you\./);
+  assert.equal((await b('/app/picture', { method: 'POST', form: { avatar: 'classic', name: 'Dušan  Zabrodský', next: '/app' } })).status, 303);
+  assert.match((await b('/app/account')).text, /name="name" value="Dušan Zabrodský"/);
+  // The bot name is suggested from it, without diacritics.
+  assert.match((await b('/app/bots/new-form')).text, /name="handle" value="dusan-bot"/);
+  // Account: change it, with Undo.
+  await b('/app/account/name', { method: 'POST', form: { name: 'Dusan Jr' } });
+  const acc = (await b('/app/account')).text;
+  assert.match(acc, /Name saved[^]*\/app\/account\/name[^]*name="name" value="Dušan Zabrodský"/);
+  assert.match(acc, /<label class="field">Your name<input name="name" value="Dusan Jr"/);
 });

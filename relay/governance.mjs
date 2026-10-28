@@ -212,7 +212,7 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     const op = input.op;
     const id = me.id;
     let widening = false, out = { op };
-    const c = ['move', 'set_purpose', 'set_notes', 'add_topic', 'remove_topic', 'add_rule', 'block'].includes(op) || (op === 'set_mode' && input.contact != null) ? peer(me, input.contact) : null;
+    const c = ['move', 'rename', 'set_purpose', 'set_notes', 'add_topic', 'remove_topic', 'add_rule', 'block'].includes(op) || (op === 'set_mode' && input.contact != null) ? peer(me, input.contact) : null;
     if (c) out.contact = c.peer_bot;
     if (input.circle != null && op !== 'add_circle') {
       const g = circle(id, input.circle);
@@ -250,6 +250,13 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
         out.circle = group.id;
         q('UPDATE contacts SET circle_id = NULL WHERE owner_bot = ? AND circle_id = ?').run(id, group.id);
         q('DELETE FROM circles WHERE id = ?').run(group.id); break;
+      }
+      // What the owner calls them: the name their bot uses for this person, changeable any time.
+      case 'rename': {
+        out.name = String(input.name ?? '').normalize('NFC').trim();
+        if (!/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,31}$/u.test(out.name)) fail('a name is 1-32 letters or numbers');
+        if (q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?) AND peer_bot != ?').get(id, out.name, c.peer_bot)) fail(`you already have someone called "${out.name}"`, 409);
+        q('UPDATE contacts SET alias = ? WHERE owner_bot = ? AND peer_bot = ?').run(out.name, id, c.peer_bot); break;
       }
       case 'set_purpose': case 'set_notes': {
         const field = op === 'set_purpose' ? 'purpose' : 'notes';
@@ -311,7 +318,7 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
         }
         break;
       }
-      default: fail('unknown settings op; use move, set_mode, add_circle, rename_circle, delete_circle, set_purpose, set_notes, add_topic, remove_topic, add_rule, remove_rule, block, pause, quiet_hours or ack_learned');
+      default: fail('unknown settings op; use move, rename, set_mode, add_circle, rename_circle, delete_circle, set_purpose, set_notes, add_topic, remove_topic, add_rule, remove_rule, block, pause, quiet_hours or ack_learned');
     }
     return { out, widening };
   }

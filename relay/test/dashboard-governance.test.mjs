@@ -510,8 +510,8 @@ test('review: all thirty shipped stickers serve exact PNG bytes; font licence an
   assert.match(readFileSync(join(root, 'public/hand/OFL.txt'), 'utf8'), /Caveat Project Authors[^]*SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(readFileSync(join(root, 'Dockerfile'), 'utf8'), /COPY public \.\/public/);
   assert.match(readFileSync(join(root, '../Dockerfile'), 'utf8'), /COPY relay\/public \.\/public/);
-  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.19.1');
-  assert.equal((await cliHome().cli('version')).trim(), '0.19.1');
+  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.19.2');
+  assert.equal((await cliHome().cli('version')).trim(), '0.19.2');
 });
 
 function privateMcp(t, who) {
@@ -649,11 +649,12 @@ test('everything the dashboard changes, the bot can change too, from the ops its
   assert.match(text, /Your owner can change all of this by telling you, just like on their dashboard\./);
   const shown = [...text.matchAll(/\{"op":[^\n]*?\}(?=[,\s(]|$)/gm)].map((m) => JSON.parse(m[0]));
   const ops = new Set(shown.map((o) => o.op));
-  for (const op of ['move', 'set_mode', 'add_circle', 'rename_circle', 'delete_circle', 'set_purpose', 'set_notes', 'add_topic', 'remove_topic', 'add_rule', 'remove_rule', 'block', 'pause', 'quiet_hours']) assert.ok(ops.has(op), `settings shows ${op}`);
+  for (const op of ['move', 'rename', 'set_mode', 'add_circle', 'rename_circle', 'delete_circle', 'set_purpose', 'set_notes', 'add_topic', 'remove_topic', 'add_rule', 'remove_rule', 'block', 'pause', 'quiet_hours']) assert.ok(ops.has(op), `settings shows ${op}`);
   // Each example works as printed (for Ben instead of Jon); some come back as a link for the owner instead.
   for (const o of shown) {
     const op = JSON.parse(JSON.stringify(o).replaceAll('"Jon"', '"Ben"').replaceAll('"Dad"', '"Ben"'));
     if (op.op === 'delete_circle') op.circle = 'class';
+    if (op.op === 'rename') op.name = 'Ben'; // keeps the name the next examples use
     if (op.op === 'remove_rule') op.rule = contactOf(env, ann, ben).rules[0].id;
     if (op.op === 'block' || op.op === 'pause') op.on = false;
     const out = await cliIn(ann.home, JSON.stringify([op]), 'settings', 'apply', '-');
@@ -663,7 +664,7 @@ test('everything the dashboard changes, the bot can change too, from the ops its
   assert.equal(c.purpose, 'football friend');
   assert.equal(settings(env, ann).circles.some((g) => g.name === 'school' || g.name === 'class'), false, 'added, renamed and removed');
   assert.deepEqual(c.rules, [], 'added and removed');
-  assert.match((await cliIn(ann.home, '[{"op":"rename_everything"}]', 'settings', 'apply', '-').catch((e) => e)).stderr, /use move, set_mode, add_circle/);
+  assert.match((await cliIn(ann.home, '[{"op":"rename_everything"}]', 'settings', 'apply', '-').catch((e) => e)).stderr, /use move, rename, set_mode, add_circle/);
 });
 
 test('inviting picks the basket: friends by default, changeable, and a bot can name one too', async (t) => {
@@ -733,9 +734,10 @@ test('invites you sent wait on the overview until used: open one again, cancel i
   const env = await setup(t, { privacyPilot: true });
   const ann = await quietBot(env, 'ann5@example.com', 'ann5'), ben = await quietBot(env, 'ben5@example.com', 'ben5');
   const code = (await ann.b('/app/invites', { method: 'POST', form: { bot: ann.botId } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  assert.doesNotMatch((await ann.b('/app')).text, /Invites pending/, 'opening Invite a friend and going back lists nothing');
   await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'family', notes: 'My uncle' } });
   let home = (await ann.b('/app')).text;
-  assert.match(home, /Invites sent <span class="count">1<\/span>/);
+  assert.match(home, /Invites pending <span class="count">1<\/span>/);
   assert.match(home, new RegExp(`href="/app/invites/${code}"[^]*My uncle[^]*Waiting for them · family · 7 days left`));
   const again = (await ann.b(`/app/invites/${code}`)).text;
   assert.ok(again.includes(`/i/${code}`) && /Cancel this invite/.test(again));
@@ -743,11 +745,43 @@ test('invites you sent wait on the overview until used: open one again, cancel i
 
   await ann.b('/app/invites/cancel', { method: 'POST', form: { bot: ann.botId, code } });
   home = (await ann.b('/app')).text;
-  assert.doesNotMatch(home, /Invites sent/);
+  assert.doesNotMatch(home, /Invites pending/);
   await ann.b('/app/invites/cancel', { method: 'POST', form: { bot: ann.botId, code, undo: '1', until: String(Date.now() + 86_400_000) } });
-  assert.match((await ann.b('/app')).text, /Invites sent <span class="count">1<\/span>/);
+  assert.match((await ann.b('/app')).text, /Invites pending <span class="count">1<\/span>/);
 
   // Used: gone from the list.
   await ben.b(`/i/${code}`, { method: 'POST', form: { bot: ben.botId, alias: 'Ann' } });
-  assert.doesNotMatch((await ann.b('/app')).text, /Invites sent/);
+  assert.doesNotMatch((await ann.b('/app')).text, /Invites pending/);
+});
+
+test('names: set one when inviting, change it any time, and the bot follows', async (t) => {
+  const env = await setup(t, { privacyPilot: true });
+  const ann = await quietBot(env, 'ann6@example.com', 'ann6'), ben = await quietBot(env, 'ben6@example.com', 'ben6');
+  const code = (await ann.b('/app/invites', { method: 'POST', form: { bot: ann.botId } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  const made = (await ann.b(`/app/invites/${code}`)).text;
+  assert.match(made, /<label class="field">What do you call them\?<input name="alias"/);
+  // A bad name says so under the field.
+  const bad = await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, alias: '!!', basket: 'friends' } });
+  assert.equal(bad.status, 400);
+  assert.match(bad.text, /aria-invalid="true"[^]*class="field__error"[^>]*role="alert">A name is 1-32 letters or numbers\./);
+  assert.equal((await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, alias: 'Uncle Ben', basket: 'family' } })).location, '/app');
+  const home = (await ann.b('/app')).text;
+  assert.match(home, /Invite saved for Uncle Ben · family/);
+  assert.match(home, /class="line__title">Uncle Ben<\/span><span class="line__sub">Waiting for them · family/);
+  // Ben says yes: Ann keeps her name for him.
+  await ben.b(`/i/${code}`, { method: 'POST', form: { bot: ben.botId, alias: 'Ann' } });
+  const peer = env.relay.db.prepare('SELECT peer_bot FROM contacts WHERE owner_bot = ?').get(Number(ann.botId)).peer_bot;
+  assert.equal(env.relay.db.prepare('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(Number(ann.botId), peer).alias, 'Uncle Ben');
+
+  // Change it later on their page, with Undo.
+  const person = (await ann.b(`/app/people/${ann.botId}/${peer}`)).text;
+  assert.match(person, /<label class="field">What you call them<input name="alias" value="Uncle Ben"/);
+  const renamed = await ann.b(`/app/people/${ann.botId}/${peer}/about`, { method: 'POST', form: { alias: 'Benny', purpose: '', notes: '' } });
+  assert.equal(renamed.status, 303);
+  assert.match((await ann.b(`/app/people/${ann.botId}/${peer}`)).text, /Now called Benny[^]*name="alias" value="Uncle Ben"/);
+  assert.equal(env.relay.db.prepare('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(Number(ann.botId), peer).alias, 'Benny');
+  // The bot can do it too.
+  const r = await fetch(`${env.url}/v1/settings`, { method: 'PATCH', headers: { authorization: `Bearer ${ann.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ops: [{ op: 'rename', contact: 'Benny', name: 'Ben' }] }) });
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.equal(env.relay.db.prepare('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(Number(ann.botId), peer).alias, 'Ben');
 });

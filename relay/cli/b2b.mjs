@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, sign, verify, createHash, createHmac } from 'node:crypto';
 
-const VERSION = '0.19.1';
+const VERSION = '0.19.2';
 // The "b2b messaging" skill and the doorbell routine instruction that go with this version: sha256 of
 // relay/skill/SKILL.md and of the instruction in relay/SETUP-FOR-BOTS.md, with {{RELAY}} left in (a test keeps
 // them in step). "refresh" only hands out texts that match, so they're as signed as the tool itself.
@@ -153,6 +153,7 @@ export const settingsOps = (hints) => [
   '  ask first or handle it: {"op":"set_mode","circle":"work","mode":"asks"}, or for one person {"op":"set_mode","contact":"Jon","mode":"handles"} (mode null = like their basket)',
   '  baskets: {"op":"add_circle","name":"school"}, {"op":"rename_circle","circle":"school","name":"class"}, {"op":"delete_circle","circle":"school"}',
   '  who they are: {"op":"set_purpose","contact":"Jon","purpose":"football friend"}, {"op":"set_notes","contact":"Jon","notes":"..."}',
+  '  what your owner calls them: {"op":"rename","contact":"Jon","name":"Jonny"}',
   '  what their bot may ask: {"op":"add_topic","contact":"Jon","topic":"football"}, {"op":"remove_topic","contact":"Jon","topic":"football"}',
   '  rules: {"op":"add_rule","contact":"Jon","text":"Only football"} (optional "topic", "days":["wed"], "answer":"share|decline|ask"), {"op":"remove_rule","rule":"<rule id>"}',
   '  {"op":"block","contact":"Jon","on":true}, {"op":"pause","on":true} (all your owner\'s bots), {"op":"quiet_hours","on":true,"start":1320,"end":420,"tz":"Europe/Prague"} (minutes from midnight)',
@@ -381,6 +382,9 @@ function adoptRenamed(handle, keys) {
 function contactState(handle, keys, alias) {
   if (keys && !pinOf(handle)) adoptRenamed(handle, keys);
   const st = check(handle, keys);
+  // Same keys, new name: the owner renamed them on the dashboard or through this bot. Keys decide who it is;
+  // the name follows the owner. A different bot can still never take a known name (nameTakenBy below).
+  if (st.state === 'same' && alias && pinOf(handle).alias !== alias && !nameTakenBy(handle, alias)) pin(handle, st.keys, alias);
   const clash = st.state === 'new' || st.state === 'none' ? nameTakenBy(handle, alias) : null;
   return { ...st, clash, blocked: !!clash || st.state === 'changed' || st.state === 'dropped' };
 }
