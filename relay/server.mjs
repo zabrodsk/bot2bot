@@ -1112,7 +1112,15 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   // What changed lately, from the site's changelog (site build: /changelog.json). Signed-in people see the newest
   // day once, the first time they open the dashboard after it.
   const whatsNew = changelog ?? (() => { try { return JSON.parse(readFileSync(join(siteDir, 'changelog.json'), 'utf8')); } catch { return null; } })();
-  const latestUpdate = whatsNew?.days?.[0] ?? null;
+  // Only the newest update: the first line of the newest day, and the lines right after it from the same release.
+  const latestUpdate = (() => {
+    const day = whatsNew?.days?.[0]; const first = day?.items?.[0];
+    if (!first) return null;
+    const rel = typeof first === 'object' ? first.release : null;
+    const items = [first];
+    if (rel) for (const i of day.items.slice(1)) { if (i?.release !== rel) break; items.push(i); }
+    return { iso: rel ? `${day.iso}#${rel}` : `${day.iso}#${String(first.en ?? first).slice(0, 40)}`, items };
+  })();
   const redirects = new Set(redirectHosts.map((h) => h.trim().toLowerCase()).filter(Boolean));
   const governance = createGovernance({ db, q, tx, clock, token, HttpError, publicUrl, privacyPilot,
     resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L });

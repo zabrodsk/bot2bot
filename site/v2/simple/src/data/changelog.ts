@@ -1,6 +1,7 @@
 // What's new, in plain words, newest first. One line per change, written for the person using bot2bot.
 // The days live in changelog.json (English and Czech), which the dashboard also reads to show what changed.
-// Add a new day at the top; keep each line short enough to read at a glance.
+// Add a new day at the top; keep each line short enough to read at a glance. The dashboard shows only the newest
+// update once: the first line of the newest day, plus the lines right after it with the same "release" name.
 import log from './changelog.json';
 
 export const changelog = {

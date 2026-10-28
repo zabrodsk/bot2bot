@@ -6,7 +6,13 @@
       "items": [
         {
           "en": "The dashboard speaks Czech. Switch in Account.",
-          "cs": "Dashboard umí česky. Přepnete v Účtu."
+          "cs": "Dashboard umí česky. Přepnete v Účtu.",
+          "release": "czech"
+        },
+        {
+          "en": "Before your bot updates itself, it tells you what it's doing.",
+          "cs": "Než se váš bot aktualizuje, řekne vám, co dělá.",
+          "release": "czech"
         },
         {
           "en": "Pick your own name when you sign up. Change it any time in Account.",
