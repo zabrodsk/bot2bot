@@ -15,6 +15,16 @@ import { createSafePost, checkCallbackUrl } from './doorbells.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+// The hosted service (bot2bot.link) adds a few parts that aren't in the open-source relay: Stripe billing, the
+// service dashboard and usage analytics, in hosted-*.mjs files. Each is optional: when its file isn't there,
+// its hooks do nothing (no tracking, no admin page, no payments) and the relay works the same otherwise.
+// Only the file itself being absent counts; anything wrong inside a hosted file still stops the server.
+const optional = (file) => import(file).catch((e) =>
+  (e?.code === 'ERR_MODULE_NOT_FOUND' && e.url === new URL(file, import.meta.url).href ? null : Promise.reject(e)));
+const [hostedUsage, hostedAdmin, hostedBilling] = await Promise.all([optional('./hosted-usage.mjs'), optional('./hosted-admin.mjs'), optional('./hosted-billing.mjs')]);
+// Which hosted parts this relay has (the tests use it).
+export const HOSTED_PARTS = { usage: !!hostedUsage, admin: !!hostedAdmin, billing: !!hostedBilling };
+
 export const LIMITS = {
   textMax: 4000,
   linksMax: 5,
@@ -141,11 +151,6 @@ export function openDb(path) {
       code_hash TEXT PRIMARY KEY, handle TEXT NOT NULL, display_name TEXT NOT NULL,
       expires_at INTEGER NOT NULL, used_at INTEGER, reissue INTEGER NOT NULL DEFAULT 0
     );
-    -- Anonymous daily counts (no people, no content), kept for good even when message rows go.
-    CREATE TABLE IF NOT EXISTS telemetry (day TEXT NOT NULL, metric TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (day, metric));
-    -- Which days an account was active (its bot used bot2bot, or they opened the dashboard), for usage statistics.
-    -- Only the account and the day: no names, no content. Deleted with the account.
-    CREATE TABLE IF NOT EXISTS active_days (user_id INTEGER NOT NULL, day TEXT NOT NULL, PRIMARY KEY (user_id, day));
     CREATE TABLE IF NOT EXISTS invites (
       code_hash TEXT PRIMARY KEY, from_bot INTEGER NOT NULL REFERENCES bots(id),
       alias TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, used_by INTEGER
@@ -256,8 +261,13 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
   migrateConnector(db);
   migrateGovernance(db);
   migrateEvents(db);
+  hostedUsage?.migrateUsage(db);
+  hostedBilling?.migrateBilling(db);
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => { db.exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
+  // Usage analytics (hosted only): which days an account was active, and anonymous daily counts.
+  const usage = hostedUsage ? hostedUsage.createUsage({ q, tx, clock, HttpError }) : null;
+  const markActive = usage ? usage.markActive : () => {};
   // The one place that erases message content. Waiting messages become "not delivered".
   // Every content column is listed here so a new one can't be forgotten in some other path.
   const erase = (where, ...params) => q(`UPDATE messages SET status = CASE WHEN status IN ('pending', 'claimed') THEN 'dropped' ELSE status END,
@@ -464,7 +474,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
       // Marked first, so an owner never gets it twice, even if sending fails.
       q('UPDATE bots SET doorbell_nudged_at = ? WHERE id = ?').run(t, b.id);
       try {
-        await mailer({ to: b.email, ...doorbellEmail({ product: productName, handle: b.handle, botUrl: `${publicUrl}/app/bots/${b.id}`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', lang: b.lang }) });
+        await mailer({ to: b.email, ...doorbellEmail({ product: productName, handle: b.handle, botUrl: `${publicUrl}/app/bots/${b.id}`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', art: publicUrl ? `${publicUrl}/stickers/robot-sleepy.png` : '', lang: b.lang }) });
         log(b.id, 'doorbell_nudged');
       } catch { log(b.id, 'doorbell_nudge_failed'); }
     }
@@ -502,68 +512,6 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     } finally { inflight.delete(bot.id); }
   }
 
-  // Telemetry: anonymous counts per UTC day (today and the two days before, so late deliveries land), written
-  // over again each time, so the numbers stay when message text and, one day, message rows are deleted.
-  // An account was active today: written once a day per account (a small cache keeps it to one write).
-  const activeSeen = new Map();
-  function markActive(userId, t = clock()) {
-    if (!userId) return;
-    const day = new Date(t).toISOString().slice(0, 10);
-    if (activeSeen.get(userId) === day) return;
-    activeSeen.set(userId, day);
-    if (activeSeen.size > 50_000) activeSeen.clear();
-    q('INSERT OR IGNORE INTO active_days (user_id, day) VALUES (?, ?)').run(userId, day);
-  }
-  // Usage: active users per day, week and month, retention by signup day, and growth month on month.
-  function usageMetrics(t = clock()) {
-    const DAY = 86_400_000, dayOf = (ms) => new Date(ms).toISOString().slice(0, 10), today = Math.floor(t / DAY) * DAY;
-    const users = new Map(q('SELECT id, created_at FROM users').all().map((u) => [u.id, u.created_at]));
-    const byUser = new Map();
-    for (const r of q('SELECT user_id, day FROM active_days WHERE day >= ?').all(dayOf(today - 130 * DAY))) { if (!byUser.has(r.user_id)) byUser.set(r.user_id, new Set()); byUser.get(r.user_id).add(r.day); }
-    const activeIn = (end, days) => { let n = 0; const from = end - (days - 1) * DAY; for (const set of byUser.values()) for (const d of set) { const ms = Date.parse(d); if (ms >= from && ms <= end) { n++; break; } } return n; };
-    const series = Array.from({ length: 90 }, (_, i) => { const d = today - (89 - i) * DAY; return { day: dayOf(d), dau: activeIn(d, 1), wau: activeIn(d, 7), mau: activeIn(d, 30), new_users: [...users.values()].filter((c) => c >= d && c < d + DAY).length }; });
-    // Retention: of people who signed up at least N days ago (in the last 90 days), the share active exactly N days later.
-    const retention = (n) => { let base = 0, kept = 0; for (const [id, created] of users) { const start = Math.floor(created / DAY) * DAY; if (start + n * DAY > today || start < today - 90 * DAY) continue; base++; if (byUser.get(id)?.has(dayOf(start + n * DAY))) kept++; } return { base, kept, rate: base ? kept / base : null }; };
-    const inWindow = (end) => { const from = end - 29 * DAY, set = new Set(); for (const [id, days] of byUser) for (const d of days) { const ms = Date.parse(d); if (ms >= from && ms <= end) { set.add(id); break; } } return set; };
-    const thisMonth = inWindow(today), lastMonth = inWindow(today - 30 * DAY), kept = [...lastMonth].filter((id) => thisMonth.has(id)).length;
-    const usersAt = (end) => [...users.values()].filter((c) => c < end + DAY).length;
-    const last = series.at(-1), monthAgo = series.at(-31);
-    const growth = (a, b) => (b ? (a - b) / b : null);
-    return {
-      now: { users: users.size, dau: last.dau, wau: last.wau, mau: last.mau, stickiness: last.mau ? last.dau / last.mau : null },
-      retention: { d1: retention(1), d7: retention(7), d30: retention(30), monthly: { base: lastMonth.size, kept, rate: lastMonth.size ? kept / lastMonth.size : null } },
-      growth: { users: growth(users.size, usersAt(today - 30 * DAY)), mau: growth(last.mau, monthAgo.mau), users_month_ago: usersAt(today - 30 * DAY), mau_month_ago: monthAgo.mau },
-      series,
-    };
-  }
-  function telemetryRollup(t) {
-    // Once: the days before tracking began, from who sent and received messages (that history is kept).
-    if (!q("SELECT 1 FROM telemetry WHERE day = '0000-00-00' AND metric = 'active_days_backfilled'").get()) tx(() => {
-      q(`INSERT OR IGNORE INTO active_days (user_id, day) SELECT b.user_id, strftime('%Y-%m-%d', m.created_at / 1000, 'unixepoch') FROM messages m JOIN bots b ON b.id = m.from_bot WHERE b.user_id IS NOT NULL AND m.kind != 'probe'`).run();
-      q(`INSERT OR IGNORE INTO active_days (user_id, day) SELECT b.user_id, strftime('%Y-%m-%d', m.delivered_at / 1000, 'unixepoch') FROM messages m JOIN bots b ON b.id = m.to_bot WHERE b.user_id IS NOT NULL AND m.delivered_at IS NOT NULL AND m.kind != 'probe'`).run();
-      q("INSERT INTO telemetry (day, metric, n) VALUES ('0000-00-00', 'active_days_backfilled', 1)").run();
-    });
-    const tables = new Set(q("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
-    for (let back = 0; back < 3; back++) {
-      const start = Math.floor(t / 86_400_000) * 86_400_000 - back * 86_400_000, end = start + 86_400_000;
-      const day = new Date(start).toISOString().slice(0, 10);
-      const n = (sql) => q(sql).get(start, end).n;
-      const metrics = {
-        messages_sent: n("SELECT count(*) AS n FROM messages WHERE kind != 'probe' AND created_at >= ? AND created_at < ?"),
-        messages_delivered: n("SELECT count(*) AS n FROM messages WHERE kind != 'probe' AND delivered_at >= ? AND delivered_at < ?"),
-        bots_active: n("SELECT count(DISTINCT from_bot) AS n FROM messages WHERE kind != 'probe' AND created_at >= ? AND created_at < ?"),
-        bots_new: n('SELECT count(*) AS n FROM bots WHERE created_at >= ? AND created_at < ?'),
-        contacts_new: n('SELECT count(*) AS n FROM contacts WHERE approved_at >= ? AND approved_at < ?'),
-        ...(tables.has('users') ? { users_new: n('SELECT count(*) AS n FROM users WHERE created_at >= ? AND created_at < ?') } : {}),
-        ...(tables.has('feedback') ? { feedback: n('SELECT count(*) AS n FROM feedback WHERE created_at >= ? AND created_at < ?') } : {}),
-      };
-      if (back === 0) {
-        metrics.bots_live = q('SELECT count(*) AS n FROM bots WHERE disconnected_at IS NULL AND user_id IS NOT NULL').get().n;
-        if (tables.has('users')) metrics.users_total = q('SELECT count(*) AS n FROM users').get().n;
-      }
-      for (const [k, v] of Object.entries(metrics)) q('INSERT INTO telemetry (day, metric, n) VALUES (?, ?, ?) ON CONFLICT(day, metric) DO UPDATE SET n = excluded.n').run(day, k, v);
-    }
-  }
   // Privacy: delete message text a week after delivery, expire undelivered mail, trim old logs.
   let lastRetention = 0;
   function retention(t) {
@@ -576,7 +524,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     if (expired.changes) log(null, 'expired', { count: Number(expired.changes) });
     q("DELETE FROM messages WHERE kind = 'probe' AND created_at < ?").run(t - L.probeTtlMs);
     erase(`body_purged_at IS NULL AND (status = 'dropped' OR (status = 'delivered' AND delivered_at < ?))`, t - L.bodyRetentionMs);
-    telemetryRollup(t);
+    usage?.telemetryRollup(t);
     q('DELETE FROM events WHERE ts < ?').run(t - L.metadataRetentionMs);
     q('DELETE FROM sessions WHERE expires_at < ?').run(t);
     q('DELETE FROM login_codes WHERE expires_at < ?').run(t - 86_400_000);
@@ -779,14 +727,6 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
       const since = Number(url.searchParams.get('since') || 0);
       const rows = q('SELECT e.*, b.handle FROM events e LEFT JOIN bots b ON b.id = e.bot WHERE e.id > ? ORDER BY e.id LIMIT 500').all(since);
       return { events: rows.map((r) => ({ id: r.id, ts: iso(r.ts), handle: r.handle, kind: r.kind, detail: JSON.parse(r.detail || '{}') })) };
-    },
-    'GET /admin/stats': ({ admin }) => {
-      if (!admin) throw new HttpError(401, 'admin token required');
-      telemetryRollup(clock());
-      const days = {};
-      for (const r of q('SELECT day, metric, n FROM telemetry WHERE day >= ? ORDER BY day').all(new Date(clock() - 90 * 86_400_000).toISOString().slice(0, 10))) (days[r.day] ??= {})[r.metric] = r.n;
-      const { series, ...usage } = usageMetrics();
-      return { usage, days };
     },
     'GET /admin/feedback': ({ admin }) => {
       if (!admin) throw new HttpError(401, 'admin token required');
@@ -1194,6 +1134,8 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
       return { ...r, probe: id, next: 'Wait ~1 minute. The routine run should pick up the test message. Then "b2b doorbell status" shows verified.' };
     },
   };
+  // Hosted parts can add admin-token API routes (GET /admin/stats comes with usage analytics).
+  if (usage) Object.assign(routes, usage.routes);
 
   function resolveContactLoose(me, name) {
     const r = resolveRecipientNoBlockCheck(me, name);
@@ -1274,8 +1216,10 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L });
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
+  // Paying with Stripe (hosted only).
+  const payments = hostedBilling ? hostedBilling.createBilling({ q, clock, log, release, hosted, B, fetchImpl, publicUrl, HttpError }) : null;
   const handleApp = createApp({ events, governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
-    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, privateDoorbell, renameBot, latestUpdate, feedbackTo, markActive, usageMetrics, telemetryRollup, adminEmails, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, privateDoorbell, renameBot, latestUpdate, feedbackTo, markActive, usage, hostedAdmin, payments, adminEmails, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');
@@ -1415,7 +1359,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     adminEnroll: process.env.ALLOW_ADMIN_ENROLL === '1',
     hosted: process.env.HOSTED === '1',
     trustProxy: process.env.TRUST_PROXY === '1',
-    billing: { stripeKey: process.env.STRIPE_SECRET_KEY, priceId: process.env.STRIPE_PRICE_ID, webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    billing: { ...hostedBilling?.billingConfig(process.env),
       ...(process.env.PRICE_LABEL ? { priceLabel: process.env.PRICE_LABEL } : {}),
       ...(process.env.FREE_MESSAGES ? { freeMessages: Number(process.env.FREE_MESSAGES) } : {}),
       ...(process.env.FREE_PERIOD ? { freePeriod: process.env.FREE_PERIOD } : {}) },

@@ -177,12 +177,12 @@ test('join: the bot is handed its doorbell routine right away, reminded until it
 
   // An hour in with no doorbell, its owner gets one email pointing to the bot's page. Never a second one.
   const id = env.relay.db.prepare("SELECT id FROM bots WHERE handle = 'ben-bot'").get().id;
-  const reminders = () => env.mail.filter((m) => /can't wake @ben-bot/.test(m.subject));
+  const reminders = () => env.mail.filter((m) => /One last step for @ben-bot/.test(m.subject));
   await sleep(300);
   assert.equal(reminders().length, 0);
   env.advance(61 * 60_000);
   await waitFor(() => reminders().length === 1);
-  assert.match(reminders()[0].text, new RegExp(`no doorbell routine yet[^]*/app/bots/${id}`));
+  assert.match(reminders()[0].text, new RegExp(`can't wake it yet[^]*/app/bots/${id}`));
   env.advance(3 * 3_600_000);
   await sleep(300);
   assert.equal(reminders().length, 1);

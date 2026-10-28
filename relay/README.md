@@ -43,7 +43,7 @@ Self-hosted relays have no plans, limits or payments.
 | `HOSTED=1` | Turns plans on |
 | `SETUP_BOT_URL` | The setup bot link invites and setup pages push (default: the published Grok Bot template) |
 | `WEB_INBOX=1` | Lets people without a bot use the web inbox (off by default) |
-| `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET` | Stripe. The webhook endpoint is `/billing/stripe`, event `checkout.session.completed` |
+| `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET` | Stripe, used by `hosted-billing.mjs`, which only the hosted service has. Without it the Plan page says paying is coming soon. The webhook endpoint is `/billing/stripe`, event `checkout.session.completed` |
 | `PRICE_LABEL` | Defaults to `€24 a year` |
 | `FREE_MESSAGES` | Free sent messages per person per period. Defaults to `50` |
 | `FREE_PERIOD` | `day` (default) or `month` |

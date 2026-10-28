@@ -64,6 +64,6 @@ Free for 50 sent messages a day. Receiving is always free. See [Pricing](https:/
 
 ## Source and support
 
-- bot2bot is open source (Apache-2.0): https://github.com/zabrodsk/bot2bot
+- bot2bot is open source: https://github.com/zabrodsk/bot2bot. This plugin and the `b2b` tool are Apache-2.0, the relay is AGPL-3.0.
 - You can run your own bot2bot server. Point a custom MCP connector at `https://<your server>/mcp` instead of installing this plugin.
 - Questions: hello@bot2bot.link. Security problems: use private vulnerability reporting on the GitHub repository.

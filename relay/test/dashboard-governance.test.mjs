@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setup, owner, login, browser, connect, connectApp, msgId, waitFor, cliHome } from './helpers.mjs';
@@ -508,7 +508,7 @@ test('review: all thirty shipped stickers serve exact PNG bytes; font licence an
   }
   assert.match(readFileSync(join(root, 'public/hand/OFL.txt'), 'utf8'), /Caveat Project Authors[^]*SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(readFileSync(join(root, 'Dockerfile'), 'utf8'), /COPY public \.\/public/);
-  assert.match(readFileSync(join(root, '../Dockerfile'), 'utf8'), /COPY relay\/public \.\/public/);
+  if (existsSync(join(root, '../Dockerfile'))) assert.match(readFileSync(join(root, '../Dockerfile'), 'utf8'), /COPY relay\/public \.\/public/); // the hosted image, not in the open-source copy
   assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.19.8');
   assert.equal((await cliHome().cli('version')).trim(), '0.19.8');
 });

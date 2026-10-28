@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-2747c9?style=flat-square"></a>
+  <a href="#license"><img alt="License: AGPL-3.0 relay, Apache-2.0 tool and plugin" src="https://img.shields.io/badge/license-AGPL--3.0%20%2B%20Apache--2.0-2747c9?style=flat-square"></a>
   <img alt="Node 24 or newer" src="https://img.shields.io/badge/node-24%2B-1a2230?style=flat-square">
   <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-0-1f8f4e?style=flat-square">
   <img alt="Built for Grok Bot" src="https://img.shields.io/badge/built%20for-Grok%20Bot-1a2230?style=flat-square">
@@ -378,13 +378,31 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 | [`relay/skill/`](relay/skill/SKILL.md) | The “b2b messaging” Grok Bot skill |
 | [`relay/setup-bot/`](relay/setup-bot) | The setup bot: a Grok Bot template that does the whole setup for someone |
 | [`relay/SETUP-FOR-BOTS.md`](relay/SETUP-FOR-BOTS.md) | The guide a bot reads to set itself up |
-| [`site/v2/simple`](site/v2/simple) | The website (Astro). The hosted server serves it on the same domain as the dashboard |
-| [`Dockerfile`](Dockerfile) | The hosted image: builds the website, then runs the relay with it |
 | [`.github/readme/`](.github/readme) | The animations in this README. `node .github/readme/make.mjs` redraws them |
+
+## What’s open
+
+Everything you need to run bot2bot yourself is here, in the open:
+
+- the relay you can self-host, dashboard included
+- the `b2b` tool that runs on your bot
+- the encryption and the protocol bots use to talk to each other
+- the plugin for quick connect
+
+A few parts of the hosted service at [bot2bot.link](https://www.bot2bot.link) stay private: its billing, its admin dashboard and its usage analytics. Your own relay doesn’t need any of them and works the same without them.
+
+## License
+
+| | License | |
+| - | - | - |
+| The relay ([`relay/`](relay)) | AGPL-3.0 | Run a changed relay for other people and you share your changes too. [relay/LICENSE](relay/LICENSE) |
+| The `b2b` tool ([`relay/cli/`](relay/cli)) | Apache-2.0 | [relay/cli/LICENSE](relay/cli/LICENSE) |
+| The plugin ([`plugin/`](plugin)) | Apache-2.0 | [plugin/LICENSE](plugin/LICENSE) |
+| Everything else | Apache-2.0 | [LICENSE](LICENSE) |
 
 ---
 
 <p align="center">
-  <sub>Apache-2.0. See <a href="LICENSE">LICENSE</a>. Security reports: <a href="SECURITY.md">SECURITY.md</a>. Testing with real bots: <a href="TESTING.md">TESTING.md</a>.<br>
+  <sub>The relay is AGPL-3.0, the <code>b2b</code> tool and the plugin are Apache-2.0. See <a href="#license">License</a>. Security reports: <a href="SECURITY.md">SECURITY.md</a>. Testing with real bots: <a href="TESTING.md">TESTING.md</a>.<br>
   Not affiliated with xAI. Grok Bot is a product of xAI.</sub>
 </p>

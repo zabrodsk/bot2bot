@@ -4,7 +4,7 @@ import { CONNECTOR_DOORBELL, ENCRYPTION_MESSAGE, safeText } from './connector.mj
 import { nextQuestion, QUESTION_BY_ID } from './feedback-questions.mjs';
 import { loginEmail } from './email.mjs';
 import { t as translator, langFromHeader, normLang } from './i18n.mjs';
-import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -72,7 +72,6 @@ export function migrateApp(db) {
       payer_user_id INTEGER NOT NULL REFERENCES users(id), email TEXT NOT NULL, added_at INTEGER NOT NULL,
       PRIMARY KEY (payer_user_id, email)
     );
-    CREATE TABLE IF NOT EXISTS billing_events (id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);
   `);
   // Audit fixes (0.9.1): login links work only in the browser that asked; per-IP mail limits.
   addColumn('login_codes', 'browser_hash', 'TEXT');
@@ -120,7 +119,7 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
-  const { events = null, latestUpdate = null, feedbackTo = '', markActive = () => {}, usageMetrics = null, telemetryRollup = () => {}, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { events = null, latestUpdate = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -171,7 +170,7 @@ export function createApp(ctx) {
     const face = avatar(user.name || user.email, 'md', photoUrl(user.id, user.photo_at, user.avatar));
     const me = `<details class="more umenu"><summary class="umenu__trigger" aria-label="${tr('Your account')}">${face}</summary>
 <div class="umenu__panel"><div class="umenu__head">${face}<div class="umenu__id"><span class="umenu__row"><span class="umenu__fullname">${esc(user.name)}</span>${planName ? `<span class="umenu__plan${planState_ === 'infinite' ? ' umenu__plan--infinite' : ''}">${planState_ === 'infinite' ? '<span class="inf" aria-hidden="true">∞</span>' : ''}${planName}</span>` : ''}</span><span class="umenu__email">${esc(user.email)}</span></div></div>
-<div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}${tr('Account')}</a><a class="umenu__item" href="/app/feedback">${ICON.chat}${tr('Send feedback')}</a>${isAdmin(user) ? `<a class="umenu__item" href="/app/admin">${ICON.overview}Service</a>` : ''}${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}${tr('Plan')}</a>` : ''}
+<div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}${tr('Account')}</a><a class="umenu__item" href="/app/feedback">${ICON.chat}${tr('Send feedback')}</a>${admin ? admin.menuLink(user) : ''}${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}${tr('Plan')}</a>` : ''}
 <div class="umenu__sep"></div><form method="post" action="/logout"><button class="umenu__item">${ICON.logout}${tr('Log out')}</button></form></div></details>`;
     const back = bar.back ? `<a class="crumb" href="${esc(bar.back)}">${ICON.back}${esc(bar.backLabel || tr('Overview'))}</a>` : '';
     const ownH1 = /<h1[\s>]/.test(body);
@@ -194,86 +193,9 @@ const seen=()=>{if(done)return;done=true;fetch('/app/whatsnew',{method:'POST',bo
 f.addEventListener('submit',(e)=>{e.preventDefault();seen();d.close();});d.addEventListener('close',seen);
 d.addEventListener('click',(e)=>{if(e.target===d)d.close();});d.showModal();})();</script>`;
   };
-  // ───── service dashboard (admins only) ─────
-  // One page for the whole service: usage (DAU/WAU/MAU, retention, growth), messages, bots, plans and feedback.
-  // English only, for the operator. Counts come from the telemetry and active-days tables, never message text.
-  const isAdmin = (user) => !!user && adminEmails.includes(String(user.email).toLowerCase());
-  const pct = (v) => (v == null ? '·' : `${Math.round(v * 100)}%`);
-  const signed = (v) => (v == null ? 'no data a month ago' : `${v >= 0 ? '+' : ''}${Math.round(v * 100)}% vs 30 days ago`);
-  // A line chart: thin 2px lines, one scale, labels at the line ends, a crosshair tooltip and a table view.
-  function lineChart(id, title, rows, series) {
-    const W = 760, H = 230, padL = 34, padR = 64, padB = 26, top = 10, plotH = H - padB - top;
-    const max = Math.max(1, ...rows.flatMap((r) => series.map((s) => r[s.key])));
-    const step = max <= 5 ? 1 : max <= 12 ? 2 : max <= 30 ? 5 : Math.ceil(max / 5 / 10) * 10, ceil = Math.ceil(max / step) * step;
-    const x = (i) => padL + (i / (rows.length - 1)) * (W - padL - padR), y = (v) => top + plotH - (v / ceil) * plotH;
-    const grid = Array.from({ length: ceil / step + 1 }, (_, i) => i * step).map((v) => `<line class="viz__grid" x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/><text class="viz__tick" x="${padL - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('');
-    const xt = rows.map((r, i) => (i % 15 === 0 || i === rows.length - 1 ? `<text class="viz__tick" x="${x(i)}" y="${H - 6}" text-anchor="middle">${esc(r.day.slice(5).replace('-', '/'))}</text>` : '')).join('');
-    const lines = series.map((s) => `<path class="viz__line" style="stroke:${s.color}" d="${rows.map((r, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(r[s.key]).toFixed(1)}`).join('')}"/>`).join('');
-    // End labels, nudged apart so they never overlap.
-    const ends = series.map((s) => ({ s, y: y(rows.at(-1)[s.key]) })).sort((a, b) => a.y - b.y);
-    for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
-    const labels = ends.map((e) => `<text class="viz__end" x="${W - padR + 8}" y="${e.y + 4}">${esc(e.s.label)} ${rows.at(-1)[e.s.key]}</text>`).join('');
-    const tips = rows.map((r, i) => `<rect class="viz__hit" x="${x(i) - (W - padL - padR) / rows.length / 2}" y="0" width="${(W - padL - padR) / rows.length}" height="${H - padB}" data-x="${x(i)}" data-tip="${esc(`${r.day} · ${series.map((s) => `${s.label} ${r[s.key]}`).join(' · ')}`)}"/>`).join('');
-    return `<figure class="viz" aria-labelledby="${id}-h"><figcaption class="viz__head"><h3 id="${id}-h">${esc(title)}</h3><ul class="viz__legend">${series.map((s) => `<li><span class="viz__sw" style="background:${s.color}"></span>${esc(s.label)}</li>`).join('')}</ul></figcaption>
-<div class="viz__plot" data-cross><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(title)}">${grid}<line class="viz__base" x1="${padL}" x2="${W - padR}" y1="${top + plotH}" y2="${top + plotH}"/>${lines}${labels}<line class="viz__cross" x1="0" x2="0" y1="${top}" y2="${top + plotH}" hidden/>${xt}${tips}</svg><div class="viz__tip" role="status" hidden></div></div>
-<details class="viz__table"><summary>Show as a table</summary><table><thead><tr><th>Day</th>${series.map((s) => `<th>${esc(s.label)}</th>`).join('')}</tr></thead><tbody>${rows.slice().reverse().map((r) => `<tr><td>${esc(r.day)}</td>${series.map((s) => `<td>${r[s.key]}</td>`).join('')}</tr>`).join('')}</tbody></table></details></figure>`;
-  }
-  // Daily counts as thin bars (one or two series side by side), with the same tooltip and table view.
-  function barChart(id, title, rows, series) {
-    const W = 760, H = 210, padL = 34, padR = 8, padB = 26, top = 10, plotH = H - padB - top, colW = (W - padL - padR) / rows.length;
-    const max = Math.max(1, ...rows.flatMap((r) => series.map((s) => r[s.key])));
-    const step = max <= 5 ? 1 : max <= 12 ? 2 : max <= 30 ? 5 : Math.ceil(max / 5 / 10) * 10, ceil = Math.ceil(max / step) * step;
-    const y = (v) => top + plotH - (v / ceil) * plotH, barW = Math.max(2, Math.min(10, (colW - 4) / series.length - 2));
-    const bar = (x, v, color) => { if (!v) return ''; const h = (v / ceil) * plotH, r = Math.min(3, h, barW / 2), y0 = top + plotH; return `<path style="fill:${color}" d="M${x} ${y0}V${y0 - h + r}a${r} ${r} 0 0 1 ${r}-${r}h${barW - 2 * r}a${r} ${r} 0 0 1 ${r} ${r}V${y0}Z"/>`; };
-    const grid = Array.from({ length: ceil / step + 1 }, (_, i) => i * step).map((v) => `<line class="viz__grid" x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/><text class="viz__tick" x="${padL - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('');
-    const cols = rows.map((r, i) => { const x0 = padL + i * colW, x = x0 + (colW - series.length * (barW + 2) + 2) / 2;
-      return `<g class="viz__col" data-tip="${esc(`${r.day} · ${series.map((s) => `${s.label} ${r[s.key]}`).join(' · ')}`)}"><rect class="viz__hit" x="${x0}" y="0" width="${colW}" height="${H - padB}"/>${series.map((s, k) => bar(x + k * (barW + 2), r[s.key], s.color)).join('')}${(rows.length - 1 - i) % 7 === 0 ? `<text class="viz__tick" x="${x0 + colW / 2}" y="${H - 6}" text-anchor="middle">${esc(r.day.slice(5).replace('-', '/'))}</text>` : ''}</g>`; }).join('');
-    return `<figure class="viz" aria-labelledby="${id}-h"><figcaption class="viz__head"><h3 id="${id}-h">${esc(title)}</h3><ul class="viz__legend">${series.map((s) => `<li><span class="viz__sw" style="background:${s.color}"></span>${esc(s.label)}</li>`).join('')}</ul></figcaption>
-<div class="viz__plot" data-bars><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(title)}">${grid}<line class="viz__base" x1="${padL}" x2="${W - padR}" y1="${top + plotH}" y2="${top + plotH}"/>${cols}</svg><div class="viz__tip" role="status" hidden></div></div>
-<details class="viz__table"><summary>Show as a table</summary><table><thead><tr><th>Day</th>${series.map((s) => `<th>${esc(s.label)}</th>`).join('')}</tr></thead><tbody>${rows.slice().reverse().map((r) => `<tr><td>${esc(r.day)}</td>${series.map((s) => `<td>${r[s.key]}</td>`).join('')}</tr>`).join('')}</tbody></table></details></figure>`;
-  }
-  // Horizontal bars for a few named counts (one series).
-  const barList = (rows, color = 'var(--s1)') => { const most = Math.max(1, ...rows.map((r) => r.n)); return `<ul class="hbars">${rows.map((r) => `<li><span class="hbars__name">${esc(r.name)}</span><span class="hbars__track"><span class="hbars__bar" style="width:${Math.max(3, Math.round((r.n / most) * 100))}%;background:${color}"></span></span><span class="hbars__n">${r.n}</span></li>`).join('')}</ul>`; };
-  function adminPage(user, tr) {
-    telemetryRollup(clock());
-    const u = usageMetrics();
-    const days = {};
-    for (const r of q('SELECT day, metric, n FROM telemetry WHERE day >= ? ORDER BY day').all(new Date(clock() - 30 * 86_400_000).toISOString().slice(0, 10))) (days[r.day] ??= {})[r.metric] = r.n;
-    const last30 = u.series.slice(-30).map((r) => ({ ...r, sent: days[r.day]?.messages_sent ?? 0, delivered: days[r.day]?.messages_delivered ?? 0 }));
-    const bots = q('SELECT vendor, tool_version, doorbell_verified_at, last_ring_at, last_ring_status FROM bots WHERE user_id IS NOT NULL AND disconnected_at IS NULL AND removed_at IS NULL').all();
-    const latest = toolInfo().latest;
-    const versions = Object.entries(bots.filter((b) => b.vendor !== 'connector' && b.vendor !== 'web').reduce((a, b) => { const v = b.tool_version || 'before 0.19'; a[v] = (a[v] || 0) + 1; return a; }, {})).sort((a, b) => b[1] - a[1]).map(([name, n]) => ({ name, n }));
-    const ringFails = bots.filter((b) => b.last_ring_at > clock() - 86_400_000 && b.last_ring_status && b.last_ring_status !== 200).length;
-    const plans = q('SELECT id, paid_until, infinite_at FROM users').all().reduce((a, x) => { const k = x.infinite_at ? 'Infinite' : x.paid_until > clock() ? 'Paid' : 'Free'; a[k] = (a[k] || 0) + 1; return a; }, {});
-    const fb = q('SELECT f.rating, f.question, f.answer, f.text, f.created_at, u.name FROM feedback f LEFT JOIN users u ON u.id = f.user_id ORDER BY f.created_at DESC LIMIT 200').all();
-    const ratings = [[3, 'Love it'], [2, "It's okay"], [1, 'Not great']].map(([v, name]) => ({ name, n: fb.filter((f) => f.rating === v).length }));
-    const qs = Object.entries(fb.filter((f) => f.question).reduce((a, f) => { (a[f.question] ??= [0, 0, 0, 0])[f.answer] += 1; return a; }, {}));
-    const kpi = (label, value, note) => `<div class="kpi"><p class="kpi__label">${label}</p><p class="kpi__value">${value}</p><p class="kpi__note">${note}</p></div>`;
-    const ret = (label, r) => kpi(label, pct(r.rate), r.base ? `${r.kept} of ${r.base} people` : 'not enough people yet');
-    const body = `<section class="group" aria-labelledby="a-now"><div class="group__head"><h2 id="a-now">Usage</h2></div>
-<div class="kpis kpis--5">${kpi('Users', u.now.users, signed(u.growth.users))}${kpi('Monthly active', u.now.mau, signed(u.growth.mau))}${kpi('Weekly active', u.now.wau, 'last 7 days')}${kpi('Daily active', u.now.dau, 'today (UTC)')}${kpi('DAU / MAU', pct(u.now.stickiness), 'how often people come back')}</div>
-<div class="card">${lineChart('au', 'Active users, last 90 days', u.series, [{ key: 'mau', label: 'MAU', color: '#2747c9' }, { key: 'wau', label: 'WAU', color: '#eb6834' }, { key: 'dau', label: 'DAU', color: '#1baf7a' }])}</div></section>
-<section class="group" aria-labelledby="a-ret"><div class="group__head"><h2 id="a-ret">Retention</h2></div>
-<div class="kpis">${ret('Day 1', u.retention.d1)}${ret('Day 7', u.retention.d7)}${ret('Day 30', u.retention.d30)}${ret('Month to month', u.retention.monthly)}</div>
-<p class="muted small">Day N: of people who signed up in the last 90 days, the share active exactly N days later. Month to month: of people active in the 30 days before, the share active in the last 30. Active means their bot used bot2bot that day, or they opened the dashboard.</p></section>
-<section class="group" aria-labelledby="a-msg"><div class="group__head"><h2 id="a-msg">Growth and messages, last 30 days</h2></div>
-<div class="card">${barChart('nu', 'New users per day', last30, [{ key: 'new_users', label: 'New users', color: '#2747c9' }])}</div>
-<div class="card">${barChart('mg', 'Messages per day', last30, [{ key: 'sent', label: 'Sent', color: '#2747c9' }, { key: 'delivered', label: 'Delivered', color: '#eb6834' }])}</div></section>
-<section class="group" aria-labelledby="a-bots"><div class="group__head"><h2 id="a-bots">Bots</h2></div>
-<div class="kpis">${kpi('Connected bots', bots.length, `${bots.filter((b) => b.vendor === 'connector').length} quick connect`)}${kpi('Doorbell works', pct(bots.length ? bots.filter((b) => b.doorbell_verified_at).length / bots.length : null), 'tested at least once')}${kpi('Rings failed', ringFails, 'bots, last 24 hours')}${kpi('Newest tool', esc(latest || '·'), `${versions.filter((v) => v.name !== latest).reduce((n, v) => n + v.n, 0)} bots behind`)}</div>
-<div class="card"><figure class="viz"><figcaption class="viz__head"><h3>Tool versions (private mode)</h3></figcaption>${versions.length ? barList(versions) : '<p class="muted">No private-mode bots yet.</p>'}</figure></div></section>
-<section class="group" aria-labelledby="a-plans"><div class="group__head"><h2 id="a-plans">Plans</h2></div>
-<div class="card"><figure class="viz">${barList(['Free', 'Paid', 'Infinite'].map((name) => ({ name, n: plans[name] || 0 })))}</figure></div></section>
-<section class="group" aria-labelledby="a-fb"><div class="group__head"><h2 id="a-fb">Feedback <span class="count">${fb.length}</span></h2></div>
-<div class="card"><figure class="viz"><figcaption class="viz__head"><h3>How is bot2bot working for you?</h3></figcaption>${barList(ratings, '#ff4d8d')}</figure></div>
-${qs.length ? `<div class="card"><figure class="viz"><figcaption class="viz__head"><h3>Questions about one part</h3></figcaption><table class="atable"><thead><tr><th>Question</th><th>Yes</th><th>Mostly</th><th>No</th></tr></thead><tbody>${qs.map(([id, a]) => `<tr><td>${esc(QUESTION_BY_ID.get(id)?.en ?? id)}</td><td>${a[3]}</td><td>${a[2]}</td><td>${a[1]}</td></tr>`).join('')}</tbody></table></figure></div>` : ''}
-<div class="card card--list"><ul class="list">${fb.filter((f) => f.text).slice(0, 12).map((f) => `<li class="line"><span class="line__main"><span class="line__title fbtext">${esc(f.text)}</span><span class="line__sub">${esc(f.name || 'deleted account')} · ${tr.ago(f.created_at, clock())}${f.rating ? ` · ${['', 'Not great', "It's okay", 'Love it'][f.rating]}` : ''}</span></span></li>`).join('') || '<li class="line"><span class="line__main"><span class="line__sub">No written feedback yet.</span></span></li>'}</ul></div></section>
-<script>(()=>{document.querySelectorAll('[data-cross]').forEach((p)=>{const t=p.querySelector('.viz__tip'),c=p.querySelector('.viz__cross'),svg=p.querySelector('svg');
-p.querySelectorAll('.viz__hit').forEach((h)=>{h.addEventListener('pointerenter',()=>{const vb=svg.viewBox.baseVal,k=svg.getBoundingClientRect().width/vb.width,xv=+h.dataset.x;c.setAttribute('x1',xv);c.setAttribute('x2',xv);c.hidden=false;t.textContent=h.dataset.tip;t.hidden=false;t.style.left=Math.min(p.clientWidth-t.offsetWidth,Math.max(0,xv*k-t.offsetWidth/2))+'px';});});
-p.addEventListener('pointerleave',()=>{t.hidden=true;c.hidden=true;});});
-document.querySelectorAll('[data-bars]').forEach((p)=>{const t=p.querySelector('.viz__tip');p.querySelectorAll('.viz__col').forEach((g)=>{g.addEventListener('pointerenter',()=>{t.textContent=g.dataset.tip;t.hidden=false;const r=p.getBoundingClientRect(),b=g.getBoundingClientRect();t.style.left=Math.min(r.width-t.offsetWidth,Math.max(0,b.left-r.left+b.width/2-t.offsetWidth/2))+'px';g.classList.add('on');});g.addEventListener('pointerleave',()=>{t.hidden=true;g.classList.remove('on');});});});})();</script>`;
-    return layout('Service', body, { user, tr, width: 'full', bar: { back: '/app', title: 'Service', sub: `Everything about bot2bot · updated ${new Date(clock()).toISOString().slice(0, 16).replace('T', ' ')} UTC` } });
-  }
+  // ───── service dashboard (hosted only) ─────
+  // The operator's dashboard lives in hosted-admin.mjs, which the open-source relay doesn't include.
+  const admin = hostedAdmin && usage ? hostedAdmin.createAdmin({ q, clock, layout, toolInfo, usage, adminEmails, icon: ICON.overview }) : null;
   // Feedback. The form is always one click away (account menu); the popup asks once someone has really used
   // bot2bot: an account at least 3 days old with a friend connected, and never more than once in 60 days.
   const FEEDBACK_AFTER_MS = 3 * 86_400_000, FEEDBACK_EVERY_MS = 60 * 86_400_000;
@@ -551,7 +473,7 @@ Give me the link it prints so I can approve you, then run the same join command 
 <section class="grid3 tiers">
 <div class="card"><h2>${tr('Run it yourself')}</h2><p class="price">${tr('Free')}</p><ul class="ticks"><li>${tr('Open source, everything included')}</li><li>${tr('Your own server')}</li><li>${tr('No limits from us')}</li></ul><a class="btn ghost" href="#">${tr('Get the code')}</a></div>
 <div class="card"><h2>${tr('We run it')}</h2><p class="price">${tr('Free')}</p><ul class="ticks"><li>${tr('{n} sent messages {per}', { n: B.freeMessages, per: perWord(tr) })}</li><li>${tr('Receiving is always free')}</li><li>${tr('No card')}</li></ul><a class="btn ghost" href="${user ? '/app' : '/login'}">${user ? tr('Dashboard') : tr('Start free')}</a></div>
-<div class="card attention"><h2>${tr('Family')}</h2><p class="price">${esc(tr.msg(B.priceLabel))}</p><ul class="ticks"><li>${tr('No limit')}</li><li>${tr('Covers you and {n} people', { n: B.householdSize - 1 })}</li><li>${tr('One payment, nothing renews by itself')}</li></ul>${B.stripeKey && B.priceId ? `<a class="btn" href="${user ? '/app/billing' : '/login'}">${user ? tr('See my plan') : tr('Start free')}</a>` : '<p>' + badge(tr('Coming soon')) + '</p>'}</div>
+<div class="card attention"><h2>${tr('Family')}</h2><p class="price">${esc(tr.msg(B.priceLabel))}</p><ul class="ticks"><li>${tr('No limit')}</li><li>${tr('Covers you and {n} people', { n: B.householdSize - 1 })}</li><li>${tr('One payment, nothing renews by itself')}</li></ul>${payments?.canPay ? `<a class="btn" href="${user ? '/app/billing' : '/login'}">${user ? tr('See my plan') : tr('Start free')}</a>` : '<p>' + badge(tr('Coming soon')) + '</p>'}</div>
 </section><p class="quiet small muted">${tr('Private mode is end-to-end encrypted between bots on every plan; quick connect is not. Friends who use the web inbox are always free; their chats are not end-to-end encrypted.')}</p>`, { user, tr, bar: { title: tr('Free to start') } });
   }
   // The free plan: one line under the overview title, plus an alert once the messages are used up.
@@ -568,7 +490,7 @@ Give me the link it prints so I can approve you, then run the same join command 
     const tr = T(user);
     const c = allowance(user);
     const members = q('SELECT email FROM household_members WHERE payer_user_id = ? ORDER BY added_at').all(user.id);
-    const canPay = !!(B.stripeKey && B.priceId);
+    const canPay = !!payments?.canPay;
     const price = esc(tr.msg(B.priceLabel));
     const status = c.state === 'infinite' ? tr('No limit, for good. Send as much as you like.')
       : c.state === 'paid' ? tr('Paid until {date}.', { date: tr.date(c.until) })
@@ -582,16 +504,6 @@ ${c.state === 'covered' || c.state === 'infinite' ? '' : canPay ? `<form method=
 ${members.map((m) => `<div class="row"><span>${esc(m.email)}</span><form method="post" action="/app/billing/members" class="more"><input type="hidden" name="remove" value="${esc(m.email)}"><button class="link danger">${tr('Remove')}</button></form></div>`).join('')}
 ${members.length < B.householdSize - 1 ? `<form method="post" action="/app/billing/members" class="stack"><label>${tr('Email')}<input name="email" type="email" required autocomplete="off"></label><button class="btn small ghost">${tr('Add to my household')}</button></form>` : ''}
 ${c.state !== 'paid' && members.length ? `<p class="muted small">${tr('They have no limit once you have paid.')}</p>` : ''}</section>`, { user, tab: 'plan', width: 'read', bar: { title: tr('Plan'), sub: tr('What you can send and who your plan covers') } });
-  }
-  // Stripe sends this after a payment. We check its signature before trusting anything in it.
-  function verifyStripe(raw, header) {
-    if (!B.webhookSecret || !header) return false;
-    const parts = Object.fromEntries(String(header).split(',').map((kv) => kv.split('=')).filter((x) => x.length === 2).map(([k, v]) => [k, v]));
-    const sigs = String(header).split(',').filter((kv) => kv.startsWith('v1=')).map((kv) => kv.slice(3));
-    const t = Number(parts.t);
-    if (!t || Math.abs(clock() / 1000 - t) > 300) return false;
-    const want = createHmac('sha256', B.webhookSecret).update(`${t}.${raw}`).digest('hex');
-    return sigs.some((sg) => sg.length === want.length && timingSafeEqual(Buffer.from(sg), Buffer.from(want)));
   }
 
   function loginPage(tr, { email = '', sent = false, error = '', next = '', devCode = null } = {}) {
@@ -1177,7 +1089,7 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
       q(`DELETE FROM contacts WHERE owner_bot IN (${ph}) OR peer_bot IN (${ph})`).run(...ids, ...ids);
       erase(`from_bot IN (${ph}) OR to_bot IN (${ph})`, ...ids, ...ids);
       q('UPDATE feedback SET user_id = NULL WHERE user_id = ?').run(user.id); // feedback stays, without who sent it
-      q('DELETE FROM active_days WHERE user_id = ?').run(user.id);
+      usage?.forgetUser(user.id);
       q(`UPDATE events SET detail = '{}' WHERE bot IN (${ph})`).run(...ids);
       q(`DELETE FROM invites WHERE from_bot IN (${ph}) AND used_at IS NULL`).run(...ids);
       q('UPDATE enroll_codes SET used_at = ?, plain_code = NULL WHERE user_id = ? AND used_at IS NULL').run(t, user.id);
@@ -1433,30 +1345,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
   return async function handleApp(req, res, url) {
     const p = url.pathname;
     // With the landing site on the same server, it answers / and /pricing instead of the built-in pages.
-    const isApp = p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || p === '/billing/stripe' || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || p.startsWith('/i/') || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/');
+    const isApp = p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || (payments && p === '/billing/stripe') || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || p.startsWith('/i/') || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/');
     if (!isApp) return false;
     let tr = translator(reqLang(req));
     try {
-      if (p === '/billing/stripe' && req.method === 'POST') {
-        let raw = '';
-        for await (const c of req) { raw += c; if (raw.length > 256_000) throw new HttpError(413, 'too large'); }
-        if (!hosted || !verifyStripe(raw, req.headers['stripe-signature'])) return json(res, 400, { error: 'bad signature' }), true;
-        const ev = JSON.parse(raw);
-        if (q('SELECT 1 FROM billing_events WHERE id = ?').get(String(ev.id))) return json(res, 200, { ok: true, duplicate: true }), true;
-        q('INSERT INTO billing_events (id, received_at) VALUES (?, ?)').run(String(ev.id), clock());
-        const sess = ev.data?.object;
-        if (ev.type === 'checkout.session.completed' && sess?.payment_status === 'paid') {
-          const u = q('SELECT * FROM users WHERE id = ?').get(Number(sess.client_reference_id));
-          if (u) {
-            const from = Math.max(u.paid_until || 0, clock());
-            q('UPDATE users SET paid_until = ? WHERE id = ?').run(from + 365 * 86_400_000, u.id);
-            log(null, 'paid', { user: u.id, event: String(ev.id) });
-            // Wake everyone this payment covers who has messages waiting.
-            const covered = [u.email, ...q('SELECT email FROM household_members WHERE payer_user_id = ?').all(u.id).map((m) => m.email)];
-            for (const e of covered) for (const b of q("SELECT b.id FROM bots b JOIN users x ON x.id = b.user_id WHERE x.email = ? AND b.disconnected_at IS NULL").all(e)) release(b.id);
-          }
-        }
-        return json(res, 200, { ok: true }), true;
+      // Stripe's payment webhook (hosted-billing.mjs).
+      if (payments && p === '/billing/stripe' && req.method === 'POST') {
+        const r = await payments.webhook(req);
+        return json(res, r.status, r.body), true;
       }
       const rm = p.match(/^\/avatars\/([a-z]+)\.svg$/);
       if (rm && req.method === 'GET') {
@@ -1997,15 +1893,11 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return page(res, 200, billingPage(user, { paid: url.searchParams.get('paid') === '1' })), true;
       }
       if (p === '/app/billing/checkout' && req.method === 'POST') {
-        if (!hosted || !B.stripeKey || !B.priceId) return page(res, 400, billingPage(user, { error: tr('Payments are not set up on this server yet.') })), true;
-        const body = new URLSearchParams({ mode: 'payment', 'line_items[0][price]': B.priceId, 'line_items[0][quantity]': '1',
-          client_reference_id: String(user.id), customer_email: user.email,
-          success_url: `${origin}/app/billing?paid=1`, cancel_url: `${origin}/app/billing` });
-        const r = await fetchImpl('https://api.stripe.com/v1/checkout/sessions', { method: 'POST', body,
-          headers: { authorization: `Bearer ${B.stripeKey}`, 'content-type': 'application/x-www-form-urlencoded' }, signal: AbortSignal.timeout(15_000) });
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok || !String(data.url || '').startsWith('https://checkout.stripe.com/')) return page(res, 502, billingPage(user, { error: tr('The payment page could not be opened. Try again in a minute.') })), true;
-        return redirect(res, data.url), true;
+        // Paying is in hosted-billing.mjs; without it (or without Stripe set up) there is nothing to pay.
+        if (!hosted || !payments?.canPay) return page(res, 400, billingPage(user, { error: tr('Payments are not set up on this server yet.') })), true;
+        const r = await payments.checkout(user);
+        if (!r.url) return page(res, 502, billingPage(user, { error: tr('The payment page could not be opened. Try again in a minute.') })), true;
+        return redirect(res, r.url), true;
       }
       if (p === '/app/billing/members' && req.method === 'POST') {
         if (!hosted) return redirect(res, '/app'), true;
@@ -2063,8 +1955,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return true;
       }
       if (p === '/app/admin' && req.method === 'GET') {
-        if (!isAdmin(user) || !usageMetrics) throw new HttpError(404, 'Page not found');
-        return page(res, 200, adminPage(user, tr)), true;
+        if (!admin?.isAdmin(user)) throw new HttpError(404, 'Page not found');
+        return page(res, 200, admin.page(user, tr)), true;
       }
       if (p === '/app/feedback' && req.method === 'GET') {
         return page(res, 200, layout(tr('Send feedback'), `<section class="card"><form method="post" action="/app/feedback" class="stack" style="margin:0"><input type="hidden" name="via" value="page">${feedbackFields(tr, { question: questionFor(user) })}

@@ -7,7 +7,7 @@ import { t } from './i18n.mjs';
 
 const C = {
   ground: '#f3f5f8', surface: '#ffffff', ink: '#1a2230', muted: '#586377', line: '#e3e6eb',
-  accent: '#2747c9', darkGround: '#0f141c', darkSurface: '#171d27', darkInk: '#e9ecf2', darkMuted: '#9aa3b5', darkLine: '#2a3242',
+  accent: '#2747c9', accentSubtle: '#eaeefc', darkAccentSubtle: '#1d2747', darkGround: '#0f141c', darkSurface: '#171d27', darkInk: '#e9ecf2', darkMuted: '#9aa3b5', darkLine: '#2a3242',
 };
 const SANS = `-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif`;
 const MONO = `ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace`;
@@ -15,7 +15,8 @@ const MONO = `ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberat
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 // One centred card on the page ground. `preheader` is the grey preview line inbox lists show.
-function layout({ product, logo, home, preheader, body, tr }) {
+// `hero` is a picture that sits on a tinted panel at the top of the card.
+function layout({ product, logo, home, preheader, body, tr, hero = '' }) {
   return `<!doctype html>
 <html lang="${tr.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">
@@ -33,6 +34,8 @@ function layout({ product, logo, home, preheader, body, tr }) {
     .code { color: ${C.darkInk} !important; }
     .btn { background: ${C.darkInk} !important; } .btn a { color: ${C.darkGround} !important; }
     .rule { border-color: ${C.darkLine} !important; }
+    .hero, .stepnum { background: ${C.darkAccentSubtle} !important; border-color: ${C.darkLine} !important; }
+    .stepnum { color: ${C.darkInk} !important; }
   }
 </style></head>
 <body style="margin:0;padding:0;background:${C.ground};">
@@ -46,7 +49,8 @@ function layout({ product, logo, home, preheader, body, tr }) {
         <span class="ink" style="display:inline-block;vertical-align:middle;margin-left:${logo ? 8 : 0}px;font-family:${SANS};font-size:17px;font-weight:600;letter-spacing:-0.02em;color:${C.ink};">${esc(product)}</span>
       </a>
     </td></tr>
-    <tr><td class="card" style="background:${C.surface};border:1px solid ${C.line};border-radius:18px;padding:36px 36px 32px;">
+    ${hero ? `<tr><td class="hero" align="center" style="background:${C.accentSubtle};border:1px solid ${C.line};border-bottom:0;border-radius:18px 18px 0 0;padding:30px 0 6px;line-height:0;">${hero}</td></tr>` : ''}
+    <tr><td class="card" style="background:${C.surface};border:1px solid ${C.line};${hero ? 'border-top:0;border-radius:0 0 18px 18px;padding:30px 36px 32px;' : 'border-radius:18px;padding:36px 36px 32px;'}">
       ${body}
     </td></tr>
     <tr><td class="muted" style="padding:18px 4px 0;font-family:${SANS};font-size:12px;line-height:1.6;color:${C.muted};">
@@ -98,13 +102,19 @@ ${p(tr('You get this because you accepted their invitation. You can pause or blo
 }
 
 /** Sent once when a bot joined but still has no doorbell routine, so friends' bots can't wake it. */
-export function doorbellEmail({ product = 'bot2bot', handle, botUrl, home, logo = '', lang = 'en' }) {
+export function doorbellEmail({ product = 'bot2bot', handle, botUrl, home, logo = '', art = '', lang = 'en' }) {
   const tr = t(lang);
-  const subject = tr("Friends' bots can't wake @{handle} yet", { handle });
-  const text = `${tr("@{handle} joined {product}, but it has no doorbell routine yet. Until it has one, it only sees messages when you ask it to check.", { handle, product })}\n\n${tr("Open its page on a computer: it has the message to paste into your bot's chat, and where to copy the webhook. {url}", { url: botUrl })}`;
-  const body = `${h1(tr("Friends' bots can't wake @{handle} yet", { handle }))}
-${p(tr("@{handle} joined {product}, but it has no doorbell routine yet. Until it has one, it only sees messages when you ask it to check.", { handle: esc(handle), product: esc(product) }))}
-${p(tr("Open its page on a computer. It has the message to paste into your bot's chat, and where to copy the webhook."))}
-${button(botUrl, tr('Turn on the doorbell'))}`;
-  return { subject, text, html: layout({ product, logo, home, preheader: tr("Friends' bots can't wake @{handle} yet", { handle }), body, tr }) };
+  const subject = tr('One last step for @{handle}', { handle });
+  const lead = tr("@{handle} joined {product}. Friends' bots can't wake it yet, so it only sees messages when you ask it to check.", { handle, product });
+  const steps = [tr("Paste one message into your bot's chat. It makes the doorbell."), tr('Copy the webhook into your bot\'s page. You need Grok Bot on a computer for this.')];
+  const text = `${lead}\n\n${steps.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n${tr('Turn on the doorbell')}: ${botUrl}\n\n${tr("It takes about two minutes. This is the only reminder we'll send.")}`;
+  const step = (n, x) => `<tr><td valign="top" width="40" style="padding:0 0 14px;"><div class="stepnum" style="width:28px;height:28px;border-radius:14px;background:${C.accentSubtle};color:${C.accent};font-family:${SANS};font-size:14px;font-weight:600;line-height:28px;text-align:center;">${n}</div></td>
+  <td class="ink" valign="top" style="padding:4px 0 14px;font-family:${SANS};font-size:15px;line-height:1.5;color:${C.ink};">${esc(x)}</td></tr>`;
+  const body = `${h1(tr('One last step: the doorbell'))}
+${p(esc(lead))}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 12px;">${steps.map((x, i) => step(i + 1, x)).join('')}</table>
+${button(botUrl, tr('Turn on the doorbell'))}
+${p(tr("It takes about two minutes. This is the only reminder we'll send."), 'font-size:13px;margin:0;')}`;
+  const hero = art ? `<img src="${esc(art)}" width="132" height="132" alt="${esc(tr('A sleepy robot'))}" style="display:inline-block;border:0;width:132px;height:132px;">` : '';
+  return { subject, text, html: layout({ product, logo, home, preheader: tr("Turn on @{handle}'s doorbell so friends' bots can wake it.", { handle }), body, tr, hero }) };
 }

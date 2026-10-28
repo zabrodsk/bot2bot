@@ -262,22 +262,6 @@ test('activity statistics: 30-day numbers, messages per day with a table view, a
   assert.doesNotMatch(page, /one|two|three/.source === '' ? /x/ : /data-tip="[^"]*(one|two|three)/, 'no message text in the stats');
 });
 
-test('telemetry: anonymous daily counts that stay after message text is deleted', async (t0) => {
-  const env = await setup(t0);
-  const ben = await owner(env, t0, 'ben.tel@example.com', 'bentel');
-  const mia = await owner(env, t0, 'mia.tel@example.com', 'miatel');
-  await connect(ben, mia, 'Ben');
-  await ben.cli('send', 'Mia', 'hello');
-  const get = async () => (await (await fetch(`${env.url}/admin/stats`, { headers: { authorization: 'Bearer admin-token-for-tests-123456' } })).json()).days;
-  const today = new Date(env.now()).toISOString().slice(0, 10);
-  let d = (await get())[today];
-  assert.equal(d.messages_sent, 1); assert.ok(d.users_new >= 2 && d.bots_new >= 2 && d.contacts_new >= 2 && d.bots_active === 1);
-  assert.equal(JSON.stringify(d).includes('example.com'), false, 'no people in telemetry');
-  // Text deleted after 7 days: the count stays.
-  env.relay.db.prepare("UPDATE messages SET text = '', body_purged_at = 1").run();
-  assert.equal((await get())[today].messages_sent, 1);
-});
-
 test('evening summary: offered once, set up as a routine, one line for the owner and a "bot2bot" page', async (t0) => {
   const env = await setup(t0);
   const ben = await owner(env, t0, 'ben.dg@example.com', 'bendg');
@@ -307,28 +291,4 @@ test('evening summary: offered once, set up as a routine, one line for the owner
   assert.equal(data.last_30_days.most_messaged[0].name, 'Ben'); assert.equal(data.last_30_days.friends, 1);
   assert.doesNotMatch(an, /Recipe for tonight|Saturday works/);
   assert.match(d, /from "Ben"[^]*They want \(their words\): "try it"[^]*\| Recipe for tonight/);
-});
-
-test('service dashboard: admins only, with active users, retention, growth, bots, plans and feedback', async (t0) => {
-  const env = await setup(t0, { adminEmails: ['boss@example.com'] });
-  const ben = await owner(env, t0, 'ben.adm@example.com', 'benadm');
-  const mia = await owner(env, t0, 'mia.adm@example.com', 'miaadm');
-  await connect(ben, mia, 'Ben');
-  await ben.cli('send', 'Mia', 'hello');
-  assert.equal((await ben.b('/app/admin')).status, 404, 'not for everyone');
-  assert.doesNotMatch((await ben.b('/app')).text, /href="\/app\/admin"/);
-  const boss = await login(env, 'boss@example.com');
-  const home = (await boss('/app')).text;
-  assert.match(home, /href="\/app\/admin"[^>]*>[^]*Service/);
-  const page = (await boss('/app/admin')).text;
-  assert.match(page, /kpi__label">Users<\/p><p class="kpi__value">3</);
-  assert.match(page, /kpi__label">Daily active<\/p><p class="kpi__value">3</, 'everyone used it today');
-  assert.match(page, /Active users, last 90 days[^]*MAU[^]*WAU[^]*DAU[^]*Show as a table/);
-  assert.match(page, /Retention[^]*Day 1[^]*Day 7[^]*Day 30[^]*Month to month/);
-  assert.match(page, /Messages per day[^]*Tool versions/);
-  assert.doesNotMatch(page, /hello/, 'no message text');
-  // The numbers come from active days, kept per account and deleted with it.
-  const stats = await (await fetch(`${env.url}/admin/stats`, { headers: { authorization: 'Bearer admin-token-for-tests-123456' } })).json();
-  assert.equal(stats.usage.now.dau, 3); assert.equal(stats.usage.now.users, 3);
-  assert.ok('d1' in stats.usage.retention && 'monthly' in stats.usage.retention);
 });
