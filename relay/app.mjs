@@ -22,6 +22,10 @@ export function migrateApp(db) {
       token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
       created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS feedback (
+      id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), rating INTEGER, text TEXT NOT NULL DEFAULT '',
+      via TEXT, lang TEXT, created_at INTEGER NOT NULL
+    );
   `);
   const addColumn = (table, col, def) => {
     if (db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) return false;
@@ -53,6 +57,7 @@ export function migrateApp(db) {
   addColumn('users', 'name_set_at', 'INTEGER');
   addColumn('users', 'seen_update', 'TEXT');
   addColumn('users', 'lang', 'TEXT');
+  addColumn('users', 'feedback_asked_at', 'INTEGER');
   addColumn('users', 'quiet_on', 'INTEGER NOT NULL DEFAULT 1');
   addColumn('users', 'quiet_start', 'INTEGER NOT NULL DEFAULT 1320');
   addColumn('users', 'quiet_end', 'INTEGER NOT NULL DEFAULT 480');
@@ -111,7 +116,7 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
-  const { events = null, latestUpdate = null, renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { events = null, latestUpdate = null, feedbackTo = '', renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -162,13 +167,13 @@ export function createApp(ctx) {
     const face = avatar(user.name || user.email, 'md', photoUrl(user.id, user.photo_at, user.avatar));
     const me = `<details class="more umenu"><summary class="umenu__trigger" aria-label="${tr('Your account')}">${face}</summary>
 <div class="umenu__panel"><div class="umenu__head">${face}<div class="umenu__id"><span class="umenu__row"><span class="umenu__fullname">${esc(user.name)}</span>${planName ? `<span class="umenu__plan${planState_ === 'infinite' ? ' umenu__plan--infinite' : ''}">${planState_ === 'infinite' ? '<span class="inf" aria-hidden="true">∞</span>' : ''}${planName}</span>` : ''}</span><span class="umenu__email">${esc(user.email)}</span></div></div>
-<div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}${tr('Account')}</a>${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}${tr('Plan')}</a>` : ''}
+<div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}${tr('Account')}</a><a class="umenu__item" href="/app/feedback">${ICON.chat}${tr('Send feedback')}</a>${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}${tr('Plan')}</a>` : ''}
 <div class="umenu__sep"></div><form method="post" action="/logout"><button class="umenu__item">${ICON.logout}${tr('Log out')}</button></form></div></details>`;
     const back = bar.back ? `<a class="crumb" href="${esc(bar.back)}">${ICON.back}${esc(bar.backLabel || tr('Overview'))}</a>` : '';
     const ownH1 = /<h1[\s>]/.test(body);
     const pagehead = ownH1 ? (back ? `<header class="pagehead">${back}</header>` : '') : `<header class="pagehead"><div class="pagehead__text">${back}<h1>${esc(bar.title ?? title)}</h1>${bar.sub ? `<p class="pagehead__sub">${esc(bar.sub)}</p>` : ''}</div>${actions ? `<div class="pagehead__actions">${actions}</div>` : ''}</header>`;
     const note = takeNotice(user);
-    const news = latestUpdate && user.seen_update !== latestUpdate.iso && hasPicture(user) ? whatsNewDialog(tr) : '';
+    const news = latestUpdate && user.seen_update !== latestUpdate.iso && hasPicture(user) ? whatsNewDialog(tr) : tab === 'home' && feedbackDue(user) ? feedbackDialog(user, tr) : '';
     return `${head(title, tr)}<body class="in"><header class="top"><div class="top__in">${brand('/app')}${nav}${me}</div></header>
 <main class="page">${sim}<div class="col col--${width}">${pagehead}${body}</div>${site ? legal(tr) : ''}</main>${note ? toast(note, tr) : ''}${news}<script>${uiJs(tr)}</script></body></html>`;
   };
@@ -184,6 +189,24 @@ export function createApp(ctx) {
 const seen=()=>{if(done)return;done=true;fetch('/app/whatsnew',{method:'POST',body:new URLSearchParams(new FormData(f)),keepalive:true}).catch(()=>{});};
 f.addEventListener('submit',(e)=>{e.preventDefault();seen();d.close();});d.addEventListener('close',seen);
 d.addEventListener('click',(e)=>{if(e.target===d)d.close();});d.showModal();})();</script>`;
+  };
+  // Feedback. The form is always one click away (account menu); the popup asks once someone has really used
+  // bot2bot: an account at least 3 days old with a friend connected, and never more than once in 60 days.
+  const FEEDBACK_AFTER_MS = 3 * 86_400_000, FEEDBACK_EVERY_MS = 60 * 86_400_000;
+  const feedbackDue = (user) => !!user && hasPicture(user) && clock() - user.created_at >= FEEDBACK_AFTER_MS
+    && clock() - (user.feedback_asked_at || 0) >= FEEDBACK_EVERY_MS
+    && !!q('SELECT 1 FROM contacts c JOIN bots b ON b.id = c.owner_bot WHERE b.user_id = ? AND c.approved_at IS NOT NULL LIMIT 1').get(user.id);
+  const feedbackFields = (tr, { rating = '', text = '' } = {}) => `<fieldset class="rate"><legend class="rate__legend">${tr('How is bot2bot working for you?')}</legend><div class="rate__opts">
+${[[3, tr('Love it')], [2, tr('It&#39;s okay')], [1, tr('Not great')]].map(([v, l]) => `<label class="rate__opt"><input type="radio" name="rating" value="${v}"${String(rating) === String(v) ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div></fieldset>
+<label class="field">${tr('What would make it better?')}<textarea name="text" maxlength="2000" rows="4" placeholder="${tr('Anything at all. We read every message.')}">${esc(text)}</textarea></label>`;
+  // Arc dialog, asked once (it counts as asked when it shows). Send stores it; Not now just closes.
+  const feedbackDialog = (user, tr) => {
+    q('UPDATE users SET feedback_asked_at = ? WHERE id = ?').run(clock(), user.id);
+    return `<dialog class="dlg" id="feedback" aria-labelledby="fb-h"><form method="post" action="/app/feedback" class="dlg__in"><input type="hidden" name="via" value="popup">
+<h2 id="fb-h" class="dlg__title">${tr('Got a minute?')}</h2>${feedbackFields(tr)}
+<div class="dlg__foot"><button type="button" class="btn ghost" data-close>${tr('Not now')}</button><button class="btn">${tr('Send')}</button></div></form></dialog>
+<script>(()=>{const d=document.getElementById('feedback');if(!d||!d.showModal)return;d.querySelector('[data-close]').addEventListener('click',()=>d.close());
+d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.showModal(),1200);})();</script>`;
   };
   // Artwork made for bot2bot (isometric scenes). Only shown when the file is there.
   const art = (name, cls = '') => ART.has(name) ? `<div class="art ${cls}"><img src="/art/${name}.jpg" alt="" width="${name === 'asleep' ? 800 : name === 'home' ? 1536 : 1200}" height="${name === 'asleep' ? 800 : name === 'home' ? 864 : 800}" decoding="async"></div>` : '';
@@ -474,7 +497,7 @@ ${devCode ? `<p class="dev">${tr('Dev mode: your code is <b>{code}</b>', { code:
   // No bot yet: the setup bot first (it does everything with you), doing it yourself second.
   function setupChoices(tr, { message = privateMessage, quick = quickMessage, invite = null } = {}) {
     return `<section class="card"><div class="way"><div class="way__head"><h2>${tr('Add the setup bot')}</h2>${badge(tr('Easiest'), 'info')}</div>
-<p class="muted">${tr('A Grok Bot that sets everything up with you: sign-in, your bot, the doorbell and a test.')}${invite ? ` ${tr('Tell it you have an invite from {who}.', { who: invite })}` : ''}</p>
+<p class="muted">${tr('A Grok Bot that sets everything up with you: sign-in, your bot, the doorbell and a test.')}${invite ? ` ${tr('Then tell it: "I have a bot2bot invite: {link}"', { link: invite })}` : ''}</p>
 <a class="btn blue wide" href="${esc(setupBot)}" target="_blank" rel="noopener">${tr('Add the setup bot')}${ICON.out}</a></div>
 <div class="way"><details class="diy"><summary>${tr('Or paste one message into your bot')}</summary>
 <p class="muted" style="margin-top:10px">${tr("Paste this into your bot's chat in Grok Bot. It installs a small tool, makes its own keys and gives you a link to approve it. Only the bots can read your messages.")}</p>
@@ -826,9 +849,10 @@ ${removeRow(b, tr)}</section>`;
     if (done === 'web') action = `<section class="card center"><h2>${tr("You're connected")}</h2><p class="muted">${tr('When {who} sends you something, we email you and it shows up in your inbox.', { who })}</p><a class="btn wide" href="/app/inbox">${tr('Open my inbox')}</a></section>`;
     else if (done) action = `<section class="card center"><h2>${tr("You're connected")}</h2><p class="muted">${tr("Your bot can now message {who}'s bot.", { who })}${opts.basket ? ` ${tr('{name} is in {basket}.', { name: esc(first), basket: esc(opts.basket) })}` : ''}</p><a class="btn wide" href="${sortNext ? '/app/people' : '/app'}">${sortNext ? tr('Put {who} in a basket', { who }) : tr('Go to your dashboard')}</a></section>`;
     else if (!bots.length) action = `<p class="lead center" style="font-size:17px">${tr('Connect your Grok Bot first. Then your bots can message each other.')}</p>
-${setupChoices(tr, { message, quick, invite: who })}
+${user ? '' : `<a class="btn ghost wide" href="/login?next=${encodeURIComponent('/i/' + inv.plain)}">${tr('Already on bot2bot? Sign in')}</a>`}
+${setupChoices(tr, { message, quick, invite: `${origin}/i/${inv.plain}` })}
 ${user ? `<p class="wait" style="justify-content:center"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p><script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.reload(); else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`
-  : `<p class="muted center">${tr('When your bot is connected, open this link again to say yes.')}<br><a class="link" href="/login?next=${encodeURIComponent('/i/' + inv.plain)}">${tr('My bot is already connected: sign in')}</a></p>`}`;
+  : `<p class="muted center">${tr('When your bot is connected, open this link again to say yes.')}</p>`}`;
     if (!done && !bots.length && user && webInbox) action += `<form method="post" action="/i/${esc(inv.plain)}" class="stack center"><input type="hidden" name="web" value="1"><input type="hidden" name="alias" value="${esc(first)}"><button class="link">${tr('No Grok Bot? Use the web inbox (not end-to-end encrypted)')}</button></form>`;
     if (bots.length && !done) action = `<section class="card"><form method="post" action="/i/${esc(inv.plain)}" class="stack" style="margin:0">
 ${bots.length > 1 ? `<label>${tr('Which bot')}<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${bots[0].id}">`}
@@ -849,8 +873,7 @@ ${error ? `<p class="error center" role="alert">${esc(tr.msg(error))}</p>` : ''}
     const pick = code ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">
 ${field({ label: tr('What do you call them?'), name: 'alias', value: named, description: tr('Left empty, they get their own first name when they join.'), error: error && /name|someone called|jméno|kontakt/i.test(error) ? error : '', attrs: `maxlength="32" autocomplete="off" placeholder="${tr('Aunt Mia')}"` })}${names.length ? basketPick(names, basket, tr) + notesField(tr('Anything your bot should know about them?'), notes, tr) : ''}<div><button class="btn small">${tr('Save')}</button></div></form>` : '';
     return layout(tr('Invite a friend'), `<section class="card"><h2>${tr('Send this to your friend')}</h2>
-<p class="muted">${tr('It asks them to add the setup bot to their Grok Bot first, then open your invite.')}</p>
-${codeBlock('msg', tr('Message for your friend'), inviteMessage(link), tr)}${pick}
+${codeBlock('msg', tr('Message for your friend'), `${tr("Let's connect our AI bots on {product}, so they can message each other for us. Open my invite: {link}", { product, link })}\n${tr("If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.")}`, tr)}${pick}
 <details class="diy"><summary>${tr('Already on bot2bot? Send just the link')}</summary>${codeBlock('link', tr('Invite link'), link, tr)}</details></section>
 <p class="muted small">${tr("The link works once and expires in 7 days. They'll see your name and that your email is verified.")}</p>
 ${code ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Cancel this invite')}</p><p class="setrow__desc">${tr('The link stops working.')}</p></div>
@@ -995,6 +1018,7 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
       q(`UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, paused_at = NULL, disconnected_at = coalesce(disconnected_at, ?), display_name = 'Deleted user' WHERE id IN (${ph})`).run(t, ...ids);
       q(`DELETE FROM contacts WHERE owner_bot IN (${ph}) OR peer_bot IN (${ph})`).run(...ids, ...ids);
       erase(`from_bot IN (${ph}) OR to_bot IN (${ph})`, ...ids, ...ids);
+      q('UPDATE feedback SET user_id = NULL WHERE user_id = ?').run(user.id); // feedback stays, without who sent it
       q(`UPDATE events SET detail = '{}' WHERE bot IN (${ph})`).run(...ids);
       q(`DELETE FROM invites WHERE from_bot IN (${ph}) AND used_at IS NULL`).run(...ids);
       q('UPDATE enroll_codes SET used_at = ?, plain_code = NULL WHERE user_id = ? AND used_at IS NULL').run(t, user.id);
@@ -1878,6 +1902,22 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         res.end(Buffer.from(row.photo));
         return true;
       }
+      if (p === '/app/feedback' && req.method === 'GET') {
+        return page(res, 200, layout(tr('Send feedback'), `<section class="card"><form method="post" action="/app/feedback" class="stack" style="margin:0"><input type="hidden" name="via" value="page">${feedbackFields(tr)}
+<div><button class="btn">${tr('Send')}</button></div></form></section>`, { user, tr, width: 'read', bar: { back: '/app', title: tr('Send feedback'), sub: tr("Tell us what works, what doesn't, and what you wish it did.") } })), true;
+      }
+      if (p === '/app/feedback' && req.method === 'POST') {
+        const f = await form(req);
+        const text = String(f.text ?? '').normalize('NFC').trim().slice(0, 2000);
+        const rating = [1, 2, 3].includes(Number(f.rating)) ? Number(f.rating) : null;
+        if (!text && !rating) { tell(user, { what: tr('Nothing to send yet') }); return redirect(res, f.via === 'page' ? '/app/feedback' : '/app'), true; }
+        q('INSERT INTO feedback (user_id, rating, text, via, lang, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(user.id, rating, text, f.via === 'popup' ? 'popup' : 'page', tr.lang, clock());
+        q('UPDATE users SET feedback_asked_at = ? WHERE id = ?').run(clock(), user.id);
+        log(null, 'feedback', { user: user.id, rating });
+        if (feedbackTo) mailer({ to: feedbackTo, subject: `bot2bot feedback${rating ? ` (${['', 'not great', 'okay', 'love it'][rating]})` : ''}`, text: `From ${user.name} <${user.email}>\n\n${text || '(no text)'}` }).catch(() => {});
+        tell(user, { what: tr('Thanks! We read every message.') });
+        return redirect(res, '/app'), true;
+      }
       if (p === '/app/whatsnew' && req.method === 'POST') {
         const f = await form(req);
         if (latestUpdate && f.id === latestUpdate.iso) q('UPDATE users SET seen_update = ? WHERE id = ?').run(latestUpdate.iso, user.id);
@@ -2482,6 +2522,12 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .dlg__foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:6px}
 @keyframes dlg-in{from{opacity:0;transform:translateY(8px) scale(.97)}}@keyframes dlg-fade{from{opacity:0}}
 @media (prefers-reduced-motion:reduce){.dlg[open],.dlg::backdrop{animation:none}}
+.rate{margin:0;padding:0;border:0;display:grid;gap:8px}.rate__legend{padding:0;font-weight:500}
+.rate__opts{display:flex;flex-wrap:wrap;gap:6px;padding:3px;border-radius:999px;background:color-mix(in oklab,var(--foreground) 5%,transparent);width:max-content;max-width:100%}
+.rate__opt{display:block;font-weight:500}.rate__opt input{position:absolute;opacity:0;pointer-events:none}
+.rate__opt span{display:inline-flex;align-items:center;min-height:32px;padding:0 14px;border-radius:999px;color:var(--text-secondary);cursor:pointer;transition:background-color var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard)}
+.rate__opt input:checked+span{background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-resting),0 0 0 .5px color-mix(in oklab,var(--foreground) 8%,transparent)}
+.rate__opt input:focus-visible+span{outline:2px solid color-mix(in oklab,var(--accent) 72%,transparent);outline-offset:2px}
 .pfp{display:grid;gap:24px}.pfp__name{max-width:360px;width:100%;justify-self:center}.setrow>.grow{flex:1;min-width:0}.pfp__head{display:grid;justify-items:center;gap:8px;text-align:center}.pfp__head h1{margin:10px 0 0}
 .pfp__face{display:block;width:112px;height:112px;border:6px solid #fff;border-radius:var(--radius-pill);overflow:hidden;background:var(--surface-muted);filter:drop-shadow(0 1px 1px rgb(0 0 0 / .08)) drop-shadow(0 8px 14px rgb(0 0 0 / .1))}
 .pfp__face svg,.pfp__face img{display:block;width:100%;height:100%;object-fit:cover}

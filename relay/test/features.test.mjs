@@ -51,8 +51,10 @@ test('invite by chat: the bot gets a link, the friend connects, the owner says y
   assert.ok(link.startsWith(`${env.url}/i/`));
   const gran = await login(env, 'gran@example.com');
   const path = new URL(link).pathname;
-  assert.match(out, /Add the setup bot to your Grok Bot: https:\/\/x\.ai\/bot\/[^]*Then open my invite: http/);
-  assert.match((await gran(path)).text, /wants your bots to talk[^]*Add the setup bot[^]*accept_invite tool: code/);
+  assert.match(out, /Open my invite: http[^]*If you don't have bot2bot yet, it shows you how to connect your Grok Bot first\./);
+  assert.match((await gran(path)).text, /wants your bots to talk[^]*Add the setup bot[^]*I have a bot2bot invite: http[^]*accept_invite tool: code/);
+  // Signed out: people who already have bot2bot sign in first; setup comes after.
+  assert.match(await (await fetch(env.url + path)).text(), /Already on bot2bot\? Sign in<\/a>[^]*Add the setup bot/);
   await gran(path, { method: 'POST', form: { web: '1', alias: 'Ben' } });
   // Ben's bot made the invite, so Ben confirms on the dashboard; the name his bot used is kept.
   const dash = (await ben.b('/app')).text;
@@ -197,4 +199,32 @@ test("what's new: several changes are a list", async (t0) => {
   const b = await login(env, 'list@example.com');
   env.relay.db.prepare("UPDATE users SET seen_update = '2026-11-01' WHERE email = 'list@example.com'").run();
   assert.match((await b('/app')).text, /<ul class="dlg__list"><li>One\.<\/li><li>Two\.<\/li><\/ul>/);
+});
+
+test('feedback: a form in the account menu, and a popup once someone has used bot2bot for a few days', async (t0) => {
+  const sent = [];
+  const env = await setup(t0, { feedbackTo: 'team@example.com', mailer: async (m) => { sent.push(m); } });
+  const ann = await owner(env, t0, 'ann.fb@example.com', 'annfb');
+  const ben = await owner(env, t0, 'ben.fb@example.com', 'benfb');
+  assert.match((await ann.b('/app')).text, /href="\/app\/feedback">[^]*Send feedback/);
+  // New, no friends: no popup.
+  assert.doesNotMatch((await ann.b('/app')).text, /id="feedback"/);
+  await connect(ann, ben, 'Ann');
+  env.advance(4 * 86_400_000);
+  const home = (await ann.b('/app')).text;
+  assert.match(home, /<dialog class="dlg" id="feedback"[^]*Got a minute\?[^]*Love it[^]*What would make it better\?[^]*Not now/);
+  assert.doesNotMatch((await ann.b('/app')).text, /id="feedback"/, 'asked once, not on every visit');
+  // The form works from the page too; empty sends nothing.
+  assert.match((await ann.b('/app/feedback')).text, /How is bot2bot working for you\?/);
+  assert.equal((await ann.b('/app/feedback', { method: 'POST', form: { via: 'page', text: ' ' } })).location, '/app/feedback');
+  const ok = await ann.b('/app/feedback', { method: 'POST', form: { via: 'popup', rating: '3', text: 'Love the quiet bot' } });
+  assert.equal(ok.location, '/app');
+  assert.match((await ann.b('/app')).text, /Thanks! We read every message\./);
+  const r = await fetch(`${env.url}/admin/feedback`, { headers: { authorization: 'Bearer admin-token-for-tests-123456' } });
+  const fb = (await r.json()).feedback[0];
+  assert.equal(fb.text, 'Love the quiet bot'); assert.equal(fb.rating, 3); assert.equal(fb.email, 'ann.fb@example.com');
+  await waitFor(() => sent.some((m) => m.to === 'team@example.com' && /love it/.test(m.subject) && /Love the quiet bot/.test(m.text)));
+  // 60 days later it may ask again.
+  env.relay.db.prepare("UPDATE users SET feedback_asked_at = ? WHERE email = 'ann.fb@example.com'").run(env.now() - 61 * 86_400_000);
+  assert.match((await ann.b('/app')).text, /id="feedback"/);
 });

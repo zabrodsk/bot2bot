@@ -190,13 +190,13 @@ export function openDb(path) {
   return db;
 }
 
-export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', stickersDir, redirectHosts = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', changelog = null, dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
+export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', stickersDir, redirectHosts = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', changelog = null, feedbackTo = '', dbPath = ':memory:', adminToken, publicUrl = '', webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, fetchImpl = fetch, clock = now } = {}) {
   if (!adminToken || adminToken.length < 16) throw new Error('ADMIN_TOKEN (16+ chars) is required');
   const L = { ...LIMITS, ...limits };
-  // What an owner sends a friend: get a bot first (the setup bot does it all), then open the invite.
-  const inviteMessage = (link) => `Let's connect our AI bots on ${productName}, so they can message each other for us.
-1. Add the setup bot to your Grok Bot: ${setupBotUrl} (it walks you through it in a few minutes).
-2. Then open my invite: ${link}`;
+  // What an owner sends a friend: the invite link first. The invite page signs in people who already have
+  // bot2bot, and walks everyone else through connecting their Grok Bot, then back to saying yes.
+  const inviteMessage = (link) => `Let's connect our AI bots on ${productName}, so they can message each other for us. Open my invite: ${link}
+If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`;
   // Webhook keys are encrypted at rest when a separate secret is configured.
   const encKey = keySecret ? createHash('sha256').update(keySecret).digest() : null;
   const sealKey = (plain) => {
@@ -685,6 +685,11 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
       const rows = q('SELECT e.*, b.handle FROM events e LEFT JOIN bots b ON b.id = e.bot WHERE e.id > ? ORDER BY e.id LIMIT 500').all(since);
       return { events: rows.map((r) => ({ id: r.id, ts: iso(r.ts), handle: r.handle, kind: r.kind, detail: JSON.parse(r.detail || '{}') })) };
     },
+    'GET /admin/feedback': ({ admin }) => {
+      if (!admin) throw new HttpError(401, 'admin token required');
+      return { feedback: q('SELECT f.id, f.rating, f.text, f.via, f.lang, f.created_at, u.name, u.email FROM feedback f LEFT JOIN users u ON u.id = f.user_id ORDER BY f.created_at DESC LIMIT 200').all()
+        .map((f) => ({ ...f, created_at: iso(f.created_at) })) };
+    },
     'GET /admin/bots': ({ admin }) => {
       if (!admin) throw new HttpError(401, 'admin token required');
       return { bots: q('SELECT handle, display_name, created_at, webhook_url IS NOT NULL AS doorbell, doorbell_verified_at, last_ring_at, last_ring_status, last_claim_at FROM bots').all()
@@ -1127,7 +1132,7 @@ export function createRelay({ mailer = async () => {}, devLogin = false, adminEn
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
   const handleApp = createApp({ events, governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
-    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, renameBot, latestUpdate, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, renameBot, latestUpdate, feedbackTo, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');
@@ -1274,6 +1279,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     ...(process.env.SETUP_BOT_URL ? { setupBotUrl: process.env.SETUP_BOT_URL } : {}),
     // Bots whose tool is older than this must update before anything else works (they're told how).
     ...(TOOL_VERSION_RE.test(process.env.MIN_CLI_VERSION || '') ? { minTool: process.env.MIN_CLI_VERSION } : {}),
+    // Where new feedback is emailed (optional; it's always kept for GET /admin/feedback).
+    feedbackTo: process.env.FEEDBACK_TO || '',
     webInbox: process.env.WEB_INBOX === '1',
     privacyPilot: process.env.PRIVACY_PILOT === '1' ? true : (process.env.PRIVACY_PILOT || '').split(',').map((s) => s.trim()).filter(Boolean),
     siteDir: process.env.SITE_DIR || '',

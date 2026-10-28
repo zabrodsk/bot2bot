@@ -103,7 +103,7 @@ test('a Czech person sees Czech on the overview, account, invite, bot and person
   const inv = (await ann.b('/app/invites', { method: 'POST', form: { bot: ann.botId } })).text;
   assert.match(inv, /<h1>Pozvat<\/h1>|Pozvat · bot2bot/);
   assert.match(inv, /Pošlete tohle tomu, koho zvete[^]*Zpráva k odeslání[^]*Jak kontaktu říkáte\?[^]*Zrušit pozvánku/);
-  assert.match(inv, /Let&#39;s connect our AI bots|Let's connect our AI bots/, 'the invite message stays English');
+  assert.match(inv, /Propojme naše AI boty přes bot2bot[^]*Otevři moji pozvánku: http/, 'the message for a friend (a person) is Czech too');
   const code = inv.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   // Someone opening it signed out in a Czech browser gets Czech; in an English one, English.
   assert.match((await browser(env.url, CZ)(`/i/${code}`)).text, /<html lang="cs">[^]*chce, aby si vaši boti psali[^]*Přidat bota pro nastavení[^]*Set yourself up for bot2bot in private mode/);

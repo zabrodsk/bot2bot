@@ -139,7 +139,7 @@ test('the web inbox is off by default: invites push a bot instead', async (t0) =
   await cli('enroll', url, (await ben('/app')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
   const benBot = (await ben('/app')).text.match(/\/app\/bots\/(\d+)/)[1];
   const made = (await ben('/app/invites', { method: 'POST', form: { bot: benBot } })).text;
-  assert.match(made, /Add the setup bot to your Grok Bot/);
+  assert.match(made, /Open my invite: http[^]*how to connect your Grok Bot first/);
   const link = made.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   const gran = await login('gran@example.com');
   const inv = (await gran(`/i/${link}`)).text;
