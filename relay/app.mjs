@@ -1,6 +1,7 @@
 // The human side of b2b: accounts (email code login), a dashboard, self-serve bot setup,
 // doorbell setup with a live test, and invite links. Server-rendered HTML, zero dependencies.
 import { CONNECTOR_DOORBELL, ENCRYPTION_MESSAGE, safeText } from './connector.mjs';
+import { nextQuestion, QUESTION_BY_ID } from './feedback-questions.mjs';
 import { loginEmail } from './email.mjs';
 import { t as translator, langFromHeader, normLang } from './i18n.mjs';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
@@ -58,6 +59,9 @@ export function migrateApp(db) {
   addColumn('users', 'seen_update', 'TEXT');
   addColumn('users', 'lang', 'TEXT');
   addColumn('users', 'feedback_asked_at', 'INTEGER');
+  addColumn('users', 'feedback_questions', 'TEXT'); // JSON list of the feature questions already asked
+  addColumn('feedback', 'question', 'TEXT');
+  addColumn('feedback', 'answer', 'INTEGER');
   addColumn('users', 'quiet_on', 'INTEGER NOT NULL DEFAULT 1');
   addColumn('users', 'quiet_start', 'INTEGER NOT NULL DEFAULT 1320');
   addColumn('users', 'quiet_end', 'INTEGER NOT NULL DEFAULT 480');
@@ -116,7 +120,7 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
-  const { events = null, latestUpdate = null, feedbackTo = '', renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { events = null, latestUpdate = null, feedbackTo = '', renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -161,7 +165,7 @@ export function createApp(ctx) {
     const place = (key, href, label) => `<a class="tabs__item" href="${href}"${tab === key ? ' aria-current="page"' : ''}>${label}</a>`;
     const gov = govBots(user).length > 0;
     const waiting = gov ? pendingFor(user) : 0;
-    const nav = `<nav class="tabs" aria-label="${tr('Main')}"><span class="tabs__sel" aria-hidden="true"></span>${place('home', '/app', tr('Overview'))}${gov ? place('people', '/app/people', tr('People')) + place('requests', '/app/requests', `${tr('Requests')}${waiting ? `<span class="tabs__count" aria-hidden="true">${waiting}</span><span class="sr"> (${tr('{n} waiting', { n: waiting })})</span>` : ''}`) : ''}${place('activity', '/app/activity', tr('Activity'))}${hasWeb ? place('inbox', '/app/inbox', tr('Inbox')) : ''}${place('account', '/app/account', tr('Account'))}${hosted ? place('plan', '/app/billing', tr('Plan')) : ''}</nav>`;
+    const nav = `<nav class="tabs" aria-label="${tr('Main')}"><span class="tabs__sel" aria-hidden="true"></span>${place('home', '/app', tr('Overview'))}${gov ? place('people', '/app/people', tr('People')) : ''}${place('activity', '/app/activity', tr('Activity'))}${hasWeb ? place('inbox', '/app/inbox', tr('Inbox')) : ''}${place('account', '/app/account', tr('Account'))}${hosted ? place('plan', '/app/billing', tr('Plan')) : ''}</nav>`;
     const planState_ = hosted ? allowance(user).state : '';
     const planName = hosted ? { paid: tr('Paid'), covered: tr('Covered'), infinite: 'Infinite' }[planState_] || tr('Free') : '';
     const face = avatar(user.name || user.email, 'md', photoUrl(user.id, user.photo_at, user.avatar));
@@ -196,14 +200,44 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});d.showModal();})()
   const feedbackDue = (user) => !!user && hasPicture(user) && clock() - user.created_at >= FEEDBACK_AFTER_MS
     && clock() - (user.feedback_asked_at || 0) >= FEEDBACK_EVERY_MS
     && !!q('SELECT 1 FROM contacts c JOIN bots b ON b.id = c.owner_bot WHERE b.user_id = ? AND c.approved_at IS NOT NULL LIMIT 1').get(user.id);
-  const feedbackFields = (tr, { rating = '', text = '' } = {}) => `<fieldset class="rate"><legend class="rate__legend">${tr('How is bot2bot working for you?')}</legend><div class="rate__opts">
-${[[3, tr('Love it')], [2, tr('It&#39;s okay')], [1, tr('Not great')]].map(([v, l]) => `<label class="rate__opt"><input type="radio" name="rating" value="${v}"${String(rating) === String(v) ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div></fieldset>
+  // What this person uses, for picking a question about something they know.
+  const feedbackContext = (user) => {
+    const ids = myBots(user).map((b) => b.id), ph = ids.map(() => '?').join(',') || 'NULL';
+    const n = (sql, ...a) => q(sql).get(...a).n;
+    return {
+      bots: ids.length, lang: user.lang === 'cs' ? 'cs' : 'en', quiet: !!(user.quiet_on && user.tz), sawUpdate: !!user.seen_update,
+      freePlan: hosted && allowance(user).state === 'free',
+      doorbell: !!n(`SELECT count(*) AS n FROM bots WHERE id IN (${ph}) AND doorbell_verified_at IS NOT NULL`, ...ids),
+      contacts: n(`SELECT count(*) AS n FROM contacts WHERE owner_bot IN (${ph}) AND approved_at IS NOT NULL`, ...ids),
+      sorted: n(`SELECT count(*) AS n FROM contacts WHERE owner_bot IN (${ph}) AND circle_id IS NOT NULL`, ...ids),
+      received: n(`SELECT count(*) AS n FROM messages WHERE to_bot IN (${ph}) AND kind != 'probe'`, ...ids),
+      invited: n(`SELECT count(*) AS n FROM invites WHERE from_bot IN (${ph})`, ...ids),
+      asked: n(`SELECT count(*) AS n FROM contacts WHERE owner_bot IN (${ph}) AND mode_override = 'asks'`, ...ids),
+    };
+  };
+  const askedQuestions = (user) => { try { return JSON.parse(user.feedback_questions || '[]'); } catch { return []; } };
+  const questionFor = (user) => nextQuestion(feedbackContext(user), askedQuestions(user), user.id);
+  const markAsked = (user, id) => { const was = askedQuestions(user); if (id && !was.includes(id)) { user.feedback_questions = JSON.stringify([...was, id]); q('UPDATE users SET feedback_questions = ? WHERE id = ?').run(user.feedback_questions, user.id); } };
+  // A small mark pops up from the option you pick: a pink heart, a smile, a little cloud.
+  const RATE_MARK = {
+    3: '<svg class="rate__mark rate__mark--love" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.3C.9 8.3 3 4.5 6.7 4.5c2 0 3.6 1.1 5.3 3.1 1.7-2 3.3-3.1 5.3-3.1 3.7 0 5.8 3.8 4.3 7.2C19.5 16.4 12 21 12 21Z"/></svg>',
+    2: '<svg class="rate__mark rate__mark--okay" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle class="rate__eye" cx="8.6" cy="10" r="1.3"/><circle class="rate__eye" cx="15.4" cy="10" r="1.3"/><path class="rate__mouth" d="M8.2 14.6c2.3 1.8 5.3 1.8 7.6 0"/></svg>',
+    1: '<svg class="rate__mark rate__mark--meh" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18.5h10.2a4.3 4.3 0 0 0 .6-8.6A6 6 0 0 0 6.3 11 3.8 3.8 0 0 0 7 18.5Z"/></svg>',
+  };
+  const choice = (name, opts, picked) => `<div class="rate__opts">${opts.map(([v, l]) => `<label class="rate__opt"><input type="radio" name="${name}" value="${v}"${String(picked) === String(v) ? ' checked' : ''}><span>${name === 'rating' ? RATE_MARK[v] : ''}${l}</span></label>`).join('')}</div>`;
+  // One general question, then one about a single part of bot2bot they use, then room for anything else.
+  const feedbackFields = (tr, { rating = '', text = '', question = null } = {}) => `<fieldset class="rate"><legend class="rate__legend">${tr('How is bot2bot working for you?')}</legend>
+${choice('rating', [[3, tr('Love it')], [2, tr('It&#39;s okay')], [1, tr('Not great')]], rating)}</fieldset>
+${question ? `<fieldset class="rate"><input type="hidden" name="question" value="${esc(question.id)}"><legend class="rate__legend">${esc(tr.lang === 'cs' ? question.cs : question.en)}</legend>
+${choice('answer', [[3, tr('Yes')], [2, tr('Mostly')], [1, tr('No')]], '')}</fieldset>` : ''}
 <label class="field">${tr('What would make it better?')}<textarea name="text" maxlength="2000" rows="4" placeholder="${tr('Anything at all. We read every message.')}">${esc(text)}</textarea></label>`;
   // Arc dialog, asked once (it counts as asked when it shows). Send stores it; Not now just closes.
   const feedbackDialog = (user, tr) => {
     q('UPDATE users SET feedback_asked_at = ? WHERE id = ?').run(clock(), user.id);
+    const question = questionFor(user);
+    markAsked(user, question?.id);
     return `<dialog class="dlg" id="feedback" aria-labelledby="fb-h"><form method="post" action="/app/feedback" class="dlg__in"><input type="hidden" name="via" value="popup">
-<h2 id="fb-h" class="dlg__title">${tr('Got a minute?')}</h2>${feedbackFields(tr)}
+<h2 id="fb-h" class="dlg__title">${tr('Got a minute?')}</h2>${feedbackFields(tr, { question })}
 <div class="dlg__foot"><button type="button" class="btn ghost" data-close>${tr('Not now')}</button><button class="btn">${tr('Send')}</button></div></form></dialog>
 <script>(()=>{const d=document.getElementById('feedback');if(!d||!d.showModal)return;d.querySelector('[data-close]').addEventListener('click',()=>d.close());
 d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.showModal(),1200);})();</script>`;
@@ -212,7 +246,7 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
   const art = (name, cls = '') => ART.has(name) ? `<div class="art ${cls}"><img src="/art/${name}.jpg" alt="" width="${name === 'asleep' ? 800 : name === 'home' ? 1536 : 1200}" height="${name === 'asleep' ? 800 : name === 'home' ? 864 : 800}" decoding="async"></div>` : '';
   const setupBot = setupBotUrl;
   // With the landing site on this server, its legal pages are one link away from every dashboard page.
-  const legal = (tr) => `<footer class="legal"><a href="/privacy/">${tr('Privacy')}</a><a href="/terms/">${tr('Terms')}</a><a href="/cookies/">${tr('Cookies')}</a><a href="/legal/">${tr('Legal notice')}</a><a href="/changelog/">${tr('What&#39;s new')}</a></footer>`;
+  const legal = (tr) => `<footer class="legal"><a href="/privacy/">${tr('Privacy')}</a><a href="/terms/">${tr('Terms')}</a><a href="/cookies/">${tr('Cookies')}</a><a href="/legal/">${tr('Legal notice')}</a><a href="/changelog/">${tr('What&#39;s new')}</a><a href="/app/feedback">${tr('Send feedback')}</a></footer>`;
   const page = (res, status, html, headers = {}) => { res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin', ...headers }); res.end(html); };
   const redirect = (res, to) => { res.writeHead(303, { location: to, 'cache-control': 'no-store' }); res.end(); };
   const json = (res, status, data) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); };
@@ -604,7 +638,7 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: tr('Remove'
       paused ? alertBox('info', tr('Everything is paused'), tr("Your bot won't be woken and can't send. Messages from friends wait here for up to 7 days."), `<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">${tr('Resume')}</button></form>`) : '',
       plan.alert,
       ...aiBots.filter((b) => toolOf(b)?.old).map((b) => alertBox('warning', tr('@{handle} runs an old bot2bot tool', { handle: esc(b.handle) }), tr('One message to your bot fixes it. After that, it updates itself.'), `<a class="btn small" href="/app/bots/${b.id}#update">${tr('Show the message')}</a>`)),
-      waiting ? alertBox('info', waiting === 1 ? tr('Your bot needs your okay') : tr('Your bot needs your okay on {n} things', { n: waiting }), tr('A reply or a change is waiting for you.'), `<a class="btn small" href="/app/requests">${tr('See what it is')}</a>`) : '',
+      // Okays happen in the bot's chat now, so nothing waits for you here.
       pending ? `<section class="card"><div class="card__head"><h2>${tr('Connect @{handle}', { handle: esc(pending.handle) })}</h2>${badge(tr('Private mode'), 'info')}</div>${waitingForBot(tr, { plain: pending.plain_code }, bots.length)}</section>` : '',
       ...requests.map((c) => alertBox('warning', tr('Did you mean to connect with {name}?', { name: person(c) }),
         tr('Your bot {mine} paired with <b>{name}</b> ({theirs}) {verified}. Nothing can be sent either way until you say yes.', { mine: `<span class="handle">@${esc(c.my_handle)}</span>`, name: person(c), theirs: `<span class="handle">@${esc(c.handle)}</span>`, verified: verifiedPill(c.email_verified_at, tr) }),
@@ -633,10 +667,54 @@ ${plan.meter}
   }
 
   // Recent messages, newest first.
+  // Statistics for the last 30 days: a KPI row, messages per day (sent and received), and who you talk to most.
+  // Counts only what the relay knows (who, when, delivered); never message text.
+  function activityStats(user, tr) {
+    const ids = myBots(user).map((b) => b.id);
+    if (!ids.length) return '';
+    const ph = ids.map(() => '?').join(','), now = clock(), DAY = 86_400_000, since = now - 30 * DAY;
+    const msgs = q(`SELECT from_bot, to_bot, created_at, delivered_at, status FROM messages WHERE (from_bot IN (${ph}) OR to_bot IN (${ph})) AND kind != 'probe' AND created_at >= ?`).all(...ids, ...ids, since);
+    if (!msgs.length) return '';
+    const mine = new Set(ids);
+    const sent = msgs.filter((m) => mine.has(m.from_bot)), got = msgs.filter((m) => mine.has(m.to_bot) && !mine.has(m.from_bot));
+    const friends = q(`SELECT count(*) AS n FROM contacts WHERE owner_bot IN (${ph}) AND approved_at IS NOT NULL`).get(...ids).n;
+    const waits = sent.filter((m) => m.delivered_at).map((m) => m.delivered_at - m.created_at).sort((a, b) => a - b);
+    const median = waits.length ? waits[Math.floor(waits.length / 2)] : null;
+    const dur = (ms) => (ms < 60_000 ? tr('{n} s', { n: Math.max(1, Math.round(ms / 1000)) }) : ms < 3_600_000 ? tr('{n} min', { n: Math.round(ms / 60_000) }) : tr('{n} h', { n: Math.round(ms / 3_600_000) }));
+    const tile = (label, value, note) => `<div class="kpi"><p class="kpi__label">${label}</p><p class="kpi__value">${value}</p><p class="kpi__note">${note}</p></div>`;
+    const kpis = `<div class="kpis">${tile(tr('Sent'), sent.length, tr('last 30 days'))}${tile(tr('Received'), got.length, tr('last 30 days'))}${tile(tr('Friends'), friends, tr('connected'))}${tile(tr('Delivered in'), median == null ? '·' : dur(median), tr('typical time'))}</div>`;
+    // Messages per day, 14 days: two thin bars a day, sent and received, one scale, a hover tooltip and a table view.
+    const days = Array.from({ length: 14 }, (_, i) => { const d = new Date(now - (13 - i) * DAY); d.setUTCHours(0, 0, 0, 0); return d.getTime(); });
+    const bucket = (list) => days.map((d) => list.filter((m) => m.created_at >= d && m.created_at < d + DAY).length);
+    const S = bucket(sent), R = bucket(got), max = Math.max(1, ...S, ...R);
+    const step = max <= 4 ? 1 : max <= 10 ? 2 : Math.ceil(max / 4);
+    const top = Math.ceil(max / step) * step;
+    const W = 700, H = 200, padL = 28, padB = 26, plotH = H - padB - 8, colW = (W - padL) / 14, barW = Math.min(14, (colW - 10) / 2);
+    const y = (v) => 8 + plotH - (v / top) * plotH;
+    const bar = (x, v, cls) => { if (!v) return ''; const h = (v / top) * plotH, r = Math.min(4, h, barW / 2), y0 = 8 + plotH; return `<path class="${cls}" d="M${x} ${y0}V${y0 - h + r}a${r} ${r} 0 0 1 ${r}-${r}h${barW - 2 * r}a${r} ${r} 0 0 1 ${r} ${r}V${y0}Z"/>`; };
+    const day = (ms) => new Date(ms).toLocaleDateString(tr.lang === 'cs' ? 'cs-CZ' : 'en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+    const grid = Array.from({ length: top / step + 1 }, (_, i) => i * step).map((v) => `<line class="viz__grid" x1="${padL}" x2="${W}" y1="${y(v)}" y2="${y(v)}"/><text class="viz__tick" x="${padL - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('');
+    const cols = days.map((d, i) => { const x = padL + i * colW + (colW - 2 * barW - 2) / 2;
+      return `<g class="viz__col" data-tip="${esc(`${day(d)} · ${tr('Sent')} ${S[i]} · ${tr('Received')} ${R[i]}`)}"><rect class="viz__hit" x="${padL + i * colW}" y="0" width="${colW}" height="${H - padB}"/>${bar(x, S[i], 'viz__s1')}${bar(x + barW + 2, R[i], 'viz__s2')}${i % 2 === 1 || i === 13 ? `<text class="viz__tick" x="${padL + i * colW + colW / 2}" y="${H - 8}" text-anchor="middle">${esc(day(d))}</text>` : ''}</g>`; }).join('');
+    const chart = `<figure class="viz" aria-labelledby="viz-h"><figcaption class="viz__head"><h3 id="viz-h">${tr('Messages per day')}</h3>
+<ul class="viz__legend"><li><span class="viz__sw viz__s1"></span>${tr('Sent')}</li><li><span class="viz__sw viz__s2"></span>${tr('Received')}</li></ul></figcaption>
+<div class="viz__plot"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(tr('Messages per day, last 14 days'))}">${grid}<line class="viz__base" x1="${padL}" x2="${W}" y1="${8 + plotH}" y2="${8 + plotH}"/>${cols}</svg><div class="viz__tip" role="status" hidden></div></div>
+<details class="viz__table"><summary>${tr('Show as a table')}</summary><table><thead><tr><th>${tr('Day')}</th><th>${tr('Sent')}</th><th>${tr('Received')}</th></tr></thead><tbody>${days.map((d, i) => `<tr><td>${esc(day(d))}</td><td>${S[i]}</td><td>${R[i]}</td></tr>`).join('')}</tbody></table></details></figure>`;
+    // Who you talk to most: one series, the name and the count on each bar.
+    const names = new Map(q(`SELECT owner_bot, peer_bot, alias FROM contacts WHERE owner_bot IN (${ph})`).all(...ids).map((c) => [c.peer_bot, c.alias]));
+    const counts = new Map();
+    for (const m of msgs) { const peer = mine.has(m.from_bot) ? m.to_bot : m.from_bot; if (names.has(peer)) counts.set(peer, (counts.get(peer) || 0) + 1); }
+    const ranked = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 5), most = ranked[0]?.[1] || 1;
+    const people = ranked.length ? `<figure class="viz"><figcaption class="viz__head"><h3>${tr('Who you talk to most')}</h3></figcaption><ul class="hbars">${ranked.map(([peer, n]) => `<li><span class="hbars__name">${esc(names.get(peer))}</span><span class="hbars__track"><span class="hbars__bar" style="width:${Math.max(4, Math.round((n / most) * 100))}%"></span></span><span class="hbars__n">${n}</span></li>`).join('')}</ul></figure>` : '';
+    return `<section class="group" aria-labelledby="stats-h"><div class="group__head"><h2 id="stats-h">${tr('Last 30 days')}</h2></div>${kpis}<div class="card">${chart}</div>${people ? `<div class="card">${people}</div>` : ''}</section>
+<script>(()=>{const p=document.querySelector('.viz__plot');if(!p)return;const t=p.querySelector('.viz__tip');
+p.querySelectorAll('.viz__col').forEach((g)=>{const show=(e)=>{t.textContent=g.dataset.tip;t.hidden=false;const r=p.getBoundingClientRect(),b=g.getBoundingClientRect();t.style.left=Math.min(r.width-t.offsetWidth,Math.max(0,b.left-r.left+b.width/2-t.offsetWidth/2))+'px';g.classList.add('on');};
+g.addEventListener('pointerenter',show);g.addEventListener('pointerleave',()=>{t.hidden=true;g.classList.remove('on');});});})();</script>`;
+  }
   function activityPage(user) {
     const tr = T(user);
     const t = activityTable(user, 30, tr);
-    return layout(tr('Activity'), `${t.n ? `<section class="group" aria-labelledby="msgs-h"><div class="group__head"><h2 id="msgs-h" class="sr">${tr('Messages')}</h2>
+    return layout(tr('Activity'), `${activityStats(user, tr)}${t.n ? `<section class="group" aria-labelledby="msgs-h"><div class="group__head"><h2 id="msgs-h" class="sr">${tr('Messages')}</h2>
 <div class="seg" role="group" aria-label="${tr('Show')}" data-for="#msgs"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span><button type="button" aria-pressed="true" data-filter="all">${tr('All')}</button><button type="button" aria-pressed="false" data-filter="in">${tr('From friends')}</button><button type="button" aria-pressed="false" data-filter="out">${tr('From you')}</button></div></div></div><div class="card card--list" id="msgs">${t.html}</div></section>
 ${refreshNote(tr)}<script>${REFRESH_JS}</script>`
   : `<section class="card">${emptyState('activity', tr('Nothing yet'), tr('Messages your bots send and receive show up here. Ask your bot to message a friend: "Tell Anna I\'m on my way".'))}</section>`}`, { user, tab: 'activity', bar: { title: tr('Activity'), sub: tr('What your bots sent and received') } });
@@ -778,8 +856,8 @@ ${codeBlock('wmsg', tr('Say this to OpenClaw'), WATCH_MESSAGE, tr)}`}
 <script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
 ${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell'), tr('Test the doorbell')], 1, 'h', tr)}<h2>${tr('Turn on the doorbell')}</h2>
-${b.vendor === 'connector' ? `<p>${tr("Your bot needs a routine called <b>“b2b doorbell”</b>, so friends can wake it. Paste this into your bot's chat:")}</p>
-${codeBlock('dmsg', msgFor, CONNECTOR_DOORBELL, tr)}` : `<p>${tr('Your bot made a routine called <b>“b2b doorbell”</b>. It lets friends wake your bot.')}</p>`}
+<p>${tr("Your bot needs a routine called <b>“b2b doorbell”</b>, so friends can wake it. If it isn't under <b>Routines</b> yet, paste this into your bot's chat:")}</p>
+${codeBlock('dmsg', msgFor, b.vendor === 'connector' ? CONNECTOR_DOORBELL : `Make a routine called "b2b doorbell" with a webhook trigger and this exact instruction: "${privateDoorbell()}" Don't print any keys in this chat.`, tr)}
 <ol class="howto"><li>${tr("In the Grok Bot app on a computer (phones don't show the webhook), open your bot's details and find <b>Routines</b>.")}</li><li>${tr('Right-click <b>b2b doorbell</b> and choose <b>Webhook</b>.')}</li><li>${tr('Copy the address and the key into the boxes below.')}</li></ol>
 <form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
 <label>${tr('Webhook address')}<input name="url" required placeholder="https://api2.cursor.sh/automations/webhook/…" autocomplete="off"></label>
@@ -1903,18 +1981,21 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return true;
       }
       if (p === '/app/feedback' && req.method === 'GET') {
-        return page(res, 200, layout(tr('Send feedback'), `<section class="card"><form method="post" action="/app/feedback" class="stack" style="margin:0"><input type="hidden" name="via" value="page">${feedbackFields(tr)}
+        return page(res, 200, layout(tr('Send feedback'), `<section class="card"><form method="post" action="/app/feedback" class="stack" style="margin:0"><input type="hidden" name="via" value="page">${feedbackFields(tr, { question: questionFor(user) })}
 <div><button class="btn">${tr('Send')}</button></div></form></section>`, { user, tr, width: 'read', bar: { back: '/app', title: tr('Send feedback'), sub: tr("Tell us what works, what doesn't, and what you wish it did.") } })), true;
       }
       if (p === '/app/feedback' && req.method === 'POST') {
         const f = await form(req);
         const text = String(f.text ?? '').normalize('NFC').trim().slice(0, 2000);
         const rating = [1, 2, 3].includes(Number(f.rating)) ? Number(f.rating) : null;
-        if (!text && !rating) { tell(user, { what: tr('Nothing to send yet') }); return redirect(res, f.via === 'page' ? '/app/feedback' : '/app'), true; }
-        q('INSERT INTO feedback (user_id, rating, text, via, lang, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(user.id, rating, text, f.via === 'popup' ? 'popup' : 'page', tr.lang, clock());
+        const question = QUESTION_BY_ID.get(String(f.question || '')) ?? null;
+        const answer = question && [1, 2, 3].includes(Number(f.answer)) ? Number(f.answer) : null;
+        if (!text && !rating && !answer) { tell(user, { what: tr('Nothing to send yet') }); return redirect(res, f.via === 'page' ? '/app/feedback' : '/app'), true; }
+        q('INSERT INTO feedback (user_id, rating, text, via, lang, created_at, question, answer) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(user.id, rating, text, f.via === 'popup' ? 'popup' : 'page', tr.lang, clock(), answer ? question.id : null, answer);
         q('UPDATE users SET feedback_asked_at = ? WHERE id = ?').run(clock(), user.id);
+        markAsked(user, question?.id);
         log(null, 'feedback', { user: user.id, rating });
-        if (feedbackTo) mailer({ to: feedbackTo, subject: `bot2bot feedback${rating ? ` (${['', 'not great', 'okay', 'love it'][rating]})` : ''}`, text: `From ${user.name} <${user.email}>\n\n${text || '(no text)'}` }).catch(() => {});
+        if (feedbackTo) mailer({ to: feedbackTo, subject: `bot2bot feedback${rating ? ` (${['', 'not great', 'okay', 'love it'][rating]})` : ''}`, text: `From ${user.name} <${user.email}>\n\n${answer ? `${question.en} ${['', 'No', 'Mostly', 'Yes'][answer]}\n\n` : ''}${text || '(no text)'}` }).catch(() => {});
         tell(user, { what: tr('Thanks! We read every message.') });
         return redirect(res, '/app'), true;
       }
@@ -2526,8 +2607,30 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .rate__opts{display:flex;flex-wrap:wrap;gap:6px;padding:3px;border-radius:999px;background:color-mix(in oklab,var(--foreground) 5%,transparent);width:max-content;max-width:100%}
 .rate__opt{display:block;font-weight:500}.rate__opt input{position:absolute;opacity:0;pointer-events:none}
 .rate__opt span{display:inline-flex;align-items:center;min-height:32px;padding:0 14px;border-radius:999px;color:var(--text-secondary);cursor:pointer;transition:background-color var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard)}
-.rate__opt input:checked+span{background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-resting),0 0 0 .5px color-mix(in oklab,var(--foreground) 8%,transparent)}
+.rate__opt input:checked+span{background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-resting),0 0 0 .5px color-mix(in oklab,var(--foreground) 8%,transparent);animation:rate-pick 360ms var(--ease-spring)}
+.rate__mark{flex:none;width:0;height:16px;margin-right:0;opacity:0;transform:scale(.3);transition:width 260ms var(--ease-spring),margin-right 260ms var(--ease-spring)}
+.rate__mark--love{fill:#ff4d8d}.rate__mark--okay{fill:#ffc53d}.rate__mark--okay .rate__eye{fill:#5c3b00}.rate__mark--okay .rate__mouth{fill:none;stroke:#5c3b00;stroke-width:1.6;stroke-linecap:round}.rate__mark--meh{fill:#9aa7bb}
+.rate__opt input:checked+span .rate__mark{width:16px;margin-right:6px;animation:rate-pop 520ms var(--ease-spring) 60ms both}
+.rate__opt input:checked+span .rate__mark--love{animation:rate-pop 520ms var(--ease-spring) 60ms both,rate-beat 900ms ease-in-out 620ms 2}
+.rate__opt input:checked+span .rate__mark--meh{animation:rate-pop 520ms var(--ease-spring) 60ms both,rate-sway 1400ms ease-in-out 600ms 1}
+@keyframes rate-pick{40%{transform:scale(1.05)}}
+@keyframes rate-pop{0%{opacity:0;transform:scale(.3) rotate(-12deg)}60%{opacity:1;transform:scale(1.25) rotate(4deg)}100%{opacity:1;transform:scale(1) rotate(0)}}
+@keyframes rate-beat{0%,100%{transform:scale(1)}25%{transform:scale(1.2)}45%{transform:scale(.96)}65%{transform:scale(1.12)}}
+@keyframes rate-sway{0%,100%{transform:translateX(0)}50%{transform:translateX(2px)}}
+@media (prefers-reduced-motion:reduce){.rate__opt input:checked+span,.rate__opt input:checked+span .rate__mark{animation:none;opacity:1;transform:none}}
 .rate__opt input:focus-visible+span{outline:2px solid color-mix(in oklab,var(--accent) 72%,transparent);outline-offset:2px}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}@media(max-width:640px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-panel);padding:14px 16px}.kpi p{margin:0}
+.kpi__label{color:var(--text-secondary);font-size:var(--text-xs);font-weight:500}.kpi__value{font:500 var(--text-2xl)/1.15 var(--font-display);letter-spacing:var(--tracking-display);font-variant-numeric:tabular-nums;margin:4px 0 2px!important}.kpi__note{color:var(--text-muted);font-size:var(--text-xs)}
+.viz{margin:0;display:grid;gap:12px;--s1:#2747c9;--s2:#eb6834}.viz__head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}.viz__head h3{font-size:var(--text-sm);font-weight:500}
+.viz__legend{display:flex;gap:14px;margin:0;padding:0;list-style:none;color:var(--text-secondary);font-size:var(--text-xs)}.viz__legend li{display:flex;align-items:center;gap:6px}.viz__sw{width:10px;height:10px;border-radius:3px}
+.viz__sw.viz__s1{background:var(--s1)}.viz__sw.viz__s2{background:var(--s2)}path.viz__s1{fill:var(--s1)}path.viz__s2{fill:var(--s2)}
+.viz__plot{position:relative}.viz__plot svg{display:block;width:100%;height:auto;overflow:visible}.viz__grid{stroke:var(--border-subtle);stroke-width:1}.viz__base{stroke:var(--border-strong);stroke-width:1}
+.viz__tick{fill:var(--text-muted);font-size:11px;font-variant-numeric:tabular-nums}.viz__hit{fill:transparent}.viz__col.on .viz__hit{fill:color-mix(in oklab,var(--foreground) 4%,transparent)}
+.viz__tip{position:absolute;top:-30px;padding:6px 10px;border-radius:10px;background:var(--foreground);color:var(--background);font-size:var(--text-xs);font-weight:500;white-space:nowrap;pointer-events:none;box-shadow:var(--shadow-floating)}
+.viz__table summary{color:var(--text-secondary);font-size:var(--text-xs);cursor:pointer}.viz__table table{margin-top:8px;border-collapse:collapse;font-size:var(--text-xs);font-variant-numeric:tabular-nums}.viz__table th,.viz__table td{padding:4px 14px 4px 0;text-align:left}.viz__table th{color:var(--text-secondary);font-weight:500}
+.hbars{margin:0;padding:0;list-style:none;display:grid;gap:10px}.hbars li{display:grid;grid-template-columns:minmax(80px,140px) 1fr 32px;align-items:center;gap:12px}
+.hbars__name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hbars__track{height:10px}.hbars__bar{display:block;height:100%;border-radius:0 4px 4px 0;background:var(--s1)}.hbars__n{text-align:right;color:var(--text-secondary);font-variant-numeric:tabular-nums}
 .pfp{display:grid;gap:24px}.pfp__name{max-width:360px;width:100%;justify-self:center}.setrow>.grow{flex:1;min-width:0}.pfp__head{display:grid;justify-items:center;gap:8px;text-align:center}.pfp__head h1{margin:10px 0 0}
 .pfp__face{display:block;width:112px;height:112px;border:6px solid #fff;border-radius:var(--radius-pill);overflow:hidden;background:var(--surface-muted);filter:drop-shadow(0 1px 1px rgb(0 0 0 / .08)) drop-shadow(0 8px 14px rgb(0 0 0 / .1))}
 .pfp__face svg,.pfp__face img{display:block;width:100%;height:100%;object-fit:cover}

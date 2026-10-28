@@ -139,6 +139,8 @@ export function openDb(path) {
       code_hash TEXT PRIMARY KEY, handle TEXT NOT NULL, display_name TEXT NOT NULL,
       expires_at INTEGER NOT NULL, used_at INTEGER, reissue INTEGER NOT NULL DEFAULT 0
     );
+    -- Anonymous daily counts (no people, no content), kept for good even when message rows go.
+    CREATE TABLE IF NOT EXISTS telemetry (day TEXT NOT NULL, metric TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (day, metric));
     CREATE TABLE IF NOT EXISTS invites (
       code_hash TEXT PRIMARY KEY, from_bot INTEGER NOT NULL REFERENCES bots(id),
       alias TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, used_by INTEGER
@@ -470,6 +472,30 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     } finally { inflight.delete(bot.id); }
   }
 
+  // Telemetry: anonymous counts per UTC day (today and the two days before, so late deliveries land), written
+  // over again each time, so the numbers stay when message text and, one day, message rows are deleted.
+  function telemetryRollup(t) {
+    const tables = new Set(q("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
+    for (let back = 0; back < 3; back++) {
+      const start = Math.floor(t / 86_400_000) * 86_400_000 - back * 86_400_000, end = start + 86_400_000;
+      const day = new Date(start).toISOString().slice(0, 10);
+      const n = (sql) => q(sql).get(start, end).n;
+      const metrics = {
+        messages_sent: n("SELECT count(*) AS n FROM messages WHERE kind != 'probe' AND created_at >= ? AND created_at < ?"),
+        messages_delivered: n("SELECT count(*) AS n FROM messages WHERE kind != 'probe' AND delivered_at >= ? AND delivered_at < ?"),
+        bots_active: n("SELECT count(DISTINCT from_bot) AS n FROM messages WHERE kind != 'probe' AND created_at >= ? AND created_at < ?"),
+        bots_new: n('SELECT count(*) AS n FROM bots WHERE created_at >= ? AND created_at < ?'),
+        contacts_new: n('SELECT count(*) AS n FROM contacts WHERE approved_at >= ? AND approved_at < ?'),
+        ...(tables.has('users') ? { users_new: n('SELECT count(*) AS n FROM users WHERE created_at >= ? AND created_at < ?') } : {}),
+        ...(tables.has('feedback') ? { feedback: n('SELECT count(*) AS n FROM feedback WHERE created_at >= ? AND created_at < ?') } : {}),
+      };
+      if (back === 0) {
+        metrics.bots_live = q('SELECT count(*) AS n FROM bots WHERE disconnected_at IS NULL AND user_id IS NOT NULL').get().n;
+        if (tables.has('users')) metrics.users_total = q('SELECT count(*) AS n FROM users').get().n;
+      }
+      for (const [k, v] of Object.entries(metrics)) q('INSERT INTO telemetry (day, metric, n) VALUES (?, ?, ?) ON CONFLICT(day, metric) DO UPDATE SET n = excluded.n').run(day, k, v);
+    }
+  }
   // Privacy: delete message text a week after delivery, expire undelivered mail, trim old logs.
   let lastRetention = 0;
   function retention(t) {
@@ -482,6 +508,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     if (expired.changes) log(null, 'expired', { count: Number(expired.changes) });
     q("DELETE FROM messages WHERE kind = 'probe' AND created_at < ?").run(t - L.probeTtlMs);
     erase(`body_purged_at IS NULL AND (status = 'dropped' OR (status = 'delivered' AND delivered_at < ?))`, t - L.bodyRetentionMs);
+    telemetryRollup(t);
     q('DELETE FROM events WHERE ts < ?').run(t - L.metadataRetentionMs);
     q('DELETE FROM sessions WHERE expires_at < ?').run(t);
     q('DELETE FROM login_codes WHERE expires_at < ?').run(t - 86_400_000);
@@ -685,9 +712,16 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
       const rows = q('SELECT e.*, b.handle FROM events e LEFT JOIN bots b ON b.id = e.bot WHERE e.id > ? ORDER BY e.id LIMIT 500').all(since);
       return { events: rows.map((r) => ({ id: r.id, ts: iso(r.ts), handle: r.handle, kind: r.kind, detail: JSON.parse(r.detail || '{}') })) };
     },
+    'GET /admin/stats': ({ admin }) => {
+      if (!admin) throw new HttpError(401, 'admin token required');
+      telemetryRollup(clock());
+      const days = {};
+      for (const r of q('SELECT day, metric, n FROM telemetry WHERE day >= ? ORDER BY day').all(new Date(clock() - 90 * 86_400_000).toISOString().slice(0, 10))) (days[r.day] ??= {})[r.metric] = r.n;
+      return { days };
+    },
     'GET /admin/feedback': ({ admin }) => {
       if (!admin) throw new HttpError(401, 'admin token required');
-      return { feedback: q('SELECT f.id, f.rating, f.text, f.via, f.lang, f.created_at, u.name, u.email FROM feedback f LEFT JOIN users u ON u.id = f.user_id ORDER BY f.created_at DESC LIMIT 200').all()
+      return { feedback: q('SELECT f.id, f.rating, f.question, f.answer, f.text, f.via, f.lang, f.created_at, u.name, u.email FROM feedback f LEFT JOIN users u ON u.id = f.user_id ORDER BY f.created_at DESC LIMIT 200').all()
         .map((f) => ({ ...f, created_at: iso(f.created_at) })) };
     },
     'GET /admin/bots': ({ admin }) => {
@@ -835,6 +869,18 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
     'POST /v1/requests': ({ me, body }) => tx(() => governance.proposeReplyInTx(me.id, body)),
     'GET /v1/requests': ({ me }) => ({ requests: governance.openRequests(me.id) }),
     'GET /v1/requests/:id': ({ me, params }) => governance.getRequest(me.id, params.id),
+    // The owner answered in their bot's chat (approvals live there now, not on the website). The bot records it.
+    'POST /v1/requests/:id/decision': ({ me, params, body }) => tx(() => {
+      const r = governance.getRequest(me.id, params.id, { owner: true });
+      const out = governance.decideRequestInTx(me.id, params.id, { action: body.decision === 'send' ? 'send' : 'decline', revision: r.revision });
+      q("UPDATE privacy_requests SET decided_via = 'chat' WHERE id = ? AND owner_bot = ?").run(params.id, me.id);
+      return out;
+    }),
+    'POST /v1/settings/proposals/:id': ({ me, params, body }) => tx(() => {
+      const out = governance.decideProposalInTx(me.id, params.id, body.decision === 'approve' ? 'approve' : 'decline');
+      q("UPDATE settings_proposals SET decided_via = 'chat' WHERE id = ? AND owner_bot = ?").run(params.id, me.id);
+      return out;
+    }),
 
     'GET /v1/contacts': ({ me }) => ({
       handle: me.handle,
@@ -931,10 +977,13 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
       const from = url.searchParams.get('from');
       const peer = from ? resolveRecipientNoBlockCheck(me, from) : null;
       if (from && !peer) throw new HttpError(404, `no contact called "${from}"`);
+      // The last 10 by default; the evening summary asks for up to 7 days (?days=7), at most 100.
+      const days = Math.min(7, Math.max(0, Number(url.searchParams.get('days')) || 0));
+      const since = days ? clock() - days * 86_400_000 : 0, limit = days ? 100 : 10;
       const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.want, m.sealed, m.reply_to, m.created_at, m.replied_at, c.alias, b.handle FROM messages m
                       JOIN bots b ON b.id = m.from_bot LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot
-                      WHERE m.to_bot = ? AND m.kind != 'probe' AND m.status = 'delivered' ${peer ? 'AND m.from_bot = ?' : ''}
-                      ORDER BY m.created_at DESC LIMIT 10`).all(...(peer ? [me.id, peer.peer_bot] : [me.id]));
+                      WHERE m.to_bot = ? AND m.kind != 'probe' AND m.status = 'delivered' AND m.created_at >= ? ${peer ? 'AND m.from_bot = ?' : ''}
+                      ORDER BY m.created_at DESC LIMIT ?`).all(...(peer ? [me.id, since, peer.peer_bot] : [me.id, since]), limit);
       return { messages: rows.map((m) => ({ id: m.id, from: m.alias, from_handle: `@${m.handle}`, kind: m.kind, reply_to: m.reply_to, text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), want: m.sealed ? undefined : m.want ?? undefined, sealed: m.sealed ?? undefined, at: iso(m.created_at), replied: !!m.replied_at })) };
     },
 
@@ -1132,7 +1181,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
   const handleApp = createApp({ events, governance, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
-    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, renameBot, latestUpdate, feedbackTo, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
+    decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, toolInfo, toolTooOld, privateDoorbell, renameBot, latestUpdate, feedbackTo, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');
@@ -1167,7 +1216,7 @@ If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.`
         for await (const chunk of req) { raw += chunk; if (raw.length > 64_000) throw new HttpError(413, 'body too large'); }
         if (raw) { try { body = JSON.parse(raw); } catch { throw new HttpError(400, 'body must be JSON'); } }
       }
-      if (['PATCH /v1/settings', 'POST /v1/requests', 'POST /v1/decisions'].includes(found.key) && (!body || typeof body !== 'object' || Array.isArray(body))) throw new HttpError(400, 'body must be a JSON object');
+      if (['PATCH /v1/settings', 'POST /v1/requests', 'POST /v1/decisions', 'POST /v1/requests/:id/decision', 'POST /v1/settings/proposals/:id'].includes(found.key) && (!body || typeof body !== 'object' || Array.isArray(body))) throw new HttpError(400, 'body must be a JSON object');
       const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
       const admin = auth.length > 0 && auth.length === adminToken.length && timingSafeEqual(Buffer.from(sha(auth)), Buffer.from(adminHash));
       const me = botByToken(auth);

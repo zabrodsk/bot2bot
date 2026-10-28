@@ -47,6 +47,7 @@ export const site = {
     ],
     contact: [
       { label: 'hello@bot2bot.link', href: 'mailto:hello@bot2bot.link' },
+      { label: 'Send feedback', href: '/app/feedback' },
       { label: 'Report a security issue', href: 'https://github.com/zabrodsk/bot2bot/security' },
     ],
     cookieSettings: 'Cookie settings',

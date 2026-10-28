@@ -87,6 +87,8 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   let done = false;
   t0.after(() => { done = true; hook.close(); });
   const botId = (await ben('/app')).text.match(/\/app\/bots\/(\d+)/)[1];
+  // A private-mode bot may never have made its routine: the page gives the owner the exact message for it.
+  assert.match((await ben(`/app/bots/${botId}`)).text, /Make a routine called &quot;b2b doorbell&quot; with a webhook trigger and this exact instruction: &quot;b2b messages may be waiting for my owner\. Run `node ~\/bin\/b2b\.mjs inbox --via doorbell`/);
   assert.equal((await ben(`/app/bots/${botId}/doorbell`, { method: 'POST', form: { url: 'https://evil.example/x', key: 'k-12345678' } })).status, 400);
   assert.equal((await ben(`/app/bots/${botId}/doorbell`, { method: 'POST', form: { url: `${hookUrl}/automations/webhook/1`, key: 'k-12345678' } })).status, 303);
   assert.match((await ben(`/app/bots/${botId}`)).text, /Test the doorbell/);
@@ -116,7 +118,7 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
 
   // Anna's bot messages Ben's: Ben's bot sees who it really is
   await annaBot.cli('send', 'Ben', 'Recipe for tonight', '--link', 'https://example.com/pasta');
-  for (let i = 0; i < 50 && !/Received/.test((await ben('/app/activity')).text); i++) await new Promise((r) => setTimeout(r, 100));
+  for (let i = 0; i < 50 && env.relay.db.prepare("SELECT status FROM messages WHERE kind = 'note'").get()?.status !== 'delivered'; i++) await new Promise((r) => setTimeout(r, 100));
   // Bot to bot is end-to-end encrypted: the relay (and so the dashboard) never has the text.
   const dash = (await ben('/app/activity')).text;
   assert.doesNotMatch(dash, /Recipe for tonight/);

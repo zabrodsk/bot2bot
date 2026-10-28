@@ -16,6 +16,7 @@ case "${1:-}" in
   rename)      curl -s "${auth[@]}" -X POST "$RELAY/admin/rename" -d "{\"from\":\"$2\",\"to\":\"$3\"}" ;;
   bots)        curl -s "${auth[@]}" "$RELAY/admin/bots" ;;
   feedback)    curl -s "${auth[@]}" "$RELAY/admin/feedback" ;;
+  stats)       curl -s "${auth[@]}" "$RELAY/admin/stats" ;;
   events)      curl -s "${auth[@]}" "$RELAY/admin/events?since=${2:-0}" ;;
   # usage: admin.sh doorbell-from-clipboard <handle> <webhook-url>   (copy the routine's KEY to the clipboard first)
   doorbell-from-clipboard)
@@ -24,6 +25,6 @@ case "${1:-}" in
       | curl -s "${auth[@]}" -X POST "$RELAY/admin/doorbell" --data-binary @-
     printf '\n(key read from clipboard, not shown)\n' ;;
   doorbell-test) curl -s "${auth[@]}" -X POST "$RELAY/admin/doorbell/test" -d "{\"handle\":\"$2\"}" ;;
-  *) echo "usage: admin.sh enroll <handle> [name] | reissue <handle> | rename <from> <to> | infinite <email> [off] | bots | feedback | events [since] | doorbell-from-clipboard <handle> <url> | doorbell-test <handle>" ;;
+  *) echo "usage: admin.sh enroll <handle> [name] | reissue <handle> | rename <from> <to> | infinite <email> [off] | bots | feedback | stats | events [since] | doorbell-from-clipboard <handle> <url> | doorbell-test <handle>" ;;
 esac
 echo

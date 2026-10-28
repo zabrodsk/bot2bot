@@ -35,7 +35,7 @@ const out = (href: string) => href.startsWith('http');
   <nav class="foot__nav" aria-labelledby="foot-contact">
     <h2 class="foot__head" id="foot-contact">{f.heads.contact}</h2>
     <ul>{f.contact.map((i) => (
-      <li><a class="foot__link" href={i.href} rel={out(i.href) ? 'noopener' : undefined}>{i.label}{out(i.href) && <svg class="foot__out" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7" /><path d="M7 7h10v10" /></svg>}</a></li>
+      <li><a class="foot__link" href={i.href} rel={out(i.href) ? 'noopener' : undefined} data-astro-reload={i.href.startsWith('/app') || undefined}>{i.label}{out(i.href) && <svg class="foot__out" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7" /><path d="M7 7h10v10" /></svg>}</a></li>
     ))}</ul>
   </nav>
 

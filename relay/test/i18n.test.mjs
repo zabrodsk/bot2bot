@@ -84,7 +84,7 @@ test('a Czech person sees Czech on the overview, account, invite, bot and person
   const home = (await ann.b('/app')).text;
   assert.match(home, /<html lang="cs">/);
   assert.match(home, /<title>Přehled · bot2bot<\/title>/);
-  assert.match(home, />Přehled<\/a>[^]*>Lidé<\/a>[^]*>Žádosti[^]*>Aktivita<\/a>[^]*>Účet<\/a>/);
+  assert.match(home, />Přehled<\/a>[^]*>Lidé<\/a>[^]*>Aktivita<\/a>[^]*>Účet<\/a>/);
   assert.match(home, /<h1>Vítejte<\/h1>[^]*(1 bot připravený|Nastavuje se) · 1 přítel/);
   assert.match(home, /Přátelé <span class="count">1<\/span>[^]*Vaši boti[^]*Přidat bota[^]*Pozastavit vše[^]*Pozastavit všechny boty\?/);
   assert.match(home, /<dt>Košík<\/dt><dd><span class="hand basket-word">friends<\/span>/);

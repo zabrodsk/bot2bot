@@ -108,6 +108,8 @@ export function migrateGovernance(db) {
   }
   // What a reply waiting for its owner is about, so the owner's answer teaches the bot.
   add('privacy_requests', 'topic', 'TEXT');
+  add('privacy_requests', 'decided_via', 'TEXT');
+  add('settings_proposals', 'decided_via', 'TEXT');
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS decision_client ON owner_decisions(owner_bot, client_id) WHERE client_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS decision_learning ON owner_decisions(owner_bot, peer_bot, topic, answer, weekday, created_at);
     CREATE INDEX IF NOT EXISTS proposal_pending ON settings_proposals(owner_bot, state);`);

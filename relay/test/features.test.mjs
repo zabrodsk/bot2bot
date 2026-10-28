@@ -213,18 +213,91 @@ test('feedback: a form in the account menu, and a popup once someone has used bo
   env.advance(4 * 86_400_000);
   const home = (await ann.b('/app')).text;
   assert.match(home, /<dialog class="dlg" id="feedback"[^]*Got a minute\?[^]*Love it[^]*What would make it better\?[^]*Not now/);
+  // Plus one question about a part of bot2bot they use, asked only once.
+  const qid = home.match(/name="question" value="([\w-]+)"/)[1];
+  assert.match(home, /name="answer" value="3"[^]*Yes[^]*Mostly[^]*No/);
   assert.doesNotMatch((await ann.b('/app')).text, /id="feedback"/, 'asked once, not on every visit');
   // The form works from the page too; empty sends nothing.
   assert.match((await ann.b('/app/feedback')).text, /How is bot2bot working for you\?/);
   assert.equal((await ann.b('/app/feedback', { method: 'POST', form: { via: 'page', text: ' ' } })).location, '/app/feedback');
-  const ok = await ann.b('/app/feedback', { method: 'POST', form: { via: 'popup', rating: '3', text: 'Love the quiet bot' } });
+  assert.doesNotMatch((await ann.b('/app/feedback')).text, new RegExp(`name="question" value="${qid}"`), 'a different question next time');
+  const ok = await ann.b('/app/feedback', { method: 'POST', form: { via: 'popup', rating: '3', question: qid, answer: '2', text: 'Love the quiet bot' } });
   assert.equal(ok.location, '/app');
   assert.match((await ann.b('/app')).text, /Thanks! We read every message\./);
   const r = await fetch(`${env.url}/admin/feedback`, { headers: { authorization: 'Bearer admin-token-for-tests-123456' } });
   const fb = (await r.json()).feedback[0];
   assert.equal(fb.text, 'Love the quiet bot'); assert.equal(fb.rating, 3); assert.equal(fb.email, 'ann.fb@example.com');
+  assert.equal(fb.question, qid); assert.equal(fb.answer, 2);
   await waitFor(() => sent.some((m) => m.to === 'team@example.com' && /love it/.test(m.subject) && /Love the quiet bot/.test(m.text)));
   // 60 days later it may ask again.
   env.relay.db.prepare("UPDATE users SET feedback_asked_at = ? WHERE email = 'ann.fb@example.com'").run(env.now() - 61 * 86_400_000);
   assert.match((await ann.b('/app')).text, /id="feedback"/);
+});
+
+test('feedback questions: only about things someone uses, each asked once, Czech next to English', async () => {
+  const { FEEDBACK_QUESTIONS, nextQuestion } = await import('../feedback-questions.mjs');
+  assert.ok(FEEDBACK_QUESTIONS.length >= 15);
+  for (const q of FEEDBACK_QUESTIONS) assert.ok(q.id && q.en.endsWith('?') && q.cs.endsWith('?'), q.id);
+  const fresh = { bots: 1, lang: 'en', quiet: false, sawUpdate: false, freePlan: false, doorbell: false, contacts: 0, sorted: 0, received: 0, invited: 0, asked: 0 };
+  const allowed = new Set(['setup', 'encryption', 'phone']);
+  const seen = [];
+  for (let q; (q = nextQuestion(fresh, seen, 7)); ) { assert.ok(allowed.has(q.id), q.id); seen.push(q.id); }
+  assert.equal(seen.length, 3, 'then it runs out instead of repeating');
+  assert.equal(nextQuestion({ ...fresh, lang: 'cs' }, [...seen], 7).id, 'czech');
+});
+
+test('activity statistics: 30-day numbers, messages per day with a table view, and who you talk to most', async (t0) => {
+  const env = await setup(t0);
+  const ben = await owner(env, t0, 'ben.st@example.com', 'benst');
+  const mia = await owner(env, t0, 'mia.st@example.com', 'miast');
+  assert.doesNotMatch((await ben.b('/app/activity')).text, /class="kpis"/, 'nothing to count yet');
+  await connect(ben, mia, 'Ben');
+  for (const t of ['one', 'two', 'three']) await ben.cli('send', 'Mia', t);
+  await mia.cli('send', 'Ben', 'back');
+  const page = (await ben.b('/app/activity')).text;
+  assert.match(page, /Last 30 days[^]*kpi__label">Sent<\/p><p class="kpi__value">3<[^]*kpi__label">Received<\/p><p class="kpi__value">1</);
+  assert.match(page, /Messages per day[^]*<svg viewBox[^]*class="viz__s1"[^]*class="viz__s2"/);
+  assert.match(page, /Show as a table<\/summary><table>/);
+  assert.match(page, /Who you talk to most[^]*hbars__name">Mia<\/span>[^]*hbars__n">4</);
+  assert.doesNotMatch(page, /one|two|three/.source === '' ? /x/ : /data-tip="[^"]*(one|two|three)/, 'no message text in the stats');
+});
+
+test('telemetry: anonymous daily counts that stay after message text is deleted', async (t0) => {
+  const env = await setup(t0);
+  const ben = await owner(env, t0, 'ben.tel@example.com', 'bentel');
+  const mia = await owner(env, t0, 'mia.tel@example.com', 'miatel');
+  await connect(ben, mia, 'Ben');
+  await ben.cli('send', 'Mia', 'hello');
+  const get = async () => (await (await fetch(`${env.url}/admin/stats`, { headers: { authorization: 'Bearer admin-token-for-tests-123456' } })).json()).days;
+  const today = new Date(env.now()).toISOString().slice(0, 10);
+  let d = (await get())[today];
+  assert.equal(d.messages_sent, 1); assert.ok(d.users_new >= 2 && d.bots_new >= 2 && d.contacts_new >= 2 && d.bots_active === 1);
+  assert.equal(JSON.stringify(d).includes('example.com'), false, 'no people in telemetry');
+  // Text deleted after 7 days: the count stays.
+  env.relay.db.prepare("UPDATE messages SET text = '', body_purged_at = 1").run();
+  assert.equal((await get())[today].messages_sent, 1);
+});
+
+test('evening summary: offered once, set up as a routine, one line for the owner and a "bot2bot" page', async (t0) => {
+  const env = await setup(t0);
+  const ben = await owner(env, t0, 'ben.dg@example.com', 'bendg');
+  const mia = await owner(env, t0, 'mia.dg@example.com', 'miadg');
+  await connect(ben, mia, 'Ben');
+  mia.routine.status = 500; // her doorbell routine doesn't read the inbox here: the test does
+  await mia.cli('refresh', '--done');
+  await ben.cli('send', 'Mia', 'Recipe for tonight', '--want', 'try it');
+  await ben.cli('send', 'Mia', 'Saturday works');
+  const first = await mia.cli('inbox');
+  for (const m of first.matchAll(/b2b\.mjs ack (msg_[\w~-]+)$/gm)) await mia.cli('ack', m[1]);
+  assert.match(first, /would they like a short evening summary[^]*digest --setup/);
+  await ben.cli('send', 'Mia', 'And another');
+  const second = await mia.cli('inbox');
+  assert.doesNotMatch(second, /evening summary/, 'offered once');
+  for (const m of second.matchAll(/b2b\.mjs ack (msg_[\w~-]+)$/gm)) await mia.cli('ack', m[1]);
+  assert.match(await mia.cli('digest', '--setup'), /routine named "b2b evening"[^]*20:00[^]*Run node ~\/bin\/b2b\.mjs digest and do exactly what it says\./);
+  const d = await mia.cli('digest');
+  assert.match(d, /^Evening summary\. Do exactly this:/);
+  assert.match(d, /ONE short message[^]*Leave out anything you already told them/);
+  assert.match(d, /page named "bot2bot"[^]*never make a new one[^]*When, Who, What/);
+  assert.match(d, /from "Ben"[^]*They want \(their words\): "try it"[^]*\| Recipe for tonight/);
 });

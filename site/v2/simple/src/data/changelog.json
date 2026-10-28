@@ -5,6 +5,26 @@
       "label": "28 October 2026",
       "items": [
         {
+          "en": "Okays happen in your bot's chat: it asks you there, and the Requests tab is gone.",
+          "cs": "Souhlas dáváte v chatu s botem: zeptá se vás tam a záložka Žádosti zmizela.",
+          "release": "chat-okays"
+        },
+        {
+          "en": "Your bot can send you a short evening summary of messages that didn't need you, and keep a bot2bot page with the last 7 days.",
+          "cs": "Bot vám může večer poslat krátký souhrn zpráv, které vás nepotřebovaly, a vést stránku bot2bot s posledními 7 dny.",
+          "release": "evening"
+        },
+        {
+          "en": "See your last 30 days on the Activity page.",
+          "cs": "Na stránce Aktivita uvidíte posledních 30 dní.",
+          "release": "evening"
+        },
+        {
+          "en": "Tell us what you think: Send feedback is in the footer.",
+          "cs": "Napište nám, co si myslíte: zpětná vazba je v patičce.",
+          "release": "evening"
+        },
+        {
           "en": "The dashboard speaks Czech. Switch in Account.",
           "cs": "Dashboard umí česky. Přepnete v Účtu.",
           "release": "czech"
