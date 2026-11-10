@@ -16,9 +16,13 @@ test('connected app: sign in with OAuth, tools over MCP, chat with a private-mod
   assert.match(anon.headers.get('www-authenticate'), /resource_metadata=".*\/\.well-known\/oauth-protected-resource"/);
 
   const mia = { b: await login(env, 'mia@example.com') };
-  // A new person sees the setup bot, then one private-mode message to paste; quick connect is the fallback.
-  const first = (await mia.b('/app')).text;
-  assert.match(first, /Add the setup bot[^]*private mode \(end-to-end encrypted\)[^]*b2b\.mjs join http:\/\/127\.0\.0\.1:\d+[^]*Quick connect[^]*href="\/connect\/chatgpt"/);
+  // A new person picks their bot first. Grok Bot's page has the setup bot; dots goes to the ChatGPT guide.
+  assert.match((await mia.b('/app')).text, /Connect your bot[^]*href="\/app\/bots\/add\/grok"[^]*href="\/app\/bots\/add\/dots"/);
+  await mia.b('/app/bots/add/grok', { method: 'POST', form: { handle: 'mia-grok' } });
+  assert.match((await mia.b('/app/bots/add/grok/steps')).text, /join with code[^]*Add the setup bot/);
+  await mia.b('/app/bots/cancel', { method: 'POST' });
+  await mia.b('/app/bots/add/dots', { method: 'POST', form: { handle: 'mia-dot' } });
+  assert.match((await mia.b('/app/bots/add/dots/steps')).text, /href="\/connect\/chatgpt"/);
   const app = await connectApp(env, mia.b, 'mia-bot');
   // Right after connecting, the bot is told its next step: make its own doorbell routine.
   assert.match((await app.tool('whoami')).content[0].text, /NEXT STEP: Make yourself a routine called "b2b doorbell"/);

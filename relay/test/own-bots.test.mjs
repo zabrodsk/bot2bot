@@ -21,7 +21,7 @@ test('own bots: a second bot can message the first right away, and neither is a 
   await dusan.b('/app/bots', { method: 'POST', form: { handle: 'work' } });
   const home = mkdtempSync(join(tmpdir(), 'b2b-own-work-'));
   const work = async (...a) => (await run(process.execPath, [CLI, ...a], { env: { ...process.env, B2B_HOME: home } })).stdout;
-  await work('enroll', env.url, (await dusan.b('/app')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
+  await work('enroll', env.url, (await dusan.b('/app/bots/add/grok/steps')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
 
   // Each knows the other by its handle, with no yes waiting on either side.
   const contacts = await waitFor(async () => { const c = await work('contacts'); return /dusan/.test(c) && c; });

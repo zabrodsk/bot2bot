@@ -25,17 +25,18 @@ async function setup(t0) {
   return { relay, url, mail };
 }
 
-// A tiny browser: keeps one session cookie, sends Origin on POST like a real form.
+// A tiny browser: keeps its cookies, sends Origin on POST like a real form.
 function browser(base) {
-  let cookie = '';
+  const jar = {};
   return async (path, { method = 'GET', form, json } = {}) => {
     const headers = { origin: base };
+    const cookie = Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; ');
     if (cookie) headers.cookie = cookie;
     let body;
     if (form) { headers['content-type'] = 'application/x-www-form-urlencoded'; body = new URLSearchParams(form).toString(); }
     if (json) { headers['content-type'] = 'application/json'; body = JSON.stringify(json); }
     const r = await fetch(base + path, { method, headers, body, redirect: 'manual' });
-    const sc = r.headers.get('set-cookie'); if (sc) cookie = sc.split(';')[0];
+    for (const sc of r.headers.getSetCookie()) { const [kv] = sc.split(';'); const i = kv.indexOf('='); jar[kv.slice(0, i)] = kv.slice(i + 1); }
     const text = await r.text();
     return { status: r.status, location: r.headers.get('location'), text, json: () => JSON.parse(text) };
   };
@@ -70,7 +71,7 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   assert.equal(evil.status, 403);
 
   const ben = await signup(env, 'ben.k@example.com');
-  assert.match((await ben('/app')).text, /Connect your bot[^]*Add the setup bot/);
+  assert.match((await ben('/app')).text, /Connect your bot[^]*href="\/app\/bots\/add\/grok"[^]*Grok Bot/);
   const benBot = await connectBot(env, ben, 'ben');
 
   // Doorbell: a fake GrokBot routine that runs the inbox when rung
@@ -166,39 +167,58 @@ test('login codes: wrong code, attempts limit, rate limit, magic link', async (t
   assert.match((await c('/app')).text, /Connect your bot/);
 });
 
-test('adding a second private-mode bot shows its setup code, and a bad name says why', async (t0) => {
+test('adding a bot is a page of its own: pick the platform, name it, then only its steps', async (t0) => {
   const env = await setup(t0);
   const ben = await signup(env, 'ben.second@example.com');
   await connectBot(env, ben, 'ben');
 
-  const add = await ben('/app/bots/new', { method: 'POST' });
-  assert.equal(add.location, '/app/bots/new-form');
-  const bad = await ben('/app/bots', { method: 'POST', form: { handle: 'b2b test' } });
+  // The overview's button opens the page; the old ways in lead there too.
+  assert.match((await ben('/app')).text, /href="\/app\/bots\/add"[^>]*>[^]*Add a bot/);
+  assert.equal((await ben('/app/bots/new', { method: 'POST' })).location, '/app/bots/add');
+  const pick = (await ben('/app/bots/add')).text;
+  assert.match(pick, /Which bot\?[^]*href="\/app\/bots\/add\/grok"[^]*Grok Bot[^]*href="\/app\/bots\/add\/instinct"[^]*href="\/app\/bots\/add\/dots"[^]*href="\/app\/bots\/add\/openclaw"[^]*href="\/app\/bots\/add\/claude-code"[^]*href="\/app\/bots\/add\/codex"[^]*href="\/app\/bots\/add\/cursor"[^]*href="\/app\/bots\/add\/hermes"[^]*href="\/app\/bots\/add\/other"/);
+  assert.match((await ben('/app/bots/add/grok')).text, /What should your bot be called\?[^]*name="handle"/);
+
+  // A bad name says why; a taken one too.
+  const bad = await ben('/app/bots/add/grok', { method: 'POST', form: { handle: 'b2b test' } });
   assert.equal(bad.status, 400);
-  assert.match(bad.text, /Add another bot[^]*No spaces/);
+  assert.match(bad.text, /No spaces/);
   assert.match(bad.text, /value="b2b test"/);
+  assert.equal((await ben('/app/bots/add/grok', { method: 'POST', form: { handle: 'ben' } })).status, 409);
 
-  await ben('/app/bots', { method: 'POST', form: { handle: 'ben' } });
-  assert.match((await ben('/app/bots', { method: 'POST', form: { handle: 'ben' } })).text, /That name is taken/);
-
-  await ben('/app/bots', { method: 'POST', form: { handle: 'b2b-test' } });
-  const dash = (await ben('/app')).text;
-  assert.match(dash, /Connect @b2b-test/);
-  assert.match(dash, /d\.bots>1/); // waits for the second bot, not the first
-  // The code message is Grok Bot's, in its own row; every other assistant follows, and other bots last.
-  assert.match(dash, /Connect @b2b-test[^]*<details class="diy" open><summary>[^]*Grok Bot<\/span><\/summary>[^]*Message for Grok Bot[^]*join with code[^]*Waiting for your bot to join[^]*Instinct[^]*OpenAI dots[^]*OpenClaw[^]*Claude Code[^]*Codex[^]*Hermes Agent[^]*Other bots[^]*\/mcp/);
-  assert.match(dash, /Other bots[^]*action="\/app\/bots\/cancel"[^]*Cancel setup/);
+  // Grok Bot: the setup code holds the name. Its page is Grok Bot's alone, and waits for the second bot.
+  assert.equal((await ben('/app/bots/add/grok', { method: 'POST', form: { handle: 'b2b-test' } })).location, '/app/bots/add/grok/steps');
+  const steps = (await ben('/app/bots/add/grok/steps')).text;
+  assert.match(steps, /Connect @b2b-test[^]*Copy this message[^]*Message for Grok Bot[^]*join with code[^]*Grok Bot app[^]*Waiting for your bot to join[^]*Cancel setup/);
+  assert.doesNotMatch(steps, /Instinct|OpenClaw|Claude Code|Codex|Hermes/);
+  assert.match(steps, /d\.bots>1/);
+  // The overview only points back to it.
+  assert.match((await ben('/app')).text, /Connect @b2b-test[^]*href="\/app\/bots\/add\/grok\/steps"/);
   // Cancelling ends the setup with a toast whose Undo starts it again under the same name.
   await ben('/app/bots/cancel', { method: 'POST' });
   const cancelled = (await ben('/app')).text;
   assert.doesNotMatch(cancelled, /Connect @b2b-test/);
   assert.match(cancelled, /Setup cancelled[^]*action="\/app\/bots"[^]*name="handle" value="b2b-test"[^]*Undo/);
-  await ben('/app/bots', { method: 'POST', form: { handle: 'b2b-test', undo: '1' } });
-  const dash2 = (await ben('/app')).text;
-  assert.match(dash2, /Connect @b2b-test/);
+  assert.equal((await ben('/app/bots', { method: 'POST', form: { handle: 'b2b-test', undo: '1' } })).location, '/app/bots/add/grok/steps');
+  const again = (await ben('/app/bots/add/grok/steps')).text;
   const home = mkdtempSync(join(tmpdir(), 'b2b-app-second-'));
-  await run(process.execPath, [CLI, 'enroll', env.url, dash2.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]], { env: { ...process.env, B2B_HOME: home } });
+  await run(process.execPath, [CLI, 'enroll', env.url, again.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]], { env: { ...process.env, B2B_HOME: home } });
   const after = (await ben('/app')).text;
   assert.match(after, /@b2b-test/);
   assert.doesNotMatch(after, /Connect @b2b-test/);
+  // Once it joins, the page goes on to the new bot's own page.
+  const newest = env.relay.db.prepare("SELECT id FROM bots WHERE handle = 'b2b-test'").get().id;
+  assert.equal((await ben('/app/bots/add/done')).location, `/app/bots/${newest}`);
+
+  // Any other platform: the name rides in the message it pastes (join --name), and its page is its own.
+  assert.equal((await ben('/app/bots/add/codex', { method: 'POST', form: { handle: 'ben-codex' } })).location, '/app/bots/add/codex/steps');
+  const codex = (await ben('/app/bots/add/codex/steps')).text;
+  assert.match(codex, /Connect @ben-codex[^]*open Codex and paste this message[^]*b2b\.mjs join \S* ?--name ben-codex --agent codex/);
+  assert.doesNotMatch(codex, /Grok Bot|Instinct|OpenClaw|Hermes/);
+  // An app that signs in (dots, other bots) finds the name already filled in.
+  await ben('/app/bots/add/dots', { method: 'POST', form: { handle: 'ben-dot' } });
+  const meta = await (await fetch(`${env.url}/.well-known/oauth-authorization-server`)).json();
+  const reg = await (await fetch(new URL(meta.registration_endpoint, env.url), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'ChatGPT', redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect'] }) })).json();
+  const consent = (await ben(`/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: reg.client_id, redirect_uri: 'https://chatgpt.com/connector_platform_oauth_redirect', code_challenge: 'c'.repeat(43), code_challenge_method: 'S256' })}`)).text;
+  assert.match(consent, /name="handle"[^>]*value="ben-dot"/);
 });

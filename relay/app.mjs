@@ -509,13 +509,13 @@ ${decide(tr, tr('Connect'))}</form>
 ${signedInAs(user, tr, params, client)}</section>`, { user, width: 'narrow', bar: { title: tr('Send to your bots') } });
   }
   // Consent for a connected app (OAuth). The app gets one bot of this person's, nothing else.
-  function authorizePage(user, client, params, { error = '', send = false } = {}) {
+  function authorizePage(user, client, params, { error = '', send = false, name = '' } = {}) {
     const tr = T(user);
     // A dot in private mode can sign ChatGPT in again, for wake-ups only: its messages stay end-to-end encrypted.
     const dotApp = isDotApp(client);
     const bots = myBots(user).filter((b) => (b.vendor === 'connector' && !isSender(b)) || (dotApp && wakeOnly(b)));
     const hidden = Object.entries(params).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
-    const suggested = suggestHandle(user);
+    const suggested = name || suggestHandle(user);
     // A disconnected bot waiting to come back is the likely choice; otherwise a new bot, so nobody hands an
     // existing bot to an app by accident. Apps name themselves (Grok Bot signs in as "Cursor"), so that's small print.
     const back = bots.find((b) => b.disconnected_at);
@@ -824,11 +824,9 @@ ${otherWays(tr, { after, invite })}</div></section>`;
     const bots = myBots(user);
     const now = clock();
     if (!bots.length) {
+      // No bot yet: adding one is the whole page. A Grok Bot setup already started picks up where it was.
       const code = pendingCode(user);
-      if (code) return layout(tr('Set up'), `${art('setup', 'small')}<section class="card"><h2>${tr('Connect your bot')}</h2>${waitingForBot(tr, { plain: code.plain_code })}</section>`, { user, tab: 'home', width: 'read', bar: { title: tr('Connect your bot'), sub: tr('Private mode') } });
-      return layout(tr('Set up'), `${art('setup', 'small')}${setupChoices(tr)}
-<p class="wait center" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p>
-<script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`, { user, tab: 'home', width: 'read', bar: { title: tr('Connect your bot'), sub: tr('Takes a few minutes') } });
+      return code ? addStepsPage(user, tr, BOT_PLATFORMS(tr)[0], code.handle) : addPickPage(user, tr);
     }
     linkOwnBots(user.id);
     const botIds = bots.map((b) => b.id);
@@ -925,7 +923,7 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: tr('Remove'
       plan.alert,
       ...aiBots.filter((b) => toolOf(b)?.old).map((b) => alertBox('warning', tr('@{handle} runs an old bot2bot tool', { handle: esc(b.handle) }), tr('One message to your bot fixes it. After that, it updates itself.'), `<a class="btn small" href="/app/bots/${b.id}#update">${tr('Show the message')}</a>`)),
       // Okays happen in the bot's chat now, so nothing waits for you here.
-      pending ? `<section class="card"><div class="card__head"><h2>${tr('Connect @{handle}', { handle: esc(pending.handle) })}</h2>${badge(tr('Private mode'), 'info')}</div>${waitingForBot(tr, { plain: pending.plain_code }, bots.length)}</section>` : '',
+      pending ? alertBox('info', tr('Connect @{handle}', { handle: esc(pending.handle) }), tr('Your Grok Bot setup is waiting.'), `<a class="btn small" href="/app/bots/add/grok/steps">${tr('Continue')}</a>`) : '',
       ...requests.map((c) => alertBox('warning', tr('Did you mean to connect with {name}?', { name: person(c) }),
         tr('Your bot {mine} paired with <b>{name}</b> ({theirs}) {verified}. Nothing can be sent either way until you say yes.', { mine: `<span class="handle">@${esc(c.my_handle)}</span>`, name: person(c), theirs: `<span class="handle">@${esc(c.handle)}</span>`, verified: verifiedPill(c.email_verified_at, tr) }),
         `<form method="post" action="/app/contacts/approve"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small">${tr('Yes, connect')}</button></form>
@@ -960,7 +958,7 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: tr('Remove'
 <div class="card card--list${inPilot(user) && settled.length ? ' card--menus' : ''}" id="friends">${settled.length ? `${friendsList}<p class="ffind__none" hidden>${tr('Nobody by that name')}</p>` : emptyState('people', tr('No friends yet'), tr('Invite someone and their bot can message yours.'), inviteForm('small') + founderLink(tr))}</div></section>
 ${invitesGroup}`;
     const groupsSec = groupsSection(user, tr);
-    const botsSec = `<section class="group" aria-labelledby="bots-h"><div class="group__head"><h2 id="bots-h">${tr('Your bots')} <span class="count">${agents.length}</span></h2><form method="post" action="/app/bots/new"><button class="btn small ghost">${ICON.plus}${tr('Add a bot')}</button></form></div>
+    const botsSec = `<section class="group" aria-labelledby="bots-h"><div class="group__head"><h2 id="bots-h">${tr('Your bots')} <span class="count">${agents.length}</span></h2><a class="btn small ghost" href="/app/bots/add">${ICON.plus}${tr('Add a bot')}</a></div>
 <div class="card card--list card--tips"><ul class="list">${agents.map(botRow).join('')}</ul></div>${aiBots.length > 1 ? `<p class="muted small">${tr('Your bots can message each other. No invite needed.')}</p>` : ''}</section>`;
     const footHtml = `<div class="foot">${live.length && !paused ? confirmMorph({ action: '/app/pause', fields: '<input type="hidden" name="on" value="1">', label: tr('Pause everything'), icon: ICON.pause, prompt: tr('Pause all your bots?'), confirm: tr('Pause'), pending: tr('Pausing'), tone: 'neutral', tr }) : ''}${refreshNote(tr)}</div>`;
     const groupN = groups && groupBots(user).length ? groups.forUser(user.id, { all: true }).filter((r) => !r.hidden).length : 0;
@@ -1143,17 +1141,84 @@ ${decide(tr, tr('Yes, connect'))}</form></section>`, opts);
     });
   }
 
-  function waitingForBot(tr, code, had = 0) {
-    // Grok Bot's message, in its own row with its logo, so it's clear who it's for; then every other assistant.
-    return `<details class="diy" open><summary>${diyName([MARK.grok], 'Grok Bot')}</summary>
-<p class="muted" style="margin-top:10px">${tr("Copy this message and paste it into your bot's chat in the Grok Bot app.")}</p>
-${codeBlock('msg', tr('Message for {agent}', { agent: 'Grok Bot' }), setupMessage(code.plain || 'XXXX-XXXX'), tr, MARK.grok)}</details>
-<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for your bot to join…')}</p>
-${otherWays(tr)}
-<form method="post" action="/app/bots/cancel"><button class="link">${tr('Cancel setup')}</button></form>
-<script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>${had}) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`;
+  // Adding a bot: a page of its own, one choice at a time: the platform, then the bot's name, then that platform's
+  // steps and nothing else. The name goes along in what you paste (join --name), in Grok Bot's setup code, or, for an
+  // app that signs in (dots, other bots), in a short-lived cookie that its sign-in page reads.
+  const BOT_PLATFORMS = (tr) => [
+    { key: 'grok', label: 'Grok Bot', mark: MARK.grok, tag: badge(tr('Easiest'), 'info') },
+    { key: 'instinct', label: 'Instinct', mark: MARK.instinct },
+    { key: 'dots', label: 'OpenAI dots', mark: MARK.dots },
+    { key: 'openclaw', label: 'OpenClaw', mark: MARK.openclaw },
+    { key: 'claude-code', label: 'Claude Code', mark: MARK.claude, sub: tr('On a computer that stays on') },
+    { key: 'codex', label: 'Codex', mark: MARK.codex, sub: tr('On a computer that stays on') },
+    { key: 'cursor', label: 'Cursor', mark: MARK.cursor, sub: tr('On a computer that stays on'), tag: badge(tr('Beta'), 'info') },
+    { key: 'hermes', label: 'Hermes Agent', mark: MARK.hermes, sub: tr('On a computer that stays on'), tag: badge(tr('Beta'), 'info') },
+    { key: 'other', label: tr('Other bots'), mark: MARK.app, sub: 'Poke, Manus, Town, Claude Duet, Muse…', tag: badge(tr('Beta'), 'info') },
+  ];
+  const botCookie = (handle) => `b2b_bot=${handle}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600${secure ? '; Secure' : ''}`;
+  const botPick = (req) => { const h = String(cookies(req).b2b_bot || ''); return HANDLE_RE.test(h) ? h : ''; };
+  const withName = (text, handle) => (handle ? text.replaceAll(`b2b.mjs join ${origin}`, `b2b.mjs join ${origin} --name ${handle}`) : text);
+  const addTrack = (plat, at, tr) => stepper([plat ? plat.label : tr('Bot'), tr('Name'), tr('Connect')], at, 'h', tr);
+
+  // Step one: which bot.
+  function addPickPage(user, tr) {
+    const first = !myBots(user).some((b) => !isSender(b));
+    const row = (x) => `<li><a class="line line--link" href="/app/bots/add/${x.key}"><span class="botmark">${x.mark}</span><span class="line__main"><span class="line__title">${esc(x.label)}${x.tag ? ` ${x.tag}` : ''}</span>${x.sub ? `<span class="line__sub">${esc(x.sub)}</span>` : ''}</span>${ICON.chev}</a></li>`;
+    return layout(tr('Add a bot'), `${first ? art('setup', 'small') : ''}<section class="card stack"><h1>${first ? tr('Connect your bot') : tr('Which bot?')}</h1></section>
+<div class="card card--list"><ul class="list">${BOT_PLATFORMS(tr).map(row).join('')}</ul></div>`, { user, tab: 'home', width: 'read', bar: first ? { title: tr('Connect your bot'), sub: tr('Takes a few minutes') } : { back: '/app' } });
   }
-  const addBotForm = (user, { error = '', handle = '' } = {}) => { const tr = T(user); return layout(tr('Add a bot'), `<section class="card"><h1>${tr('Add another bot')}</h1>${error ? alertBox('danger', esc(error), '') : ''}<form method="post" action="/app/bots" class="stack">${field({ label: tr('Bot name'), name: 'handle', value: handle || suggestHandle(user), description: tr('2 to 32 lowercase letters, numbers, - or _.'), attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off"' })}<div><button class="btn">${tr('Continue')}</button></div></form></section>`, { user, tab: 'home', width: 'narrow', bar: { back: '/app' } }); };
+
+  // Step two: its name, the @name friends see.
+  function addNamePage(user, tr, plat, { error = '', handle = '' } = {}) {
+    return layout(tr('Add a bot'), `<section class="card">${addTrack(plat, 1, tr)}
+<h1>${tr('What should your bot be called?')}</h1>
+<form method="post" action="/app/bots/add/${plat.key}" class="stack">${field({ label: tr('Bot name'), name: 'handle', value: handle || suggestHandle(user), error, description: tr('2 to 32 lowercase letters, numbers, - or _.'), attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off" autocapitalize="none" spellcheck="false"' })}
+<div><button class="btn">${tr('Continue')}</button></div></form></section>`, { user, tab: 'home', width: 'read', bar: { back: '/app/bots/add', backLabel: tr('Add a bot'), title: plat.label } });
+  }
+  const nameError = (user, handle, tr) => !HANDLE_RE.test(handle) ? tr('Use 2 to 32 lowercase letters, numbers, - or _. No spaces.')
+    : q('SELECT 1 FROM bots WHERE handle = ?').get(handle) || q('SELECT 1 FROM enroll_codes WHERE handle = ? AND used_at IS NULL AND expires_at > ? AND (user_id IS NULL OR user_id != ?)').get(handle, clock(), user.id) ? tr('That name is taken. Try another.') : '';
+  // Grok Bot joins with a setup code that holds the name. One setup at a time.
+  const startGrokSetup = (user, handle) => {
+    const code = humanCode();
+    q('UPDATE enroll_codes SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(clock(), user.id);
+    q('INSERT OR REPLACE INTO enroll_codes (code_hash, handle, display_name, expires_at, user_id, plain_code) VALUES (?, ?, ?, ?, ?, ?)').run(sha(code), handle, user.name, clock() + L.codeTtlMs, user.id, code);
+    log(null, 'enroll_code', { handle, by: 'user' });
+  };
+
+  // Step three: that platform's steps, nothing about the others. The page waits for the bot, then opens its page.
+  function addStepsPage(user, tr, plat, handle) {
+    const had = myBots(user).length;
+    const agent = plat.label;
+    const msg = (id, text) => codeBlock(id, tr('Message for {agent}', { agent }), withName(text, handle), tr, plat.mark);
+    const link = { text: tr('It gives you a link. Open it, sign in and tap Yes, connect.') };
+    const AGENT = { 'claude-code': prompts.agent('claude-code'), codex: prompts.agent('codex'), cursor: prompts.agent('cursor'), hermes: prompts.hermes() };
+    const code = plat.key === 'grok' ? pendingCode(user) : null;
+    const how = plat.key === 'grok' ? {
+      steps: [{ text: tr('Copy this message.'), html: codeBlock('msg', tr('Message for {agent}', { agent }), setupMessage(code.plain_code), tr, plat.mark) },
+        { text: tr("Paste it into your bot's chat in the Grok Bot app. It sets itself up and tells you if it needs anything.") }],
+      foot: tr('No Grok Bot yet? <a class="link" href="{url}" target="_blank" rel="noopener">Add the setup bot</a>. It makes one with you.', { url: esc(setupBot) }),
+      cancel: true }
+      : AGENT[plat.key] ? { steps: [{ text: tr('On a computer that stays on, open {agent} and paste this message.', { agent }), html: msg('am', AGENT[plat.key]) }, link],
+        foot: tr('It then starts a watcher that wakes it when a message comes in. Only the bots can read your messages.') }
+      : plat.key === 'openclaw' ? { steps: [{ text: tr('Paste this message into {agent}.', { agent }), html: msg('om', prompts.openclaw()) }, link],
+        foot: tr("It also sets up its doorbell, so a friend's bot can wake it. Only the bots can read your messages.") }
+      : plat.key === 'instinct' ? { steps: [{ text: tr('Paste this message into {agent}.', { agent }), html: msg('im', prompts.instinct()) }, link],
+        foot: tr('Only the bots can read your messages.') }
+      : plat.key === 'dots' ? { steps: [{ text: tr('Connect bot2bot in the ChatGPT account your dot uses. The guide shows every tap.'), html: `<a class="btn ghost" href="/connect/chatgpt">${tr('Connect dots')}</a>` },
+        { text: tr('When bot2bot asks which bot, pick A new bot. Its name is filled in.') }],
+        foot: tr('Connect bot2bot in your own ChatGPT account, then check it in your chat. Your dot then turns on end-to-end encryption on its own computer. If it can’t, it stays on Quick connect, which isn’t end-to-end encrypted.') }
+      : { steps: [{ text: tr('If your assistant can run commands, paste this message into it.'), html: msg('xm', prompts.other()) }, link],
+        foot: `<details class="diy"><summary>${tr("It can't run commands?")}</summary><p class="muted" style="margin-top:10px">${tr('Poke, Manus, Town, Claude Duet, Muse, Perplexity and more. Add bot2bot as a custom MCP server with this address and sign in. Then tell your assistant: "Set up bot2bot: call whoami and do the next step."')}</p>
+${codeBlock('xu', tr('Server URL'), `${origin}/mcp`, tr, MARK.app)}<p class="muted small">${tr("This way isn't end-to-end encrypted.")}</p></details>` };
+    const step = (s, i) => `<li class="walk__step"><span class="walk__n" aria-hidden="true">${i + 1}</span><div class="walk__body"><p>${s.text}</p>${s.html || ''}</div></li>`;
+    return layout(tr('Add a bot'), `<section class="card">${addTrack(plat, 2, tr)}
+<h1>${tr('Connect @{handle}', { handle: esc(handle) })}</h1>
+<ol class="walk">${how.steps.map(step).join('')}</ol>
+<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for your bot to join…')}</p>
+${how.foot.startsWith('<details') ? how.foot : `<p class="muted small">${how.foot}</p>`}
+${how.cancel ? `<form method="post" action="/app/bots/cancel"><button class="link">${tr('Cancel setup')}</button></form>` : ''}
+<script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>${had}) location.href='/app/bots/add/done'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script></section>`, { user, tab: 'home', width: 'read', bar: { back: `/app/bots/add/${plat.key}`, backLabel: tr('Name'), title: plat.label, sub: `@${esc(handle)}` } });
+  }
 
   function botPage(user, b, { error = '' } = {}) {
     const tr = T(user);
@@ -2246,7 +2311,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (!user) return redirect(res, `/login?next=${encodeURIComponent(`/oauth/authorize?${new URLSearchParams(keep)}`)}`), true;
         // A name picked on the setup page for this app (/connect/send) names its sender, and picks Send only.
         const picked = sendPick(req, senderLabel(client.name));
-        if (req.method === 'GET') return page(res, 200, sendOnly ? sendAuthorizePage(user, client, keep, picked) : authorizePage(user, client, keep, { send: !!picked })), true;
+        if (req.method === 'GET') return page(res, 200, sendOnly ? sendAuthorizePage(user, client, keep, picked) : authorizePage(user, client, keep, { send: !!picked, name: botPick(req) })), true;
         if (params.decision !== 'allow') return back({ error: 'access_denied' });
         if (sendOnly) {
           const sender = senderBot(user, senderLabel(client.name), picked || undefined);
@@ -2273,7 +2338,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           }
           bot = params.bot && params.bot !== 'new' ? ownBot(user, params.bot) : makeConnectorBot(user, params.handle);
           if ((bot.vendor !== 'connector' && !(isDotApp(client) && wakeOnly(bot))) || isSender(bot)) throw new HttpError(400, 'Pick one of your connected-app bots.');
-        } catch (e) { if (e instanceof HttpError) return page(res, 400, authorizePage(user, client, keep, { error: e.message })), true; throw e; }
+        } catch (e) { if (e instanceof HttpError) return page(res, 400, authorizePage(user, client, keep, { error: e.message, name: botPick(req) })), true; throw e; }
         if (bot.disconnected_at) q('UPDATE bots SET disconnected_at = NULL WHERE id = ?').run(bot.id);
         linkOwnBots(user.id);
         const code = token('ac_', 24);
@@ -2403,26 +2468,41 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         }
       }
 
-      if ((p === '/app/bots' || p === '/app/bots/new') && req.method === 'POST') {
-        const f = await form(req);
-        if (p === '/app/bots/new') { q('UPDATE enroll_codes SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(clock(), user.id); return redirect(res, '/app/bots/new-form'), true; }
-        const handle = String(f.handle || '').trim().toLowerCase();
-        const adding = myBots(user).length > 0;
-        const h2 = `<h2>${tr('Connect your bot')}</h2>`;
-        if (adding && !HANDLE_RE.test(handle)) return page(res, 400, addBotForm(user, { error: tr('Use 2 to 32 lowercase letters, numbers, - or _. No spaces.'), handle: f.handle })), true;
-        if (!HANDLE_RE.test(handle)) return page(res, 400, dashboard(user).replace(h2, `${h2}<p class="error">${tr('Use 2 to 32 lowercase letters, numbers, - or _.')}</p>`)), true;
-        if (q('SELECT 1 FROM bots WHERE handle = ?').get(handle) || q('SELECT 1 FROM enroll_codes WHERE handle = ? AND used_at IS NULL AND expires_at > ? AND (user_id IS NULL OR user_id != ?)').get(handle, clock(), user.id)) {
-          if (adding) return page(res, 409, addBotForm(user, { error: tr('That name is taken. Try another.'), handle })), true;
-          return page(res, 409, dashboard(user).replace(h2, `${h2}<p class="error">${tr('That name is taken. Try another.')}</p>`)), true;
-        }
-        const code = humanCode();
-        q('UPDATE enroll_codes SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(clock(), user.id);
-        q('INSERT OR REPLACE INTO enroll_codes (code_hash, handle, display_name, expires_at, user_id, plain_code) VALUES (?, ?, ?, ?, ?, ?)').run(sha(code), handle, user.name, clock() + L.codeTtlMs, user.id, code);
-        log(null, 'enroll_code', { handle, by: 'user' });
-        return redirect(res, '/app'), true;
+      // Adding a bot: /app/bots/add (which bot), /add/<platform> (its name), /add/<platform>/steps, /add/done.
+      const am_ = p.match(/^\/app\/bots\/add(?:\/([a-z-]+)(\/steps)?)?$/);
+      if (am_ && req.method === 'GET' && am_[1] === 'done') {
+        const newest = myBots(user).filter((b) => !isSender(b)).sort((a, b) => b.created_at - a.created_at)[0];
+        return redirect(res, newest ? `/app/bots/${newest.id}` : '/app'), true;
       }
-      if (p === '/app/bots/new-form' && req.method === 'GET') {
-        return page(res, 200, addBotForm(user)), true;
+      if (am_) {
+        const plat = am_[1] ? BOT_PLATFORMS(tr).find((x) => x.key === am_[1]) : null;
+        if (!am_[1] && req.method === 'GET') return page(res, 200, addPickPage(user, tr)), true;
+        if (!plat) throw new HttpError(404, 'Not found');
+        if (!am_[2] && req.method === 'GET') return page(res, 200, addNamePage(user, tr, plat, { handle: plat.key === 'grok' ? pendingCode(user)?.handle : botPick(req) })), true;
+        if (!am_[2] && req.method === 'POST') {
+          const f = await form(req);
+          const handle = String(f.handle || '').trim().toLowerCase();
+          const error = nameError(user, handle, tr);
+          if (error) return page(res, error === tr('That name is taken. Try another.') ? 409 : 400, addNamePage(user, tr, plat, { error, handle: f.handle })), true;
+          if (plat.key === 'grok') startGrokSetup(user, handle);
+          res.setHeader('set-cookie', botCookie(handle));
+          return redirect(res, `/app/bots/add/${plat.key}/steps`), true;
+        }
+        if (am_[2] && req.method === 'GET') {
+          const handle = plat.key === 'grok' ? pendingCode(user)?.handle : botPick(req);
+          return handle ? (page(res, 200, addStepsPage(user, tr, plat, handle)), true) : (redirect(res, `/app/bots/add/${plat.key}`), true);
+        }
+      }
+      // Older ways in: the overview's button, the name form, and Undo after cancelling a Grok Bot setup.
+      if (p === '/app/bots/new' && req.method === 'POST') return redirect(res, '/app/bots/add'), true;
+      if (p === '/app/bots/new-form' && req.method === 'GET') return redirect(res, '/app/bots/add'), true;
+      if (p === '/app/bots' && req.method === 'POST') {
+        const f = await form(req);
+        const handle = String(f.handle || '').trim().toLowerCase();
+        const error = nameError(user, handle, tr);
+        if (error) return page(res, error === tr('That name is taken. Try another.') ? 409 : 400, addNamePage(user, tr, BOT_PLATFORMS(tr)[0], { error, handle: f.handle })), true;
+        startGrokSetup(user, handle);
+        return redirect(res, '/app/bots/add/grok/steps'), true;
       }
       if (p === '/app/bots/cancel' && req.method === 'POST') {
         const f = await form(req);

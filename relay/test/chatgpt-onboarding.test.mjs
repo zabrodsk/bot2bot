@@ -24,7 +24,10 @@ test('ChatGPT setup is public, does not start sign-in, and keeps invite context 
   assert.match(cz.text, /<html lang="cs">[^]*Otevřít Plugins v ChatGPT/);
 
   const owner = await login(env, 'owner@example.com');
-  const choices = await owner('/app');
+  // A new person picks OpenAI dots, names it, and its page leads to the ChatGPT guide.
+  assert.match((await owner('/app')).text, /href="\/app\/bots\/add\/dots"/);
+  await owner('/app/bots/add/dots', { method: 'POST', form: { handle: 'test-dot' } });
+  const choices = await owner('/app/bots/add/dots/steps');
   assert.match(choices.text, /href="\/connect\/chatgpt"/);
   assert.doesNotMatch(choices.text, /Add the custom MCP connector[^<]*sign me in/);
   await connectApp(env, owner, 'test-dot', 'ChatGPT');

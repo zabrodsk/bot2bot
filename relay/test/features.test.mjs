@@ -176,7 +176,7 @@ test('your name: picked on the first step, changeable in Account, and your bot n
   assert.equal((await b('/app/picture', { method: 'POST', form: { avatar: 'classic', name: 'Dušan  Zabrodský', next: '/app' } })).status, 303);
   assert.match((await b('/app/account')).text, /name="name" value="Dušan Zabrodský"/);
   // The bot name is suggested from it, without diacritics.
-  assert.match((await b('/app/bots/new-form')).text, /name="handle" value="dusan-bot"/);
+  assert.match((await b('/app/bots/add/codex')).text, /name="handle" value="dusan-bot"/);
   // Account: change it, with Undo.
   await b('/app/account/name', { method: 'POST', form: { name: 'Dusan Jr' } });
   const acc = (await b('/app/account')).text;

@@ -120,9 +120,8 @@ test('a Czech person sees Czech on the overview, account, invite, bot and person
   assert.match((await ann.b('/app')).text, /class="toast__what">Zablokováno: Ben<[^]*toast__undo">Vrátit</);
   assert.match((await ann.b('/app/nope')).text, /<html lang="cs">[^]*<h1>Tahle stránka tu není<\/h1><p>Odkaz je možná starý, nebo se stránka přesunula.<\/p>/);
   // The setup message for a new bot stays English: bots read it.
-  await ann.b('/app/bots/new', { method: 'POST', form: {} });
-  await ann.b('/app/bots', { method: 'POST', form: { handle: 'ann-two' } });
-  assert.match((await ann.b('/app')).text, /Připojte @ann-two[^]*Help me set you up on bot2bot/);
+  await ann.b('/app/bots/add/grok', { method: 'POST', form: { handle: 'ann-two' } });
+  assert.match((await ann.b('/app/bots/add/grok/steps')).text, /Připojte @ann-two[^]*Help me set you up on bot2bot/);
 });
 
 test('switching the language in Account: a toast with Undo, the login page follows after logging out', async (t0) => {
@@ -189,7 +188,7 @@ test('English stays as it was', async (t0) => {
   const env = await setup(t0);
   const b = await login(env, 'plain@example.com');
   const home = (await b('/app')).text;
-  assert.match(home, /<html lang="en">[^]*<title>Set up · bot2bot<\/title>[^]*Add the setup bot[^]*Waiting for your bot…/);
+  assert.match(home, /<html lang="en">[^]*<title>Add a bot · bot2bot<\/title>[^]*Connect your bot[^]*Grok Bot/);
   assert.doesNotMatch(home.replace(/<(style|script)>[^]*?<\/\1>/g, ''), /[ěščřžýáíéůú]/i, 'no Czech on an English page');
   assert.match(loginEmail({ code: '123456', url: 'https://x/l', home: 'https://x' }).subject, /^Your bot2bot login code: 123456$/);
   const tr = t('en');

@@ -203,7 +203,7 @@ test('chat files from any app: Claude sends a file to Claude Code and another to
   // A second bot for the same person, a Claude Code on another computer.
   await p.b('/app/bots', { method: 'POST', form: { handle: 'mia-cc' } });
   const cc = cliHome();
-  await cc.cli('enroll', env.url, (await p.b('/app')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
+  await cc.cli('enroll', env.url, (await p.b('/app/bots/add/grok/steps')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
   env.relay.db.prepare("UPDATE bots SET platform = 'claude_code' WHERE handle = 'mia-cc'").run();
   await cc.cli('contacts');
   const claude = await connectSender(env, p.b, 'Claude');
