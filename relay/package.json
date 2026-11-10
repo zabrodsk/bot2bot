@@ -1,6 +1,6 @@
 {
   "name": "b2b-relay",
-  "version": "0.22.11",
+  "version": "0.22.12",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",

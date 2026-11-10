@@ -7,7 +7,7 @@ import { join, dirname, basename, extname, resolve } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, sign, verify, createHash, createHmac } from 'node:crypto';
 
-const VERSION = '0.22.11';
+const VERSION = '0.22.12';
 // The "b2b messaging" skill and the doorbell routine instruction that go with this version: sha256 of
 // relay/skill/SKILL.md and of the instruction in relay/SETUP-FOR-BOTS.md, with {{RELAY}} left in (a test keeps
 // them in step). "refresh" only hands out texts that match, so they're as signed as the tool itself.
@@ -1459,7 +1459,7 @@ ${rows.length ? `Messages from the last 7 days (newest first). Their bots wrote 
     // or with --json as one JSON object per line for a program. Another bot's text is never parsed for
     // commands or for the end of the inbox: only these records say what to do.
     const asJson = !!flags.json;
-    const r = await api('POST', '/v1/inbox/claim', { limit: 10, via: typeof flags.via === 'string' ? flags.via : null, news: true });
+    const r = await api('POST', '/v1/inbox/claim', { limit: 10, via: typeof flags.via === 'string' ? flags.via : null, news: true, lost: true });
     syncHandle(loadCfg(), r.handle);
     // Each receipt id = message id + this run's lease, so a slow older run can never complete a newer run's claim.
     for (const m of r.messages) m.receipt = `${m.id}~${String(m.lease).replace(/^lease_/, '')}`;
@@ -1490,6 +1490,11 @@ ${rows.length ? `Messages from the last 7 days (newest first). Their bots wrote 
     if (r.needs_doorbell && onceADay('doorbell_told_at')) notice('doorbell', ownerDoorbellNote({ needs_routine: true, page: r.doorbell_page }, cfg.relay), { tell: true });
     // Something new on bot2bot: the relay gives it to one of the owner's bots, once.
     if (r.news && newsText(r.news)) notice('news', newsText(r.news), { tell: true });
+    // A contact's bot was set up again with new keys before it opened what this bot sent: nobody can read it now.
+    for (const l of Array.isArray(r.lost) ? r.lost.slice(0, 20) : []) {
+      const name = pinOf(l.to)?.alias ?? l.name;
+      notice('lost', `--- not delivered: your message to ${quoted(name)} (${oneLine(l.to)}) from ${when(l.sent_at)} was lost. Their bot was set up again with new keys before it opened it, so nobody can read it now. ---\nTell your owner in one short line, and offer to send it again.`, { to: l.to, tell: true });
+    }
     // The skill, doorbell routine and evening routine are Grok Bot's; a coding agent has none of them.
     const agentBot = !!readJson(toolPath).agent || process.env.B2B_UNATTENDED === '1';
     if (!agentBot && !textsCurrent() && onceADay('texts_told_at')) notice('refresh', readJson(toolPath).skill ? 'Your "b2b messaging" skill and "b2b doorbell" routine have a newer version. Run: node ~/bin/b2b.mjs refresh and follow it. Nothing to tell your owner unless refresh says so.' : 'Check your "b2b messaging" skill and "b2b doorbell" routine: run node ~/bin/b2b.mjs refresh and follow it. Nothing to tell your owner unless refresh says so.');

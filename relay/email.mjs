@@ -152,15 +152,18 @@ ${p(esc(foot), 'font-size:13px;margin:0;')}`;
 
 /** Sent when a message has waited a day without its bot picking it up (see nudgeWaiting): who wrote, never what,
  *  and how to get it now. Once per batch of messages. */
-export function waitingEmail({ product = 'bot2bot', handle, who, count = 1, botUrl, home, logo = '', art = '', lang = 'en' }) {
+// `noDoorbell`: nothing can wake this bot, so the email comes after a couple of hours and is about switching one on.
+export function waitingEmail({ product = 'bot2bot', handle, who, count = 1, noDoorbell = false, hours = 2, botUrl, home, logo = '', art = '', lang = 'en' }) {
   const tr = t(lang);
   const subject = tr('{who} wrote to @{handle}', { who, handle });
   const title = tr.n(count, '{n} message is waiting for @{handle}|{n} messages are waiting for @{handle}', { handle });
-  const lead = tr("From {who}, over a day ago. @{handle} hasn't checked its messages since.", { who, handle });
+  const lead = noDoorbell
+    ? tr.n(hours, 'From {who}, an hour ago. @{handle} has no doorbell yet, so it only sees messages when you talk to it.|From {who}, {n} hours ago. @{handle} has no doorbell yet, so it only sees messages when you talk to it.', { who, handle })
+    : tr("From {who}, over a day ago. @{handle} hasn't checked its messages since.", { who, handle });
   const ask = tr.n(count, 'To get it now, tell your bot:|To get them now, tell your bot:');
   const say = tr('“Check my bot2bot messages.”');
-  const more = tr("Its page shows how it can wake up on its own when a message comes.");
-  const cta = tr("Open @{handle}'s page", { handle });
+  const more = noDoorbell ? tr('Switch its doorbell on and it wakes up by itself next time. It takes a couple of minutes.') : tr("Its page shows how it can wake up on its own when a message comes.");
+  const cta = noDoorbell ? tr('Switch on the doorbell') : tr("Open @{handle}'s page", { handle });
   const foot = tr('We never say what a message says. Messages wait up to 7 days.');
   const text = `${title}\n\n${lead}\n\n${ask} ${say}\n\n${more}\n${cta}: ${botUrl}\n\n${foot}`;
   const body = `${h1(title)}

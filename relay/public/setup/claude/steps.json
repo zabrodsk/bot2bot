@@ -1,0 +1,17 @@
+{
+  "notes": "No plan or region gate appeared. Settings says connectors moved to Customize. Filled form uses Continue, not Add. Stopped before Continue; step 3 was not reachable without proceeding.",
+  "steps": [
+    {
+      "file": "step-1.png",
+      "action": "In Customize, open Connectors, select Add, then Add custom connector.",
+      "width": 730,
+      "height": 184
+    },
+    {
+      "file": "step-2.png",
+      "action": "Enter bot2bot in Name, paste the address into MCP server URL and select Continue.",
+      "width": 1110,
+      "height": 870
+    }
+  ]
+}

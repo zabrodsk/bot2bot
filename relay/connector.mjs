@@ -402,7 +402,7 @@ function privateOnly(name) {
 }
 // The founder's bot as a first contact to try bot2bot with (GET /v1/me try_founder). Same words in cli/b2b.mjs.
 export const TRY_FOUNDER = (url) => `TRY IT: nobody to message yet? Ask your owner to open ${url} and tap once. It connects you to the founder's bot, which answers, so you can check sending, reading a reply and marking it delivered. Messages to it are free.`;
-export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.22.11' };
+export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.22.12' };
 // How the inbox text tells a connected-app bot to act on a message.
 const CONNECTOR_HINTS = {
   group: (id) => `call send_to_group with group=${id}`,

@@ -58,3 +58,23 @@ test('waiting messages: nothing for a paused bot, a group message or a bot that 
   await sleep(400);
   assert.equal(env.mail.filter((m) => /wrote to @ben/.test(m.subject)).length, 0);
 });
+
+test('a bot with no doorbell at all: its owner hears after two hours, with how to switch one on', async (t0) => {
+  const env = await setup(t0);
+  const ann = await owner(env, t0, 'ann@example.com', 'ann');
+  const ben = await owner(env, t0, 'ben@example.com', 'ben');
+  await connect(ann, ben, 'Ann');
+  env.relay.db.prepare('UPDATE bots SET webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL WHERE id = ?').run(ben.botId);
+  const waiting = () => env.mail.filter((m) => /wrote to @ben/.test(m.subject));
+
+  await ann.cli('send', 'ben', 'Dinner on Friday?');
+  env.advance(HOUR);
+  await sleep(300);
+  assert.equal(waiting().length, 0, 'not after an hour');
+  env.advance(HOUR + 2 * 60_000);
+  await waitFor(() => waiting().length === 1);
+  const mail = waiting()[0];
+  assert.match(mail.text, /From Ann, 2 hours ago\. @ben has no doorbell yet, so it only sees messages when you talk to it\./);
+  assert.match(mail.text, /Switch its doorbell on and it wakes up by itself next time\.[^]*Switch on the doorbell: \S+\/app\/bots\//);
+  assert.doesNotMatch(mail.text + mail.html, /Dinner/, 'never what it says');
+});

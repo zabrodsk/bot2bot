@@ -46,6 +46,7 @@ export const LIMITS = {
   doorbellNudgeAtMs: [86_400_000],
   doorbellNudgeMaxAgeMs: 14 * 86_400_000, // ...but never for bots older than this (set up long ago, left on purpose)
   waitingNotifyAfterMs: 24 * 3_600_000, // a message nobody picked up in a day: its owner gets one email (see nudgeWaiting)
+  waitingNoDoorbellMs: 2 * 3_600_000, // ...or in two hours, for a bot with no doorbell at all: nothing else will wake it
   approveNudgeAfterMs: 5 * 60_000, // bots paired on their own: an owner who hasn't said yes by then gets one email
   nudgeGapMs: 20 * 3_600_000,    // reminder emails (the doorbell one, the hosted gift one) never reach a person closer than this
   joinsOpenMax: 500,             // open join links across the whole relay
@@ -319,6 +320,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   migrateConnector(db);
   migrateGovernance(db);
   migrateEvents(db);
+  // A send-only chat's app (ChatGPT, Gemini…). Its name can be the owner's own ("Gemini work"); before names, it was the app.
+  if (!db.prepare('PRAGMA table_info(bots)').all().some((c) => c.name === 'chat_app')) db.exec("ALTER TABLE bots ADD COLUMN chat_app TEXT; UPDATE bots SET chat_app = display_name WHERE platform = 'sender'");
   migrateGroups(db);
   migrateStatus(db);
   migrateFiles(db);
@@ -364,16 +367,28 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   const VIA = new Set(['doorbell', 'manual', 'schedule', 'watch']);
   const log = (bot, kind, detail = {}) => q('INSERT INTO events (ts, bot, kind, detail) VALUES (?, ?, ?, ?)').run(clock(), bot ?? null, kind, JSON.stringify(detail));
 
-  // New keys make old safety-code checks meaningless, and anything still waiting was sealed to the old key.
+  // New keys make old safety-code checks meaningless, and anything still waiting was sealed to the old key: nobody
+  // can open it now. It's dropped, and each sender's bot hears so on its next inbox check (see lostFor), so it can
+  // send it again instead of thinking it arrived.
   function setKeys(bot, keys) {
     const changed = (keys?.sign ?? null) !== (bot.sign_pub ?? null) || (keys?.box ?? null) !== (bot.box_pub ?? null);
     if (!changed) return false;
     q('UPDATE bots SET sign_pub = ?, box_pub = ?, keys_at = ? WHERE id = ?').run(keys?.sign ?? null, keys?.box ?? null, clock(), bot.id);
     q('UPDATE contacts SET codes_compared_at = NULL WHERE owner_bot = ? OR peer_bot = ?').run(bot.id, bot.id);
     bumpGen(bot.id);
+    const lost = q(`SELECT id FROM messages WHERE to_bot = ? AND status IN ('pending', 'claimed') AND sealed IS NOT NULL AND group_id IS NULL AND kind != 'probe'`).all(bot.id).map((m) => m.id);
     erase(`to_bot = ? AND status IN ('pending', 'claimed') AND sealed IS NOT NULL`, bot.id);
+    for (const id of lost) q("UPDATE messages SET note = 'lost_keys' WHERE id = ?").run(id);
     log(bot.id, 'keys_set', { first: !bot.box_pub });
     return true;
+  }
+  // Messages this bot sent that were lost to a contact's new keys, said once: who to and when.
+  function lostFor(me) {
+    const rows = q(`SELECT m.id, m.created_at, b.handle, c.alias FROM messages m JOIN bots b ON b.id = m.to_bot
+                    LEFT JOIN contacts c ON c.owner_bot = m.from_bot AND c.peer_bot = m.to_bot
+                    WHERE m.from_bot = ? AND m.note = 'lost_keys' ORDER BY m.created_at LIMIT 20`).all(me.id);
+    for (const m of rows) q("UPDATE messages SET note = 'lost_keys_told' WHERE id = ?").run(m.id);
+    return rows.map((m) => ({ id: m.id, to: `@${m.handle}`, name: m.alias ?? `@${m.handle}`, sent_at: iso(m.created_at) }));
   }
   const botByToken = (raw) => (raw ? q('SELECT * FROM bots WHERE token_hash = ?').get(sha(raw)) : undefined);
   const contact = (owner, peer) => q('SELECT * FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(owner, peer);
@@ -619,8 +634,9 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     }
   }
 
-  // A message its bot hasn't picked up in a day (no doorbell, a broken one, or an assistant that only runs when asked):
-  // its owner gets one short email saying who wrote, never what, so nothing sits unnoticed until it expires. One per
+  // A message its bot hasn't picked up in a day (a broken doorbell, or an assistant that only runs when asked), or in two
+  // hours when it has no doorbell at all: its owner gets one short email saying who wrote, never what, so nothing sits
+  // unnoticed until it expires. Without a doorbell the email says how to switch one on. One per
   // batch: messages that came after the last email. Never on a day they already got another reminder (L.nudgeGapMs).
   // Not for paused bots (held on purpose), group messages (they wait for the next run by design) or the web inbox.
   let waitingCheckedAt = 0;
@@ -628,14 +644,14 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   async function nudgeWaiting(t) {
     if (t - waitingCheckedAt < 60_000) return;
     waitingCheckedAt = t;
-    const due = q(`SELECT b.id, b.handle, b.waiting_notified_at, u.id AS user_id, u.email, u.lang, u.nudged_at, count(*) AS n FROM messages m
+    const due = q(`SELECT b.id, b.handle, b.waiting_notified_at, b.webhook_url IS NULL AS no_doorbell, min(m.created_at) AS oldest, u.id AS user_id, u.email, u.lang, u.nudged_at, count(*) AS n FROM messages m
                    JOIN bots b ON b.id = m.to_bot JOIN users u ON u.id = b.user_id
                    WHERE m.status = 'pending' AND m.kind != 'probe' AND m.group_id IS NULL AND coalesce(m.note, '') != 'key_check'
-                     AND m.created_at BETWEEN ? AND ? AND m.created_at > coalesce(b.waiting_notified_at, 0)
+                     AND m.created_at >= ? AND m.created_at <= CASE WHEN b.webhook_url IS NULL THEN ? ELSE ? END AND m.created_at > coalesce(b.waiting_notified_at, 0)
                      AND b.disconnected_at IS NULL AND b.removed_at IS NULL AND b.paused_at IS NULL AND b.vendor != 'web'
                      AND coalesce(b.platform, '') != 't3code'
                      AND u.email_verified_at IS NOT NULL AND (u.nudged_at IS NULL OR u.nudged_at <= ?)
-                   GROUP BY b.id`).all(t - L.undeliveredExpiryMs, t - L.waitingNotifyAfterMs, t - L.nudgeGapMs);
+                   GROUP BY b.id`).all(t - L.undeliveredExpiryMs, t - L.waitingNoDoorbellMs, t - L.waitingNotifyAfterMs, t - L.nudgeGapMs);
     const mailed = new Set(); // two bots of one person: one email now, the other's after the gap
     for (const b of due) {
       if (mailed.has(b.user_id)) continue;
@@ -649,7 +665,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       q('UPDATE bots SET waiting_notified_at = ? WHERE id = ?').run(t, b.id);
       q('UPDATE users SET nudged_at = ? WHERE id = ?').run(t, b.user_id);
       try {
-        await mailer({ to: b.email, ...waitingEmail({ product: productName, handle: b.handle, who, count: b.n, botUrl: `${publicUrl}/app/bots/${b.id}`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', art: publicUrl ? `${publicUrl}/stickers/robot-sleepy.png` : '', lang: b.lang }) });
+        await mailer({ to: b.email, ...waitingEmail({ product: productName, handle: b.handle, who, count: b.n, noDoorbell: !!b.no_doorbell, hours: Math.max(1, Math.floor((t - b.oldest) / 3_600_000)), botUrl: `${publicUrl}/app/bots/${b.id}`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', art: publicUrl ? `${publicUrl}/stickers/robot-sleepy.png` : '', lang: b.lang }) });
         log(b.id, 'waiting_notified', { messages: b.n });
       } catch {
         // Not tried again for this batch (the next message starts a new one); only the day's reminder gap is given back.
@@ -1299,6 +1315,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       // Tools that tell their owner what's new ask for it; it's theirs to tell from now on, so no other bot repeats it.
       const news = body.news === true ? newsFor(me, t) : null;
       if (news) q('UPDATE users SET bot_news = ?, bot_news_at = ? WHERE id = ?').run(news.id, t, me.user_id);
+      // Only tools that say what to do with it ask, so an older one never uses it up unseen.
+      const lost = body.lost === true ? lostFor(me) : [];
       const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 25);
       q("UPDATE messages SET status = 'pending', lease_until = NULL WHERE to_bot = ? AND status = 'claimed' AND lease_until <= ?").run(me.id, t);
       // Re-check permission at delivery time: messages from contacts blocked since sending are dropped, and group
@@ -1328,6 +1346,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         lease_seconds: L.leaseMs / 1000,
         ...(files.isOn(me) ? { files: files.statusFor(me) } : {}),
         ...(news ? { news } : {}),
+        ...(lost.length ? { lost } : {}),
         messages: rows.map((m) => ({
           from_person: m.kind === 'probe' ? null : (m.from_person ?? null), from_verified: !!m.from_verified,
           id: m.id, lease: m.lease, kind: m.kind, from: m.kind === 'probe' ? 'b2b relay' : (m.from_alias ?? `@${m.from_handle}`), from_handle: `@${m.from_handle}`,
@@ -1717,7 +1736,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     }
   }
 
-  return { handle, tick, db, ring, status, enqueue, governance, groups, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, setPrivacy, setPrivacyInTx, retention: (t = clock()) => { lastRetention = 0; retention(t); } };
+  return { handle, tick, db, ring, status, enqueue, setKeys, governance, groups, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, setPrivacy, setPrivacyInTx, retention: (t = clock()) => { lastRetention = 0; retention(t); } };
 }
 
 // ───── the landing site ─────

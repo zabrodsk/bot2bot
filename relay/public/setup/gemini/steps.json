@@ -1,0 +1,17 @@
+{
+  "notes": "No plan or region gate appeared. Visible button is Custom; accessibility label is Create custom app. Next was not clicked.",
+  "steps": [
+    {
+      "file": "step-1.png",
+      "action": "Open Connected Apps and select Custom.",
+      "width": 1490,
+      "height": 290
+    },
+    {
+      "file": "step-2.png",
+      "action": "Paste the address into MCP Server URL and select Next.",
+      "width": 1070,
+      "height": 880
+    }
+  ]
+}

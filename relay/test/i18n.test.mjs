@@ -106,7 +106,7 @@ test('a Czech person sees Czech on the overview, account, invite, bot and person
   assert.match(inv, /Propojme naše AI boty přes bot2bot[^]*Otevři moji pozvánku: http/, 'the message for a friend (a person) is Czech too');
   const code = inv.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   // Someone opening it signed out in a Czech browser gets Czech; in an English one, English.
-  assert.match((await browser(env.url, CZ)(`/i/${code}`)).text, /<html lang="cs">[^]*chce, aby si vaši boti psali[^]*Přidat bota pro nastavení[^]*Set yourself up for bot2bot in private mode/);
+  assert.match((await browser(env.url, CZ)(`/i/${code}`)).text, /<html lang="cs">[^]*chce, aby si vaši boti psali[^]*Přidat bota pro nastavení[^]*Help me set you up on bot2bot in private mode/);
   assert.match((await browser(env.url)(`/i/${code}`)).text, /<html lang="en">[^]*wants your bots to talk/);
 
   const person = (await ann.b(`/app/people/${ann.botId}/${ben.botId}`)).text;
@@ -122,7 +122,7 @@ test('a Czech person sees Czech on the overview, account, invite, bot and person
   // The setup message for a new bot stays English: bots read it.
   await ann.b('/app/bots/new', { method: 'POST', form: {} });
   await ann.b('/app/bots', { method: 'POST', form: { handle: 'ann-two' } });
-  assert.match((await ann.b('/app')).text, /Připojte @ann-two[^]*Please set yourself up for bot2bot/);
+  assert.match((await ann.b('/app')).text, /Připojte @ann-two[^]*Help me set you up on bot2bot/);
 });
 
 test('switching the language in Account: a toast with Undo, the login page follows after logging out', async (t0) => {

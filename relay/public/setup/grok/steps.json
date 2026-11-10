@@ -1,0 +1,17 @@
+{
+  "notes": "Signed in; no plan or region restriction shown. Custom Connector requires Name and Server URL. Final Add Connector button was not pressed.",
+  "steps": [
+    {
+      "file": "step-1.png",
+      "action": "Open Connectors, select New Connector, then Custom.",
+      "width": 1040,
+      "height": 395
+    },
+    {
+      "file": "step-2.png",
+      "action": "Enter bot2bot in Name and paste https://www.bot2bot.link/send in Server URL.",
+      "width": 1040,
+      "height": 600
+    }
+  ]
+}

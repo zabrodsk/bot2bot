@@ -460,7 +460,10 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     let r = inbound
       ? q('SELECT * FROM privacy_requests WHERE owner_bot = ? AND inbound_message_id = ?').get(ownerBot, inbound)
       : q("SELECT * FROM privacy_requests WHERE owner_bot = ? AND peer_bot = ? AND inbound_message_id IS NULL AND state IN ('PENDING_OWNER','APPROVED','CANCELLED','EXPIRED') ORDER BY created_at DESC, id LIMIT 1").get(ownerBot, c.peer_bot);
-    if (r && !['PENDING_OWNER', 'CANCELLED', 'EXPIRED'].includes(r.state)) fail('request is already decided', 409);
+    // An okayed draft that never went out (say its files can't reach an old bot yet) gives way to the new one,
+    // which needs the owner's yes again. Only sent or declined requests stay as they are.
+    const open = (s) => ['PENDING_OWNER', 'CANCELLED', 'EXPIRED'].includes(s.state) || (s.state === 'APPROVED' && s.approval_used_at == null);
+    if (r && !open(r)) fail('request is already decided', 409);
     if (r && r.state === 'PENDING_OWNER' && JSON.stringify(latest(r)) === JSON.stringify(draft)) return requestView(r);
     if (!r) {
       const id = token('req_', 9);

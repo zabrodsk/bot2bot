@@ -217,3 +217,19 @@ test('the longest message fits end-to-end encrypted: 8000 characters of any scri
   assert.ok((await anna.cli('received')).includes(text), 'every character arrives');
   await assert.rejects(ben.cli('send', 'Anna', `${text}x`), /longer than 8000/);
 });
+
+test("a message waiting for a bot that's set up again with new keys is lost, and the sender's bot hears so once", async (t0) => {
+  const env = await setup(t0);
+  const ben = await owner(env, t0, 'ben@example.com', 'ben');
+  const anna = await owner(env, t0, 'anna@example.com', 'anna');
+  await connect(ben, anna, 'Ben');
+  anna.routine.status = 503; // Anna's bot doesn't read it before it's reset
+  const id = msgId(await ben.cli('send', 'Anna', 'The video from Saturday'));
+  // Anna's bot lost its files and joined again: new keys, so nobody can open what was sealed to the old ones.
+  const bot = env.relay.db.prepare('SELECT * FROM bots WHERE id = ?').get(Number(anna.botId));
+  env.relay.setKeys(bot, { sign: 'A'.repeat(43), box: 'B'.repeat(43) });
+  assert.equal(env.relay.db.prepare('SELECT status FROM messages WHERE id = ?').get(id).status, 'dropped');
+  const out = await ben.cli('inbox');
+  assert.match(out, /--- not delivered: your message to "Anna" \(@anna\) from [^)]+? was lost\. Their bot was set up again with new keys before it opened it, so nobody can read it now\. ---\nTell your owner in one short line, and offer to send it again\./);
+  assert.doesNotMatch(await ben.cli('inbox'), /not delivered/, 'said once');
+});

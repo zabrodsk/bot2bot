@@ -360,8 +360,11 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
   const myBots = (u, { all = false } = {}) => q(`SELECT * FROM bots WHERE user_id = ?${all ? '' : ' AND removed_at IS NULL'} ORDER BY created_at`).all(u.id);
   const ownBot = (u, id, { removed = false } = {}) => { const b = q('SELECT * FROM bots WHERE id = ?').get(Number(id)); if (!b || b.user_id !== u.id || (!!b.removed_at !== removed)) throw new HttpError(404, 'Bot not found'); return b; };
   const pendingCode = (u) => q('SELECT * FROM enroll_codes WHERE user_id = ? AND used_at IS NULL AND expires_at > ? ORDER BY expires_at DESC').get(u.id, clock());
-  const setupMessage = (code) => `Please set yourself up for ${product}. Read the guide with: curl -fsSL ${origin}/setup
-Then install the tool and join with code ${code}. Add the "b2b messaging" skill from ${origin}/skill. Make a routine called "b2b doorbell" with a webhook trigger, using the instruction from the guide. Don't print any keys or tokens in this chat.`;
+  const setupMessage = (code) => `Help me set you up on ${product}. ${prompts.helping}
+Read the guide with: curl -fsSL ${origin}/setup
+Then install the tool and join with code ${code}. Add the "b2b messaging" skill from ${origin}/skill. Make a routine called "b2b doorbell" with a webhook trigger, using the instruction from the guide.
+${prompts.helpAfter()}
+Don't print any keys or tokens in this chat.`;
   // Another assistant (joined with --agent other) usually can't be woken from outside: it sees messages when its
   // owner talks to it, so there's no doorbell step for it. If it can take webhooks, it sets one with "b2b doorbell set".
   // An assistant we know by name (Poke, Instinct…) or another app on quick connect sets its own doorbell from its tool:
@@ -472,15 +475,16 @@ ${bar}</div>`;
     log(b.id, 'connector_bot_created', {});
     return b;
   }
-  // Send only (bot2bot.link/send): one sender per chat app, named after it. Connecting again brings the same one back.
-  function senderBot(u, label) {
-    const had = q("SELECT * FROM bots WHERE user_id = ? AND vendor = 'connector' AND platform = ? AND display_name = ? AND removed_at IS NULL ORDER BY created_at DESC").get(u.id, SENDER, label);
+  // Send only (bot2bot.link/send): one sender per chat app and name (the app's own, unless the owner picked one, as
+  // with two Gemini accounts). Connecting again with the same name brings the same one back.
+  function senderBot(u, label, name = label) {
+    const had = q("SELECT * FROM bots WHERE user_id = ? AND vendor = 'connector' AND platform = ? AND chat_app = ? AND display_name = ? AND removed_at IS NULL ORDER BY created_at DESC").get(u.id, SENDER, label, name);
     if (had) { if (had.disconnected_at) q('UPDATE bots SET disconnected_at = NULL WHERE id = ?').run(had.id); return had; }
     const slug = (v) => String(v).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-    const base = `${slug(u.name || u.email.split('@')[0]).slice(0, 18) || 'my'}-${slug(label).slice(0, 12) || 'chat'}`;
+    const base = `${slug(u.name || u.email.split('@')[0]).slice(0, 18) || 'my'}-${slug(name).slice(0, 12) || 'chat'}`;
     let handle = base;
     for (let n = 2; q('SELECT 1 FROM bots WHERE handle = ?').get(handle) || q('SELECT 1 FROM enroll_codes WHERE handle = ? AND used_at IS NULL').get(handle); n++) handle = `${base}-${n}`;
-    q("INSERT INTO bots (handle, display_name, token_hash, created_at, user_id, vendor, platform) VALUES (?, ?, NULL, ?, ?, 'connector', ?)").run(handle, label, clock(), u.id, SENDER);
+    q("INSERT INTO bots (handle, display_name, token_hash, created_at, user_id, vendor, platform, chat_app) VALUES (?, ?, NULL, ?, ?, 'connector', ?, ?)").run(handle, name, clock(), u.id, SENDER, label);
     const b = q('SELECT * FROM bots WHERE handle = ?').get(handle);
     log(b.id, 'sender_created', { app: label });
     return b;
@@ -490,7 +494,7 @@ ${bar}</div>`;
   const signedInAs = (user, tr, params, client) => `<div class="card__aside"><p>${tr('Requested by the app "{name}".', { name: esc(client.name) })}</p><form method="post" action="/logout">${tr('Signed in as {email}.', { email: esc(user.email) })} <input type="hidden" name="next" value="${esc(`/oauth/authorize?${new URLSearchParams(params)}`)}"><button class="link">${tr('Use another account')}</button></form></div>`;
   // Yes and no side by side. Yes comes first in the form, so Enter connects.
   const decide = (tr, yes) => `<div class="decide"><button class="btn" name="decision" value="allow">${yes}</button><button class="btn ghost" name="decision" value="deny">${tr('Cancel')}</button></div>`;
-  function sendAuthorizePage(user, client, params) {
+  function sendAuthorizePage(user, client, params, name = '') {
     const tr = T(user);
     const app = esc(senderLabel(client.name));
     const hidden = Object.entries(params).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
@@ -498,14 +502,14 @@ ${bar}</div>`;
     return layout(tr('Connect'), `<section class="card">
 <h1>${tr('Let {app} send to your bots?', { app })}</h1>
 <p>${tr("When you ask, {app} sends briefs, notes and files to your own bots. It can't read your messages, see your account or reach your friends.", { app })}</p>
-${none ? `<p>${tr('You have no bots yet. Connect one too, so it has somewhere to send.')}</p>` : ''}
+${name && name !== senderLabel(client.name) ? `<p>${tr('Your bots see it as {name}.', { name: esc(name) })}</p>` : ''}${none ? `<p>${tr('You have no bots yet. Connect one too, so it has somewhere to send.')}</p>` : ''}
 <p class="muted small">${tr('Not end-to-end encrypted: {app} hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.', { app })}</p>
 <form method="post" action="/oauth/authorize" class="stack">${hidden}
 ${decide(tr, tr('Connect'))}</form>
 ${signedInAs(user, tr, params, client)}</section>`, { user, width: 'narrow', bar: { title: tr('Send to your bots') } });
   }
   // Consent for a connected app (OAuth). The app gets one bot of this person's, nothing else.
-  function authorizePage(user, client, params, { error = '' } = {}) {
+  function authorizePage(user, client, params, { error = '', send = false } = {}) {
     const tr = T(user);
     // A dot in private mode can sign ChatGPT in again, for wake-ups only: its messages stay end-to-end encrypted.
     const dotApp = isDotApp(client);
@@ -520,8 +524,8 @@ ${error ? `<p class="error" role="alert">${esc(tr.msg(error))}</p>` : ''}
 <p>${tr('Your bot can message the people you connect with.')} ${tr("It can't see your account or anyone else's bots.")}</p>
 <p class="muted small">${tr('Not end-to-end encrypted: we pass the text on and delete it 7 days after delivery. Want end-to-end encryption? Set your bot up in private mode instead.')}</p>
 <form method="post" action="/oauth/authorize" class="stack">${hidden}
-<label>${tr('Which bot')}<select name="bot" id="pick"><option value="new"${back ? '' : ' selected'}>${tr('A new bot')}</option>${bots.map((b) => `<option value="${b.id}"${b === back ? ' selected' : ''}>@${esc(b.handle)}${b.disconnected_at ? ` (${tr('reconnect')})` : wakeOnly(b) ? ` (${tr('wake-ups only, stays end-to-end encrypted')})` : ''}</option>`).join('')}<option value="send">${tr('Send only: it hands things to my bots')}</option></select></label>
-<label id="newname"${back ? ' hidden' : ''}>${tr('Name for the new bot')}<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
+<label>${tr('Which bot')}<select name="bot" id="pick"><option value="new"${back || send ? '' : ' selected'}>${tr('A new bot')}</option>${bots.map((b) => `<option value="${b.id}"${b === back && !send ? ' selected' : ''}>@${esc(b.handle)}${b.disconnected_at ? ` (${tr('reconnect')})` : wakeOnly(b) ? ` (${tr('wake-ups only, stays end-to-end encrypted')})` : ''}</option>`).join('')}<option value="send"${send ? ' selected' : ''}>${tr('Send only: it hands things to my bots')}</option></select></label>
+<label id="newname"${back || send ? ' hidden' : ''}>${tr('Name for the new bot')}<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
 ${decide(tr, tr('Connect'))}</form>
 ${signedInAs(user, tr, params, client)}</section>
 <script>const p=document.getElementById('pick'),n=document.getElementById('newname');p.addEventListener('change',()=>{n.hidden=p.value!=='new';});</script>`, { user, width: 'narrow', bar: { title: tr('Connect your bot to {product}', { product }) } });
@@ -643,44 +647,114 @@ ${devCode ? `<p class="dev">${tr('Dev mode: your code is <b>{code}</b>', { code:
 </section>`, { tr });
   }
 
-  // Send only: how to add bot2bot to ChatGPT or Claude, so a chat can hand a brief to your bot. One card: pick the
-  // chat, copy one address, sign in. The page waits for the sign-in, then says it worked and what to say first.
-  function sendSetupPage(user, tr, want = '') {
+  // Send only: adding bot2bot to a chat app (ChatGPT, Claude, Gemini…), so a chat can hand a brief to your bot. A page
+  // of its own, one choice at a time: the app, then the name your bots see, then that app's steps and nothing else.
+  // The name rides along in a short-lived cookie until the app signs in (it opens bot2bot in its own window).
+  const sendCookie = (key, name) => `b2b_send=${encodeURIComponent(`${key}:${name}`)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600${secure ? '; Secure' : ''}`;
+  const sendPick = (req, label) => {
+    const [key, ...rest] = String(cookies(req).b2b_send || '').split(':');
+    const app = CHAT_APPS.find((a) => a.key === key);
+    return app && (!label || app.label === label) ? cleanName(rest.join(':')) : '';
+  };
+  // Each app's steps: what to do, with the button that opens the right page, the name or the address to paste. A step
+  // shows its annotated screenshot (public/setup/<app>/step-<n>.png) once there is one.
+  const SEND_STEPS = (tr) => {
+    const ask = tr('When bot2bot asks which bot, pick Send only.');
+    return {
+      chatgpt: { link: 'https://chatgpt.com/plugins', open: tr('Open ChatGPT Plugins'), note: tr('Needs a paid ChatGPT plan. In a work account, your admin has to allow custom servers.'), steps: [
+        { text: tr('Open ChatGPT Plugins, select Add, then Add custom MCP server.'), open: true },
+        { text: tr('Name it bot2bot and paste the address under Server URL.'), name: true, url: true },
+        { text: tr('Keep OAuth and tick I understand and want to continue.') },
+        { text: tr('Select Create as a plugin. Then sign in to bot2bot and select Connect.') }] },
+      claude: { link: 'https://claude.ai/settings/connectors', open: tr('Open Claude connectors'), steps: [
+        { text: tr('Open Claude connectors, select Add, then Add custom connector.'), open: true },
+        { text: tr('Type bot2bot as the name, paste the address and select Continue.'), name: true, url: true },
+        { text: tr('Select Connect and sign in to bot2bot.') }] },
+      gemini: { link: 'https://gemini.google.com/apps', open: tr('Open Gemini connected apps'), note: tr('For personal Google accounts in the US for now.'), steps: [
+        { text: tr('Open Gemini connected apps and select Custom.'), open: true },
+        { text: tr('Paste the address into MCP Server URL and select Next.'), url: true },
+        { text: `${tr('Sign in to bot2bot.')} ${ask}` }] },
+      grok: { link: 'https://grok.com/connectors', open: tr('Open Grok connectors'), note: tr('Needs a paid Grok plan.'), steps: [
+        { text: tr('Open Grok connectors, select New Connector, then Custom.'), open: true },
+        { text: tr('Name it bot2bot and paste the address under Server URL.'), name: true, url: true },
+        { text: `${tr('Select Add Connector and sign in to bot2bot.')} ${ask}` }] },
+      perplexity: { link: 'https://www.perplexity.ai/account/connectors', open: tr('Open Perplexity connectors'), note: tr('Needs Perplexity Pro or Max.'), steps: [
+        { text: tr('Open Perplexity connectors, select Add custom, then Add MCP connector and Remote.'), open: true },
+        { text: tr('Name it bot2bot, paste the address, tick the box and select Add.'), name: true, url: true },
+        { text: `${tr('Select its card and sign in to bot2bot.')} ${ask}` }] },
+      lechat: { link: 'https://chat.mistral.ai', open: tr('Open Le Chat'), steps: [
+        { text: tr('Open Le Chat, go to Connectors and select Add Connector, then the Custom MCP Connector tab.'), open: true },
+        { text: tr('Name it bot2bot, paste the address and select Connect.'), name: true, url: true },
+        { text: `${tr('Sign in to bot2bot.')} ${ask}` }] },
+    };
+  };
+  const SHOT_DIR = new URL('./public/setup/', import.meta.url);
+  const shotOf = (key, n) => {
+    const file = new URL(`./${key}/step-${n}.png`, SHOT_DIR);
+    if (!existsSync(file)) return null;
+    let size = {};
+    try { const j = JSON.parse(readFileSync(new URL(`./${key}/steps.json`, SHOT_DIR), 'utf8')); size = (Array.isArray(j) ? j : j.steps || []).find((x) => x.file === `step-${n}.png`) || {}; } catch {}
+    // Captured at 2x, so they show at half their pixel size (and never wider than the column).
+    return { src: `/setup-shots/${key}/step-${n}.png`, width: size.width && Math.round(size.width / 2), height: size.height && Math.round(size.height / 2) };
+  };
+  const sendersOf = (user) => (user ? liveBots(user).filter(isSender) : []);
+  const sendTargets = (user) => (user ? liveBots(user).filter((b) => b.vendor !== 'web' && !isSender(b)) : []);
+  const noTarget = (user, tr) => user && !sendTargets(user).length ? alertBox('info', tr('Connect a bot first'), tr('Briefs need somewhere to land: your coding agent, Grok Bot or another bot.'), `<a class="btn small" href="/app">${tr('Connect a bot')}</a>`) : '';
+  const sendTrack = (app, at, tr) => stepper([app ? app.label : tr('Chat app'), tr('Name'), tr('Connect')], at, 'h', tr);
+
+  // Step one: which chat app. One row each; the ones already sending say so.
+  function sendPickPage(user, tr) {
+    const senders = sendersOf(user);
+    const all = SEND_STEPS(tr);
+    const row = (a) => {
+      const on = senders.filter((b) => b.chat_app === a.label);
+      const sub = on.length ? tr('Connected as {names}', { names: on.map((b) => esc(b.display_name)).join(', ') }) : esc(all[a.key].note || '');
+      return `<li><a class="line line--link" href="/connect/send/${a.key}"><span class="botmark" data-origin="sender">${MARK[a.key]}${on.length ? presence('ready') : ''}</span><span class="line__main"><span class="line__title">${a.label}</span>${sub ? `<span class="line__sub">${sub}</span>` : ''}</span>${ICON.chev}</a></li>`;
+    };
+    return layout(tr('Connect a chat app'), `${noTarget(user, tr)}<section class="card stack"><h1>${tr('Which chat app?')}</h1>
+<p>${tr('Say "send this to my Codex" in a chat, and the brief goes straight to your bot.')}</p></section>
+<div class="card card--list"><ul class="list">${CHAT_APPS.map(row).join('')}</ul></div>`, { user, tr, width: 'read', outWidth: 'read', bar: { back: user ? '/app' : '' } });
+  }
+
+  // Step two: the name your bots see. The app's own name unless you want another, as with two accounts.
+  function sendNamePage(user, tr, app, name, error = '') {
+    return layout(tr('Connect {app}', { app: app.label }), `<section class="card">${sendTrack(app, 1, tr)}
+<h1>${tr('What should your bots call it?')}</h1>
+<form method="post" action="/connect/send/${app.key}" class="stack">${field({ label: tr('Name'), name: 'name', value: name || app.label, error, description: tr('Two {app} accounts? Give each its own name, like {app} work.', { app: app.label }), attrs: 'required maxlength="40" autocomplete="off"' })}
+<div><button class="btn">${tr('Continue')}</button></div></form></section>`, { user, tr, width: 'read', outWidth: 'read', bar: { back: '/connect/send', title: app.label } });
+  }
+
+  // Step three: that app's steps, nothing about the others. The page waits for the sign-in, then says it worked.
+  function sendStepsPage(user, tr, app, name) {
+    const how = SEND_STEPS(tr)[app.key];
+    const senders = sendersOf(user);
     const url = `${origin}/send`;
-    const live = user ? liveBots(user) : [];
-    const senders = live.filter(isSender);
-    const targets = live.filter((b) => b.vendor !== 'web' && !isSender(b));
+    const step = (s, i) => {
+      const shot = shotOf(app.key, i + 1);
+      return `<li class="walk__step"><span class="walk__n" aria-hidden="true">${i + 1}</span><div class="walk__body"><p>${s.text}</p>
+${s.open ? `<a class="btn ghost" href="${how.link}" target="_blank" rel="noopener noreferrer">${how.open}${ICON.out}</a>` : ''}
+${s.name ? codeBlock(`send-name-${i}`, tr('Name'), 'bot2bot', tr, MARK[app.key]) : ''}${s.url ? codeBlock(`send-url-${i}`, tr('Address'), url, tr, MARK[app.key]) : ''}
+${shot ? `<figure class="shot"><img src="${shot.src}" alt="${esc(s.text)}"${shot.width ? ` width="${shot.width}" height="${shot.height}"` : ''} loading="lazy" decoding="async"></figure>` : ''}</div></li>`;
+    };
+    return layout(tr('Connect {app}', { app: app.label }), `${noTarget(user, tr)}<section class="card">${sendTrack(app, 2, tr)}
+<h1>${tr('Connect {app}', { app: app.label })}</h1>${how.note ? `<p class="muted small">${how.note}</p>` : ''}
+<ol class="walk">${how.steps.map(step).join('')}</ol>
+${user ? `<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for you to connect…')}</p>
+<script>(function poll(){fetch('/app/status').then(r=>r.json()).then(d=>{if((d.senders||0)>${senders.length})location.href='/connect/send/${app.key}/done';else setTimeout(poll,2500);}).catch(()=>setTimeout(poll,4000));})();</script>` : ''}
+<p class="muted small">${tr("It only sends, and only to your own bots. It can't read your messages. Not end-to-end encrypted: the chat hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.")}</p></section>`, { user, tr, width: 'read', outWidth: 'read', bar: { back: `/connect/send/${app.key}`, title: app.label, sub: name !== app.label ? esc(name) : '' } });
+  }
+
+  // Done: it's connected, and the first thing to say in it.
+  function sendDonePage(user, tr, app, b) {
+    const targets = sendTargets(user);
     const target = targets.length ? originOf(targets[0], tr).name : 'Codex';
     const tryText = `Write up what we figured out as a brief and send it to my ${target} with bot2bot.`;
-    const has = (label) => senders.some((b) => b.display_name === label);
-    const pick = CHAT_APPS.some((a) => a.key === want) ? want : CHAT_APPS.find((a) => !has(a.label))?.key ?? 'chatgpt';
-    const done = senders.length ? `<section class="card"><div class="card__head"><h2>${tr('Ready to send')}</h2>${badge(tr('Connected'), 'success')}</div>
-<p>${tr('{apps} can send to your bots. Say this in your chat:', { apps: senders.map((b) => esc(b.display_name)).join(', ') })}</p>
-${codeBlock('send-try', tr('Say this in your chat'), tryText, tr)}
-<p class="muted small">${tr('Your bot shows you the brief and asks before it starts.')}</p></section>` : '';
-    const none = user && !targets.length ? alertBox('info', tr('Connect a bot first'), tr('Briefs need somewhere to land: your coding agent, Grok Bot or another bot.'), `<a class="btn small" href="/app">${tr('Connect a bot')}</a>`) : '';
-    // Step one opens the chat app's settings; step two is the address to paste there.
-    const panel = (key, [one, two], link, linkLabel, mark, note = '') => `<div data-dir="${key}"${key === pick ? '' : ' hidden'}><div class="stack">
-<ol class="howto" style="margin:0"><li>${one}</li></ol>
-<a class="btn ghost wide" href="${link}" target="_blank" rel="noopener noreferrer">${linkLabel}${ICON.out}</a>
-<ol class="howto" start="2" style="margin:0"><li>${two}</li></ol>
-${codeBlock(`send-${key}-url`, tr('Server URL'), url, tr, mark)}${note ? `<p class="muted small" style="margin:0">${note}</p>` : ''}</div></div>`;
-    const ask = tr('If bot2bot asks which bot, pick Send only.');
-    const setup = `<div class="apppick" role="group" aria-label="${tr('Your chat app')}" data-for="#send-apps">${CHAT_APPS.map((a) => `<button type="button" aria-pressed="${a.key === pick}" data-filter="${a.key}">${MARK[a.key]}<span>${a.label}</span></button>`).join('')}</div>
-<div id="send-apps">
-${panel('chatgpt', [tr('In ChatGPT Plugins, select Add, then Add custom MCP server.'), tr('Name it bot2bot and paste this address under Server URL. Keep OAuth, tick I understand and continue. Then sign in to bot2bot and select Connect.')], 'https://chatgpt.com/plugins', tr('Open ChatGPT Plugins'), MARK.chatgpt, `${tr('Want it to look right? Add <a class="link" href="/icon-512.png" download="bot2bot.png">our icon</a> and this description: “Send briefs from this chat to my bots.”')} ${tr('Needs a paid ChatGPT plan. In a work account, your admin has to allow custom servers.')} ${tr('Two bot2bot accounts? Open bot2bot in ChatGPT Plugins and connect another account.')}`)}
-${panel('claude', [tr('In Claude settings, open Connectors and select Add custom connector.'), tr('Name it bot2bot and paste this address. Then select Connect and sign in to bot2bot.')], 'https://claude.ai/settings/connectors', tr('Open Claude connectors'), MARK.claude)}
-${panel('gemini', [tr('In Gemini, open Settings, then Connected Apps, and select Add a custom app.'), tr('Paste this address, select Next and sign in to bot2bot. When it asks which bot, pick Send only.')], 'https://gemini.google.com/apps', tr('Open Gemini connected apps'), MARK.gemini, tr('For personal Google accounts in the US for now.'))}
-${panel('grok', [tr('In Grok, open Connectors and select New Connector, then Custom.'), `${tr('Paste this address and sign in to bot2bot.')} ${ask}`], 'https://grok.com/connectors', tr('Open Grok connectors'), MARK.grok, tr('Needs a paid Grok plan.'))}
-${panel('perplexity', [tr('In Perplexity, open Connectors and select Add custom, then Add MCP connector and Remote.'), `${tr('Name it bot2bot, paste this address, tick the box and select Add. Then select its card and sign in to bot2bot.')} ${ask}`], 'https://www.perplexity.ai/account/connectors', tr('Open Perplexity connectors'), MARK.perplexity, tr('Needs Perplexity Pro or Max.'))}
-${panel('lechat', [tr('In Le Chat, open Connectors, select Add Connector, then the Custom MCP Connector tab.'), `${tr('Name it bot2bot, paste this address and select Connect. Then sign in to bot2bot.')} ${ask}`], 'https://chat.mistral.ai', tr('Open Le Chat'), MARK.lechat)}
-</div>
-${user ? `<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for you to connect…')}</p>
-<script>(function poll(){fetch('/app/status').then(r=>r.json()).then(d=>{if((d.senders||0)>${senders.length})location.reload();else setTimeout(poll,2500);}).catch(()=>setTimeout(poll,4000));})();</script>` : ''}
-<p class="muted small">${tr("It only sends, and only to your own bots. It can't read your messages. Not end-to-end encrypted: the chat hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.")}</p>`;
-    return layout('bot2bot send', `${none}${done}${senders.length && !want
-  ? `<section class="card"><details class="diy"><summary>${tr('Connect another chat')}</summary><div class="stack" style="margin-top:12px">${setup}</div></details></section>`
-  : `<section class="card stack"><h1>bot2bot send</h1><p>${tr('Say "send this to my Codex" in ChatGPT, Claude, Gemini, Grok or Perplexity, and the brief goes straight to your bot. In ChatGPT, you can send attachments too.')}</p>${setup}</section>`}`, { user, tr, width: 'read', outWidth: 'read', bar: { back: user ? '/app' : '' } });
+    return layout(tr('Connect {app}', { app: app.label }), `<section class="card">${sendTrack(app, 3, tr)}
+<div class="card__head"><h1>${tr('{name} is connected', { name: esc(b.display_name) })}</h1>${badge(tr('Connected'), 'success')}</div>
+<p>${tr('Say this in {app}:', { app: app.label })}</p>
+${codeBlock('send-try', tr('Say this in your chat'), tryText, tr, MARK[app.key])}
+<p class="muted small">${tr('Your bot shows you the brief and asks before it starts.')}</p>
+<div class="decide"><a class="btn" href="/app">${tr('Done')}</a><a class="btn ghost" href="/connect/send">${tr('Connect another chat app')}</a></div></section>`, { user, tr, width: 'read', outWidth: 'read', bar: { back: '/app' } });
   }
 
   // Keep setup in the owner's ChatGPT session. Only a tool call in their chat can confirm it worked.
@@ -791,19 +865,24 @@ ${theirs.length ? `<div><span class="muted">${tr('You can ask {name} about', { n
     // count as bots. It shows once there's a bot to send to: a row per app, connected or not.
     const agents = bots.filter((b) => !isSender(b));
     const senders = bots.filter(isSender);
-    const appRow = (label, mark, key) => {
-      const b = senders.find((x) => x.display_name === label && !x.disconnected_at) || senders.find((x) => x.display_name === label);
+    // A row per sender (named by its owner, so one app can have two), else one to connect the app.
+    const appRow = (label, mark, key, b) => {
       const on = b && !b.disconnected_at;
-      const sub = on ? tr('Sends to your bots') : b ? tr('Disconnected') : tr('Not connected');
-      const href = on ? `/app/bots/${b.id}` : `/connect/send?app=${key}`;
-      return `<li><a class="line line--link" href="${href}"><span class="botmark" data-origin="sender" title="${esc(label)}">${mark}${on ? presence('ready') : ''}</span><span class="line__main"><span class="line__title">${esc(label)}</span><span class="line__sub">${sub}</span></span>${on ? ICON.chev : `<span class="btn small ghost" aria-hidden="true">${tr('Connect')}</span>`}</a></li>`;
+      const sub = on ? (b.display_name === label ? tr('Sends to your bots') : label) : b ? tr('Disconnected') : tr('Not connected');
+      const href = on ? `/app/bots/${b.id}` : key ? `/connect/send/${key}` : '/connect/send';
+      return `<li><a class="line line--link" href="${href}"><span class="botmark" data-origin="sender" title="${esc(label)}">${mark}${on ? presence('ready') : ''}</span><span class="line__main"><span class="line__title">${esc(b ? b.display_name : label)}</span><span class="line__sub">${sub}</span></span>${on ? ICON.chev : `<span class="btn small ghost" aria-hidden="true">${tr('Connect')}</span>`}</a></li>`;
+    };
+    const rowsFor = (label, mark, key) => {
+      const mine = senders.filter((x) => x.chat_app === label);
+      const live = mine.filter((x) => !x.disconnected_at);
+      return (live.length ? live : [mine[0]]).map((b) => appRow(label, mark, key, b)).join('');
     };
     // The first five always have a row; Le Chat (and any other app) shows once it's connected.
     const known = CHAT_APPS.slice(0, 5).map((a) => [a.label, MARK[a.key], a.key]);
-    const others = senders.filter((b) => !known.some(([l]) => l === b.display_name) && !b.disconnected_at);
+    const others = senders.filter((b) => !known.some(([l]) => l === b.chat_app) && !b.disconnected_at);
     const linked = senders.filter((b) => !b.disconnected_at).length;
     const chatApps = aiBots.length || senders.length ? `<section class="group" aria-labelledby="chats-h"><div class="group__head"><h2 id="chats-h">${tr('Chat apps')} <span class="count">${linked}</span></h2><a class="btn small ghost" href="/connect/send">${ICON.plus}${tr('Connect a chat app')}</a></div>
-<div class="card card--list"><ul class="list">${known.map(([l, m, k]) => appRow(l, m, k)).join('')}${others.map((b) => appRow(b.display_name, MARK[CHAT_APPS.find((a) => a.label === b.display_name)?.key] ?? MARK.app, '')).join('')}</ul></div>${linked ? '' : `<p class="muted small">${tr('Hand your bots a brief straight from a chat.')}</p>`}</section>` : '';
+<div class="card card--list"><ul class="list">${known.map(([l, m, k]) => rowsFor(l, m, k)).join('')}${others.map((b) => { const a = CHAT_APPS.find((x) => x.label === b.chat_app); return appRow(b.chat_app || b.display_name, MARK[a?.key] ?? MARK.app, a?.key || '', b); }).join('')}</ul></div>${linked ? '' : `<p class="muted small">${tr('Hand your bots a brief straight from a chat.')}</p>`}</section>` : '';
     const ready = aiBots.filter((b) => botStatus(b, tr).key === 'ready').length;
     const botRow = (b) => {
       const st = botStatus(b, tr);
@@ -1100,7 +1179,7 @@ ${code ? `<p>${tr("Paste this into your bot's chat. When it joins, it takes over
     if (isSender(b)) return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Sends to your bots')}</h2>${b.disconnected_at ? badge(tr('Disconnected')) : badge(tr('Send only'), 'success')}</div>
 <p>${tr("When you ask, {app} sends briefs, notes and files to your own bots. It can't read your messages, see your account or reach your friends.", { app: esc(b.display_name) })}</p>
 <p class="muted small">${tr('Not end-to-end encrypted: {app} hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.', { app: esc(b.display_name) })}</p>
-${b.disconnected_at ? `<a class="btn wide" href="/connect/send">${tr('Connect again')}</a>` : ''}</section>
+${b.disconnected_at ? `<a class="btn wide" href="/connect/send/${CHAT_APPS.find((a) => a.label === b.chat_app)?.key || ''}">${tr('Connect again')}</a>` : ''}</section>
 ${b.disconnected_at ? '' : disconnectCard(b, tr)}<section class="card">${removeRow(b, tr)}</section>`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: esc(b.display_name), sub: `${tr('Chat app')} · @${esc(b.handle)}` } });
     // A dot comes back through ChatGPT: the app first, then the switch to private mode, whichever it was in.
     if (b.disconnected_at && dot) return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Reconnect this bot')}</h2>${badge(tr('Disconnected'))}</div>
@@ -1204,7 +1283,7 @@ ${changeDoorbell(b, tr)}${disconnectCard(b, tr)}
   function originOf(b, tr) {
     if (b.vendor === 'web') return { key: 'web', name: tr('Web inbox'), mark: MARK.web };
     // A send-only chat wears its app's mark (ChatGPT, Claude, Gemini), else the plug.
-    if (isSender(b)) return { key: 'sender', name: b.display_name, mark: MARK[CHAT_APPS.find((a) => a.label === b.display_name)?.key] ?? MARK.app };
+    if (isSender(b)) return { key: 'sender', name: b.display_name, mark: MARK[CHAT_APPS.find((a) => a.label === b.chat_app)?.key] ?? MARK.app };
     if (AGENTS[b.platform]) return { key: b.platform, beta: b.platform === 'hermes' || b.platform === 'cursor', name: AGENTS[b.platform], mark: { claude_code: MARK.claude, codex: MARK.codex, cursor: MARK.cursor, hermes: MARK.hermes }[b.platform] ?? MARK.terminal };
     if (b.platform === 'openclaw') return { name: 'OpenClaw', key: 'openclaw', mark: MARK.openclaw };
     if (b.platform === 't3code') return { name: 'T3 Code', key: 't3code', mark: MARK.t3code };
@@ -2005,7 +2084,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
   return async function handleApp(req, res, url) {
     const p = url.pathname;
     // With the landing site on the same server, it answers / and /pricing instead of the built-in pages.
-    const isApp = p === '/connect/chatgpt' || p === '/connect/send' || p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || (payments && p === '/billing/stripe') || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || (!!boardPages && (p === '/feedback' || p.startsWith('/feedback/'))) || p.startsWith('/i/') || (!!groups && p.startsWith('/g/')) || p === '/founder' || (promo && p.startsWith('/gift/')) || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/')
+    const isApp = p === '/connect/chatgpt' || p === '/connect/send' || p.startsWith('/connect/send/') || p.startsWith('/setup-shots/') || p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || (payments && p === '/billing/stripe') || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || (!!boardPages && (p === '/feedback' || p.startsWith('/feedback/'))) || p.startsWith('/i/') || (!!groups && p.startsWith('/g/')) || p === '/founder' || (promo && p.startsWith('/gift/')) || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/')
       || (!!status && (p === '/status' || p === '/status/' || p === '/status.json' || p === '/status/feed.xml'));
     if (!isApp) return false;
     let tr = translator(reqLang(req));
@@ -2036,6 +2115,15 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return true;
       }
       if (p.startsWith('/stickers/') || p.startsWith('/hand/')) throw new HttpError(404, 'Not found');
+      // A chat app's setup screenshots (public/setup/<app>/step-<n>.png).
+      const shm = p.match(/^\/setup-shots\/([a-z]+)\/step-(\d{1,2})\.png$/);
+      if (shm && req.method === 'GET') {
+        const file = new URL(`./${shm[1]}/step-${shm[2]}.png`, SHOT_DIR);
+        if (!CHAT_APPS.some((a) => a.key === shm[1]) || !existsSync(file)) throw new HttpError(404, 'Not found');
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' });
+        res.end(readFileSync(file));
+        return true;
+      }
       const am = p.match(/^\/art\/([a-z]+)\.jpg$/);
       if (am && req.method === 'GET') {
         if (!ART.has(am[1])) throw new HttpError(404, 'Not found');
@@ -2065,7 +2153,26 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       if (req.method === 'POST' && !sameOrigin(req)) throw new HttpError(403, 'Please use the website to do that.');
       const user = currentUser(req);
       if (user) tr = T(user);
-      if (p === '/connect/send' && req.method === 'GET') return page(res, 200, sendSetupPage(user, tr, url.searchParams.get('app') || '')), true;
+      const csm = p.match(/^\/connect\/send(?:\/([a-z]+)(\/steps|\/done)?)?$/);
+      if (csm) {
+        const app = CHAT_APPS.find((a) => a.key === (csm[1] || url.searchParams.get('app')));
+        if (!csm[1]) return app ? (redirect(res, `/connect/send/${app.key}`), true) : (page(res, 200, sendPickPage(user, tr)), true);
+        if (!app) throw new HttpError(404, 'Not found');
+        if (!csm[2] && req.method === 'POST') {
+          const name = cleanName((await form(req)).name);
+          if (!name) return page(res, 400, sendNamePage(user, tr, app, '', tr('Give it a name.'))), true;
+          res.setHeader('set-cookie', sendCookie(app.key, name));
+          return redirect(res, `/connect/send/${app.key}/steps`), true;
+        }
+        if (req.method === 'GET' && !csm[2]) return page(res, 200, sendNamePage(user, tr, app, sendPick(req, app.label))), true;
+        if (req.method === 'GET' && csm[2] === '/steps') return page(res, 200, sendStepsPage(user, tr, app, sendPick(req, app.label) || app.label)), true;
+        if (req.method === 'GET' && csm[2] === '/done') {
+          const name = sendPick(req, app.label) || app.label;
+          const on = sendersOf(user).filter((b) => b.chat_app === app.label);
+          const b = on.find((x) => x.display_name === name) || on[0];
+          return b ? (page(res, 200, sendDonePage(user, tr, app, b)), true) : (redirect(res, `/connect/send/${app.key}/steps`), true);
+        }
+      }
       if (p === '/connect/chatgpt' && req.method === 'GET') return page(res, 200, chatgptSetupPage(user, tr, url.searchParams.get('invite'))), true;
       if (boardPages && (p === '/feedback' || p.startsWith('/feedback/'))) {
         if (await boardPages(req, res, p, url, { user, tr })) return true;
@@ -2137,10 +2244,12 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         // Send only (bot2bot.link/send): no bot to pick. The chat gets a sender of its own.
         const sendOnly = keep.resource === `${origin}/send`;
         if (!user) return redirect(res, `/login?next=${encodeURIComponent(`/oauth/authorize?${new URLSearchParams(keep)}`)}`), true;
-        if (req.method === 'GET') return page(res, 200, sendOnly ? sendAuthorizePage(user, client, keep) : authorizePage(user, client, keep)), true;
+        // A name picked on the setup page for this app (/connect/send) names its sender, and picks Send only.
+        const picked = sendPick(req, senderLabel(client.name));
+        if (req.method === 'GET') return page(res, 200, sendOnly ? sendAuthorizePage(user, client, keep, picked) : authorizePage(user, client, keep, { send: !!picked })), true;
         if (params.decision !== 'allow') return back({ error: 'access_denied' });
         if (sendOnly) {
-          const sender = senderBot(user, senderLabel(client.name));
+          const sender = senderBot(user, senderLabel(client.name), picked || undefined);
           linkOwnBots(user.id);
           const code = token('ac_', 24);
           q('INSERT INTO oauth_codes (code_hash, client_id, bot_id, redirect_uri, challenge, expires_at, resource) VALUES (?, ?, ?, ?, ?, ?, ?)').run(sha(code), client.client_id, sender.id, keep.redirect_uri, keep.code_challenge, clock() + 5 * 60_000, keep.resource);
@@ -2154,7 +2263,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         try {
           // Send only, picked here by a chat app that didn't say it was connecting to /send (Gemini sends no resource).
           if (params.bot === 'send') {
-            const sender = senderBot(user, senderLabel(client.name));
+            const sender = senderBot(user, senderLabel(client.name), picked || undefined);
             linkOwnBots(user.id);
             const code = token('ac_', 24);
             q('INSERT INTO oauth_codes (code_hash, client_id, bot_id, redirect_uri, challenge, expires_at, resource) VALUES (?, ?, ?, ?, ?, ?, ?)').run(sha(code), client.client_id, sender.id, keep.redirect_uri, keep.code_challenge, clock() + 5 * 60_000, keep.resource || null);
@@ -3474,7 +3583,7 @@ $$('.seg',r).forEach(g=>{const sel=g.querySelector('.seg__sel'),bs=$$('button',g
 const put=b=>{sel.style.width=b.offsetWidth+'px';sel.style.transform='translateX('+(b.offsetLeft-3)+'px)';};
 bs.forEach(b=>b.addEventListener('click',()=>{bs.forEach(x=>x.setAttribute('aria-pressed',String(x===b)));put(b);if(g.closest('[data-theme-pick]')&&window.b2bTheme)b2bTheme(b.value);const v=b.dataset.filter;if(scope)$$('[data-dir]',scope).forEach(r=>r.hidden=v!=='all'&&r.dataset.dir!==v);}));
 put(on());requestAnimationFrame(()=>g.classList.add('ready'));addEventListener('resize',()=>put(on()));});
-$$('.apppick',r).forEach(g=>{const bs=$$('button',g),scope=document.querySelector(g.dataset.for);bs.forEach(b=>b.addEventListener('click',()=>{bs.forEach(x=>x.setAttribute('aria-pressed',String(x===b)));if(scope)$$('[data-dir]',scope).forEach(d=>d.hidden=d.dataset.dir!==b.dataset.filter);}));});
+
 /* One-time code: six slots fill one hidden field; typing moves on, Backspace moves back, a paste fills them all. */
 $$('.otp',r).forEach(g=>{const hid=g.querySelector('input[type=hidden]'),sl=$$('.otp__slot',g);
 const sync=()=>{hid.value=sl.map(x=>x.value).join('');sl.forEach(x=>x.dataset.filled=String(!!x.value));if(hid.value.length===6&&!g.dataset.sent){g.dataset.sent='1';g.closest('form').requestSubmit();}};
@@ -3879,7 +3988,7 @@ transition:color var(--duration-fast) var(--ease-standard),background-color var(
 .cm__confirm:hover{background:color-mix(in oklab,var(--danger) 18%,transparent)}.cm[data-tone="neutral"] .cm__confirm:hover{background:var(--accent-strong)}}
 
 /* ── Segmented control (Arc): the selection glides, labels only change colour ── */
-.apppick{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.apppick button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--surface);color:var(--text-secondary);font:inherit;cursor:pointer}.apppick button svg{width:16px;height:16px;flex:none}.apppick button[aria-pressed=true]{border-color:var(--foreground);color:var(--foreground);background:var(--surface-muted)}@media (max-width:420px){.apppick button{flex-direction:column;gap:4px;font-size:13px}}
+.walk{list-style:none;margin:20px 0 0;padding:0;display:grid;gap:24px}.walk__step{display:grid;grid-template-columns:28px minmax(0,1fr);column-gap:12px;align-items:start}.walk__n{display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--accent);color:var(--accent-foreground);font-size:var(--text-xs);font-weight:500;font-variant-numeric:tabular-nums}.walk__body{display:grid;gap:12px;min-width:0}.walk__body>p{margin:4px 0 0;color:var(--foreground)}.walk__body>.btn{justify-self:start}.walk+.wait,.walk+p{margin-top:28px}.shot{justify-self:start;max-width:100%;margin:0;border:1px solid var(--border);border-radius:var(--radius-control);overflow:hidden;background:var(--surface-muted)}.shot img{display:block;max-width:100%;height:auto}@media (max-width:520px){.walk__step{grid-template-columns:minmax(0,1fr);row-gap:8px}}
 .seg{display:inline-flex;max-width:100%;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--surface-muted)}
 .seg__track{position:relative;isolation:isolate;display:flex;gap:2px;padding:3px;border-radius:inherit}
 .seg button{position:relative;z-index:1;min-height:30px;padding:0 12px;border:0;border-radius:calc(var(--radius-control) - 4px);background:transparent;color:var(--text-muted);font:inherit;font-weight:500;white-space:nowrap;cursor:pointer;transition:color var(--duration-fast) var(--ease-standard)}

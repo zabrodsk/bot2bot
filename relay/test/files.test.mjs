@@ -124,6 +124,24 @@ test('a file to someone whose owner okays messages first goes in the draft, and 
   await gone(st);
 });
 
+test("an okayed draft whose file can't go yet (their bot is too old) gives way to a new draft, which the owner okays again", async (t0) => {
+  const { env, ben, anna } = await pair(t0, { privacyPilot: true });
+  await turnOn(ben); await turnOn(anna);
+  await anna.cli('inbox');
+  const id = (await ben.cli('propose', 'anna', 'The video', '--file', note('video.mp4', 'frames'))).match(/Draft saved as (req_[\w-]+)/)[1];
+  env.relay.db.prepare("UPDATE bots SET tool_version = '0.1.0' WHERE id = ?").run(Number(anna.botId));
+  await assert.rejects(ben.cli('request', id, '--approve'), (e) => /needs a newer bot2bot tool before it can open files/.test(e.stderr));
+  assert.equal(env.relay.getRequest(Number(ben.botId), id).state, 'APPROVED');
+  // The owner says: send the text with the link instead. The new draft takes the old one's place and waits for their yes.
+  const again = (await ben.cli('propose', 'anna', 'The video is at https://example.com/v')).match(/Draft saved as (req_[\w-]+)/)[1];
+  assert.equal(again, id);
+  const r = env.relay.getRequest(Number(ben.botId), id, { owner: true });
+  assert.equal(r.state, 'PENDING_OWNER');
+  assert.deepEqual(r.draft.files, []);
+  assert.match(await ben.cli('request', id, '--approve'), /Sent it as msg_[\w-]+\. End-to-end encrypted\./);
+  assert.match(await anna.cli('inbox'), /The video is at/);
+});
+
 test('a draft with files only goes to an end-to-end encrypted chat, and needs the files still on the computer', async (t0) => {
   const { env, ben, anna } = await pair(t0, { privacyPilot: true });
   await turnOn(ben); await turnOn(anna);

@@ -248,7 +248,8 @@ test('send only: a chat signs in for /send, lists its owner\'s bots and hands on
   assert.equal((await (await fetch(`${env.url}/.well-known/oauth-protected-resource/send`)).json()).resource, `${env.url}/send`);
   const page = await fetch(`${env.url}/send`, { headers: { accept: 'text/html' }, redirect: 'manual' });
   assert.equal(page.headers.get('location'), '/connect/send');
-  assert.match(await (await fetch(`${env.url}/connect/send`)).text(), new RegExp(`bot2bot send[^]*ChatGPT[^]*${env.url}/send[^]*Claude`));
+  assert.match(await (await fetch(`${env.url}/connect/send`)).text(), /Which chat app\?[^]*href="\/connect\/send\/chatgpt"[^]*ChatGPT[^]*href="\/connect\/send\/claude"/);
+  assert.match(await (await fetch(`${env.url}/connect/send/claude/steps`)).text(), new RegExp(`Connect Claude[^]*${env.url}/send`));
 
   // Dušan has a Codex bot (no doorbell, so its inbox is read here).
   const b = await login(env, 'dusan@example.com');
@@ -257,9 +258,14 @@ test('send only: a chat signs in for /send, lists its owner\'s bots and hands on
   await cli('enroll', env.url, (await b('/app')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
   env.relay.db.prepare("UPDATE bots SET platform = 'codex' WHERE handle = 'dusan'").run();
   assert.match((await b('/app')).text, /href="\/connect\/send"/);
-  // The setup page: one chat at a time, and it waits for the sign-in.
-  const setupPage = (await b('/connect/send')).text;
-  assert.match(setupPage, /data-dir="chatgpt">[^]*Open ChatGPT Plugins[^]*data-dir="claude" hidden>[^]*Waiting for you to connect/);
+  // The setup: pick the chat app, name it, then that app's steps and nothing else. It waits for the sign-in.
+  assert.match((await b('/connect/send')).text, /Which chat app\?[^]*href="\/connect\/send\/chatgpt"/);
+  assert.match((await b('/connect/send/chatgpt')).text, /What should your bots call it\?[^]*name="name" value="ChatGPT"/);
+  const named = await b('/connect/send/chatgpt', { method: 'POST', form: { name: 'ChatGPT' } });
+  assert.equal(named.location, '/connect/send/chatgpt/steps');
+  const setupPage = (await b(named.location)).text;
+  assert.match(setupPage, /Connect ChatGPT[^]*Open ChatGPT Plugins[^]*Server URL[^]*Waiting for you to connect/);
+  assert.doesNotMatch(setupPage, /Gemini|Claude|Grok|Perplexity|Le Chat/);
   assert.equal((await b('/app/status')).json().senders, 0);
 
   const gpt = await connectSender(env, b, 'ChatGPT');
@@ -299,15 +305,16 @@ test('send only: a chat signs in for /send, lists its owner\'s bots and hands on
   const home = (await b('/app')).text;
   // Chat apps have their own section: ChatGPT connected, the others one tap away. Your bots doesn't count it.
   assert.match(home, /id="bots-h">Your bots <span class="count">1<\/span>/);
-  assert.match(home, /id="chats-h">Chat apps <span class="count">1<\/span>[^]*Connect a chat app[^]*href="\/app\/bots\/\d+"[^]*ChatGPT[^]*Sends to your bots[^]*href="\/connect\/send\?app=claude"[^]*Not connected[^]*href="\/connect\/send\?app=gemini"/);
+  assert.match(home, /id="chats-h">Chat apps <span class="count">1<\/span>[^]*Connect a chat app[^]*href="\/app\/bots\/\d+"[^]*ChatGPT[^]*Sends to your bots[^]*href="\/connect\/send\/claude"[^]*Not connected[^]*href="\/connect\/send\/gemini"/);
   const botsList = home.slice(home.indexOf('id="bots-h"'), home.indexOf('id="chats-h"'));
   assert.doesNotMatch(botsList, /dusan-chatgpt/);
   // The page now says it's ready, with the first thing to say; the sign-in left a confirmation.
   assert.equal((await b('/app/status')).json().senders, 1);
   assert.match(home, /class="toast"[^>]*>[^]*ChatGPT can send to your bots now/);
-  assert.match((await b('/connect/send')).text, /Ready to send[^]*send it to my Codex with bot2bot[^]*Connect another chat/);
-  // Coming for one app opens its steps straight away.
-  assert.match((await b('/connect/send?app=gemini')).text, /data-dir="chatgpt" hidden>[^]*data-dir="gemini">/);
+  assert.match((await b('/connect/send/chatgpt/done')).text, /ChatGPT is connected[^]*send it to my Codex with bot2bot[^]*Connect another chat app/);
+  assert.match((await b('/connect/send')).text, /ChatGPT<\/span><span class="line__sub">Connected as ChatGPT/);
+  // An old link for one app goes to its own setup.
+  assert.equal((await b('/connect/send?app=gemini')).location, '/connect/send/gemini');
   const senderId = env.relay.db.prepare("SELECT id FROM bots WHERE handle = 'dusan-chatgpt'").get().id;
   assert.match((await b(`/app/bots/${senderId}`)).text, /ChatGPT[^]*Chat app · @dusan-chatgpt[^]*Sends to your bots[^]*Disconnect this bot/);
   await connectSender(env, b, 'ChatGPT');
@@ -384,9 +391,10 @@ test('send only: one ChatGPT, two bot2bot accounts: the second sign-in switches 
 test('send only: Grok, Perplexity and Le Chat each get their own sender, logo and steps', async (t0) => {
   const env = await setup(t0);
   const b = await login(env, 'mia@example.com');
-  const page = (await b('/connect/send?app=grok')).text;
-  assert.match(page, /data-filter="perplexity"[^]*data-filter="lechat"/);
-  assert.match(page, /data-dir="grok">[^]*grok\.com\/connectors[^]*pick Send only/);
+  assert.match((await b('/connect/send')).text, /href="\/connect\/send\/perplexity"[^]*href="\/connect\/send\/lechat"/);
+  const page = (await b('/connect/send/grok/steps')).text;
+  assert.match(page, /Connect Grok[^]*grok\.com\/connectors[^]*pick Send only/);
+  assert.doesNotMatch(page, /Perplexity|Le Chat|ChatGPT/);
   for (const name of ['Grok', 'Perplexity', 'Le Chat']) await connectSender(env, b, name);
   const rows = env.relay.db.prepare("SELECT handle, display_name FROM bots WHERE platform = 'sender' ORDER BY id").all();
   assert.deepEqual(rows.map((r) => r.display_name), ['Grok', 'Perplexity', 'Le Chat']);
@@ -418,6 +426,28 @@ test('send only: a chat that sends no resource (Gemini) picks Send only, and Goo
   const r2 = await swap({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: reg.client_id });
   assert.ok(r2.access_token);
   assert.equal((await call('/send', r2.access_token, 'ping')).status, 200);
+});
+
+test('send only: a name picked in the setup names the sender, so one Gemini can be work and one home', async (t0) => {
+  const env = await setup(t0);
+  const b = await login(env, 'mia@example.com');
+  assert.equal((await b('/connect/send/gemini', { method: 'POST', form: { name: '  ' } })).status, 400);
+  assert.equal((await b('/connect/send/gemini', { method: 'POST', form: { name: 'Gemini work' } })).location, '/connect/send/gemini/steps');
+  assert.match((await b('/connect/send/gemini/steps')).text, /Connect Gemini[^]*select Custom[^]*gemini\.google\.com\/apps/);
+  const GOOGLE = 'https://oauth-redirect.googleusercontent.com/r/gemini-test';
+  const meta = await (await fetch(`${env.url}/.well-known/oauth-authorization-server`)).json();
+  const reg = await (await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Gemini', redirect_uris: [GOOGLE] }) })).json();
+  const params = { response_type: 'code', client_id: reg.client_id, redirect_uri: GOOGLE, code_challenge: 'c'.repeat(43), code_challenge_method: 'S256', state: 'g' };
+  // Gemini sends no resource, so it gets the full sign-in, with Send only already picked.
+  assert.match((await b(`/oauth/authorize?${new URLSearchParams(params)}`)).text, /<option value="send" selected>Send only/);
+  await b('/oauth/authorize', { method: 'POST', form: { ...params, bot: 'send', decision: 'allow' } });
+  const row = env.relay.db.prepare("SELECT handle, display_name, chat_app FROM bots WHERE platform = 'sender'").get();
+  assert.deepEqual({ ...row }, { handle: 'mia-gemini-work', display_name: 'Gemini work', chat_app: 'Gemini' });
+  assert.match((await b('/connect/send/gemini/done')).text, /Gemini work is connected/);
+  // A second Gemini, under its own name, is a second sender.
+  await b('/connect/send/gemini', { method: 'POST', form: { name: 'Gemini home' } });
+  await b('/oauth/authorize', { method: 'POST', form: { ...params, bot: 'send', decision: 'allow' } });
+  assert.deepEqual(env.relay.db.prepare("SELECT display_name FROM bots WHERE platform = 'sender' ORDER BY id").all().map((r) => r.display_name), ['Gemini work', 'Gemini home']);
 });
 
 test('directory checks: domain proofs as plain text, and a reviewer signs in with their own code', async (t0) => {
