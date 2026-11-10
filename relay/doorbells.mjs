@@ -23,6 +23,22 @@ export const isBlockedAddress = (address) => {
   return v === 4 ? blocked.check(address, 'ipv4') : blocked6.check(address, 'ipv6');
 };
 
+// Coding agents that run on a computer that stays on and are woken by "b2b watch": the bot's platform, and the
+// name its owner sees. AGENT_NAMES is what the tool and the setup message call them.
+// Agents woken by "b2b watch" on a computer that stays on: Claude Code, Codex, Cursor and Nous Research's Hermes Agent.
+export const AGENTS = { claude_code: 'Claude Code', codex: 'Codex', cursor: 'Cursor', hermes: 'Hermes Agent' };
+export const AGENT_NAMES = { 'claude-code': 'claude_code', codex: 'codex', cursor: 'cursor', 'cursor-agent': 'cursor', hermes: 'hermes', 'hermes-agent': 'hermes' };
+export const agentPlatform = (name) => AGENT_NAMES[String(name ?? '').trim().toLowerCase()] ?? (AGENTS[name] !== undefined ? name : null);
+// What a bot may say it is when it joins in private mode: a coding agent, OpenClaw (woken by its own webhook,
+// /hooks/wake), Instinct, T3 Code or another assistant (no doorbell unless it has a webhook). T3 Code is an inbox its
+// owner opens from a T3 Code thread ("pick up the brief"), so nothing wakes it. Saying nothing means Grok Bot's routine.
+export const JOIN_AS = { ...AGENT_NAMES, openclaw: 'openclaw', instinct: 'instinct', t3code: 't3code', 't3-code': 't3code', other: 'other' };
+export const joinPlatform = (name) => JOIN_AS[String(name ?? '').trim().toLowerCase()] ?? null;
+
+// A webhook key as the owner pasted it. Grok Bot also offers the whole "Authorization: Bearer <key>" header to
+// copy; taking that as the key would make every ring fail, so only the key itself is kept.
+export const webhookKey = (raw) => String(raw ?? '').trim().replace(/^authorization\s*:\s*/i, '').replace(/^bearer\s+/i, '').trim();
+
 export class SafePostError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }

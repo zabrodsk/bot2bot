@@ -84,7 +84,7 @@ test('a Czech person sees Czech on the overview, account, invite, bot and person
   const home = (await ann.b('/app')).text;
   assert.match(home, /<html lang="cs">/);
   assert.match(home, /<title>Přehled · bot2bot<\/title>/);
-  assert.match(home, />Přehled<\/a>[^]*>Lidé<\/a>[^]*>Aktivita<\/a>[^]*>Účet<\/a>/);
+  assert.match(home, />Přehled<\/a>[^]*>Lidé<\/a>[^]*>Aktivita<\/a>[^]*>Nastavení<\/a>/);
   assert.match(home, /<h1>Vítejte<\/h1>[^]*(1 bot připravený|Nastavuje se) · 1 přítel/);
   assert.match(home, /Přátelé <span class="count">1<\/span>[^]*Vaši boti[^]*Přidat bota[^]*Pozastavit vše[^]*Pozastavit všechny boty\?/);
   assert.match(home, /<dt>Košík<\/dt><dd><span class="hand basket-word">friends<\/span>/);
@@ -92,7 +92,7 @@ test('a Czech person sees Czech on the overview, account, invite, bot and person
   for (const en of ['>Overview<', '>Your bots<', 'Pause everything', '>Activity<', 'Invite a friend']) assert.ok(!home.includes(en), `no "${en}"`);
 
   const acc = (await ann.b('/app/account')).text;
-  assert.match(acc, /<title>Účet · bot2bot<\/title>[^]*Vaše jméno[^]*Profilový obrázek[^]*id="lang-l">Jazyk<[^]*aria-pressed="true">Čeština<[^]*Tichý režim[^]*Časové pásmo[^]*Stáhnout moje data[^]*Smazat účet/);
+  assert.match(acc, /<title>Nastavení · bot2bot<\/title>[^]*Vaše jméno[^]*Profilový obrázek[^]*id="lang-l">Jazyk<[^]*aria-pressed="true">Čeština<[^]*Tichý režim[^]*Časové pásmo[^]*Stáhnout moje data[^]*Smazat účet/);
 
   const bot = (await ann.b(`/app/bots/${ann.botId}`)).text;
   assert.match(bot, /<dt>Zvonek<\/dt><dd><b>Zapnuto<\/b>[^]*<dt>Šifrování<\/dt>[^]*<dt>Tichý režim<\/dt>[^]*Záložní kontrola[^]*Interval kontroly/);
@@ -110,7 +110,7 @@ test('a Czech person sees Czech on the overview, account, invite, bot and person
   assert.match((await browser(env.url)(`/i/${code}`)).text, /<html lang="en">[^]*wants your bots to talk/);
 
   const person = (await ann.b(`/app/people/${ann.botId}/${ben.botId}`)).text;
-  assert.match(person, /<legend class="row-label">Košík<\/legend>[^]*zatím nezařazení[^]*Nejdřív se zeptá[^]*Jak kontaktu říkáte[^]*Kdo to je[^]*Pokyny pro kontakt Ben[^]*Pravidla[^]*Přidat pravidlo/);
+  assert.match(person, /<legend class="row-label">Košík<\/legend>[^]*zatím nezařazení[^]*Nejdřív se zeptá[^]*Jak kontaktu říkáte[^]*Kdo to je[^]*Pokyny pro vašeho bota ke kontaktu Ben[^]*Pravidla[^]*Přidat pravidlo/);
   const people = (await ann.b(`/app/people?bot=${ann.botId}`)).text;
   assert.match(people, /zatím nezařazení[^]*\+ nový košík[^]*Každý košík bot vyřizuje sám/);
   assert.match(people, /Kam přesunout: \$\{esc\(el\.dataset\.name\)\}/, 'the drag-and-drop script speaks Czech too');
@@ -118,7 +118,7 @@ test('a Czech person sees Czech on the overview, account, invite, bot and person
   // Toasts and errors come in Czech.
   await ann.b('/app/contacts/block', { method: 'POST', form: { bot: ann.botId, peer: ben.botId } });
   assert.match((await ann.b('/app')).text, /class="toast__what">Zablokováno: Ben<[^]*toast__undo">Vrátit</);
-  assert.match((await ann.b('/app/nope')).text, /<html lang="cs">[^]*<h1>Nenalezeno<\/h1><p>Stránka nenalezena<\/p>/);
+  assert.match((await ann.b('/app/nope')).text, /<html lang="cs">[^]*<h1>Tahle stránka tu není<\/h1><p>Odkaz je možná starý, nebo se stránka přesunula.<\/p>/);
   // The setup message for a new bot stays English: bots read it.
   await ann.b('/app/bots/new', { method: 'POST', form: {} });
   await ann.b('/app/bots', { method: 'POST', form: { handle: 'ann-two' } });
@@ -144,6 +144,45 @@ test('switching the language in Account: a toast with Undo, the login page follo
   await b('/app/account/lang', { method: 'POST', form: { lang: 'cs' } });
   await b('/logout', { method: 'POST' });
   assert.match((await b('/login')).text, /<html lang="cs">[^]*Přihlášení a registrace/);
+});
+
+test('Appearance in Account: follows the device until you pick Light or Dark, with Undo', async (t0) => {
+  const env = await setup(t0);
+  const b = await login(env, 'night@example.com');
+  const auto = (await b('/app/account')).text;
+  assert.match(auto, /<html lang="en"><head>/, 'no choice, no pin');
+  assert.match(auto, /<meta name="theme-color" content="#f3f5f8" media="\(prefers-color-scheme: light\)"><meta name="theme-color" content="#0e131b" media="\(prefers-color-scheme: dark\)">/);
+  assert.match(auto, /@media \(prefers-color-scheme:dark\)\{:root:not\(\[data-theme=light\]\)\{color-scheme:dark;[^}]*\}\}:root\[data-theme=dark\]\{color-scheme:dark;/);
+  assert.match(auto, /id="theme-l">Appearance<[^]*<button name="theme" value="" aria-pressed="true">Auto<\/button><button name="theme" value="light" aria-pressed="false">Light<\/button><button name="theme" value="dark" aria-pressed="false">Dark<\/button>/);
+  const r = await b('/app/account/theme', { method: 'POST', form: { theme: 'dark' } });
+  assert.equal(r.location, '/app/account');
+  const dark = (await b('/app/account')).text;
+  assert.match(dark, /<html lang="en" data-theme="dark"><head>[^]*<meta name="theme-color" content="#0e131b">/);
+  assert.match(dark, /value="dark" aria-pressed="true">Dark</);
+  assert.match(dark, /toast__what">Appearance saved<[^]*action="\/app\/account\/theme"><input type="hidden" name="theme" value=""><input type="hidden" name="undo" value="1">/);
+  assert.match((await b('/app')).text, /<html lang="en" data-theme="dark">/, 'every page');
+  // Undo goes back to the device; anything else is treated as Auto too.
+  await b('/app/account/theme', { method: 'POST', form: { theme: '', undo: '1' } });
+  assert.match((await b('/app/account')).text, /<html lang="en"><head>/);
+  await b('/app/account/theme', { method: 'POST', form: { theme: '"><script>' } });
+  assert.equal(env.relay.db.prepare('SELECT theme FROM users WHERE email = ?').get('night@example.com').theme, null);
+  // Signed out, pages follow the device.
+  await b('/logout', { method: 'POST' });
+  assert.match((await b('/login')).text, /<html lang="en"><head>/);
+});
+
+test('saving a setting comes back in place: same scroll, no entrance animation, also on the 30 s refresh', async (t0) => {
+  const env = await setup(t0);
+  const b = await login(env, 'still@example.com');
+  const page = (await b('/app/account')).text;
+  // The page script remembers where you were on every submit and puts you back when the same page answers.
+  assert.match(page, /if\('hard' in f\.dataset\)\{delete f\.dataset\.hard;stay\(path\(f\.action\)\);return;\}[^]*stay\(path\(f\.action\)\);\}\);/);
+  // Switches and the Language/Appearance pickers save in the background and finish their move first.
+  assert.match(page, /f\.querySelector\('\[data-autosave\],\.seg button:not\(\[type=button\]\)'\)[^\n]*e\.preventDefault\(\);[^\n]*save\(f,s\)/);
+  assert.match(page, /<form method="post" action="\/app\/account\/lang" data-reload>[^]*<form method="post" action="\/app\/account\/theme" data-theme-pick>/);
+  assert.match(page, /\(was\.p===here\|\|was\.a===here\)\)\{document\.documentElement\.classList\.add\('stay'\);if\(!location\.hash\)scrollTo\(0,was\.y\)/);
+  assert.match(page, /\.stay \.col\{animation:none\}/);
+  assert.match(readFileSync(join(relay, 'app.mjs'), 'utf8'), /REFRESH_JS = [^\n]*window\.b2bStay&&b2bStay\(\);location\.reload\(\)/);
 });
 
 test('English stays as it was', async (t0) => {
@@ -173,7 +212,7 @@ test('Czech helpers: plurals, dates, relay errors', () => {
 });
 
 // Every string the dashboard and the emails use is a plain tr('…') literal, so this finds them all.
-const sources = ['app.mjs', 'email.mjs', 'i18n.mjs'].map((f) => readFileSync(join(relay, f), 'utf8').replace(/^\s*\/\/.*$/gm, ''));
+const sources = ['app.mjs', 'analytics.mjs', 'email.mjs', 'i18n.mjs', 'status.mjs'].map((f) => readFileSync(join(relay, f), 'utf8').replace(/^\s*\/\/.*$/gm, ''));
 const unq = (s) => s.replace(/\\(.)/g, '$1');
 const used = new Map();
 for (const src of sources) for (const m of src.matchAll(/\btr(\.n\([^,]+,\s*|\(\s*)(['"])((?:\\.|(?!\2).)*)\2/g)) used.set(unq(m[3]), m[1].startsWith('.n') ? 'plural' : 'text');

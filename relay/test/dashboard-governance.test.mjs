@@ -46,7 +46,7 @@ async function sessionCookie(env, email) {
   return r.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
 }
 
-test('pictures: the sticker set is for everyone, read from index.json, robots stay, and the pilot pages stay hidden', async (t0) => {
+test('pictures: the sticker set is for everyone, read from index.json, robots only without one, and the pilot pages stay hidden', async (t0) => {
   const dir = stickerDir([{ key: 'fox', name: 'Fox' }, 'ghost', { key: '../etc', name: 'Bad' }]);
   const env = await setup(t0, { stickersDir: dir });
   const b = await login(env, 'kim@example.com');
@@ -56,7 +56,7 @@ test('pictures: the sticker set is for everyone, read from index.json, robots st
   assert.match(html, /<legend class="pfp__legend">Stickers<\/legend>/);
   assert.match(html, /<input type="radio" name="avatar" value="sticker:fox"><span class="pfp__img pfp__img--cut"><img src="\/stickers\/fox\.png"/);
   assert.doesNotMatch(html, /sticker:ghost|sticker:\.\.|stickers\/ghost/, 'listed without a file, or not a key: left out');
-  assert.equal((html.match(/name="avatar" value="[a-z]+"/g) || []).length, 12, 'the twelve robots are still there');
+  assert.equal((html.match(/name="avatar" value="[a-z]+"/g) || []).length, 0, 'with stickers, the drawn robots are not offered');
   assert.equal((await b('/app/picture', { method: 'POST', form: { avatar: 'sticker:fox' } })).status, 303);
   assert.equal(env.relay.db.prepare("SELECT avatar FROM users WHERE email = 'kim@example.com'").get().avatar, 'sticker:fox');
   html = (await b('/app')).text;
@@ -77,6 +77,7 @@ test('pictures: the sticker set is for everyone, read from index.json, robots st
   writeFileSync(join(dir, 'index.json'), '[]');
   html = (await b('/app/picture')).text;
   assert.doesNotMatch(html, />Stickers<|sticker:fox/);
+  assert.equal((html.match(/name="avatar" value="[a-z]+"/g) || []).length, 12, 'no stickers: the twelve robots');
   assert.equal((await fetch(`${env.url}/stickers/fox.png`)).status, 404);
   const none = await setup(t0, { stickersDir: stickerDir(null) });
   assert.doesNotMatch((await (await login(none, 'lou@example.com'))('/app/picture')).text, />Stickers</);
@@ -114,13 +115,13 @@ test('people: baskets and modes are the owner\'s, for their own bots, from their
   assert.doesNotMatch(html.match(/<section class="basket" data-drop="\d+" data-mode="handles" aria-label="friends[^]*?<\/section>/)[0], /asks you first<\/span>/);
   assert.match(html, /<p class="people__how">Your bot handles each basket on its own and asks you when it isn't sure\.<\/p>/);
   // "Asks you first" in the basket's menu switches the whole basket, and the basket says so.
-  assert.match(html, /<button role="menuitemcheckbox" aria-checked="false">Asks you first<\/button>/);
+  assert.match(html, /<button role="menuitemcheckbox" aria-checked="false">Asks you first<span class="bmenu__sw" aria-hidden="true"><\/span><\/button>/);
   r = await ann.b('/app/people/mode', { method: 'POST', form: { bot: ann.botId, circle: circleId(env, ann, 'friends'), mode: 'asks' } });
   assert.equal(r.status, 303);
   assert.equal(contactOf(env, ann, ben).effective_mode, 'asks');
   html = (await ann.b('/app/people')).text;
   assert.match(html, /<section class="basket" data-drop="\d+" data-mode="asks" aria-label="friends, 1 person, asks you first">[^]*?<div class="basket__tag"><span class="tag" data-mode="asks">/);
-  assert.match(html, /<button role="menuitemcheckbox" aria-checked="true">Asks you first<\/button>/);
+  assert.match(html, /<button role="menuitemcheckbox" aria-checked="true">Asks you first<span class="bmenu__sw" aria-hidden="true"><\/span><\/button>/);
 
   // Baskets of their own: new ones work like the three, names are unique, and removing one unsorts its people.
   assert.equal((await ann.b('/app/people/baskets', { method: 'POST', form: { bot: ann.botId, name: 'school' } })).status, 303);
@@ -486,13 +487,13 @@ test('review: no-JS person forms expose save and topic buttons, requests disclos
   assert.match(html, /<noscript><button class="btn small ghost">Add topic<\/button>/);
   await ann.b(`${base}/topics`, { method: 'POST', form: { add: 'football' } });
   const req = (await ann.cli('propose', 'Ben', 'Hello')).match(/req_[\w-]+/)[0];
-  for (const path of ['/app/requests', `/app/requests/${req}`]) assert.match((await ann.b(path)).text, /For end-to-end chats, the relay can read drafts you send here for approval\./);
+  for (const path of ['/app/requests', `/app/requests/${req}`]) assert.match((await ann.b(path)).text, /Drafts you okay here pass through bot2bot, so we can read them, even in end-to-end encrypted chats\./);
 });
 
-test('review: all thirty shipped stickers serve exact PNG bytes; font licence and Docker copies are present', async (t) => {
+test('review: all sixty-six shipped stickers serve exact PNG bytes; font licence and Docker copies are present', async (t) => {
   const env = await setup(t), root = join(import.meta.dirname, '..');
   const list = JSON.parse(readFileSync(join(root, 'public/stickers/index.json'), 'utf8'));
-  assert.equal(list.length, 30);
+  assert.equal(list.length, 66);
   for (const { key } of list) {
     const disk = readFileSync(join(root, 'public/stickers', `${key}.png`));
     assert.equal(disk.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
@@ -509,8 +510,8 @@ test('review: all thirty shipped stickers serve exact PNG bytes; font licence an
   assert.match(readFileSync(join(root, 'public/hand/OFL.txt'), 'utf8'), /Caveat Project Authors[^]*SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(readFileSync(join(root, 'Dockerfile'), 'utf8'), /COPY public \.\/public/);
   if (existsSync(join(root, '../Dockerfile'))) assert.match(readFileSync(join(root, '../Dockerfile'), 'utf8'), /COPY relay\/public \.\/public/); // the hosted image, not in the open-source copy
-  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.19.8');
-  assert.equal((await cliHome().cli('version')).trim(), '0.19.8');
+  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.22.11');
+  assert.equal((await cliHome().cli('version')).trim(), '0.22.11');
 });
 
 function privateMcp(t, who) {
@@ -571,11 +572,11 @@ test('review: the legacy privacy switch reflects effective pilot mode even with 
   const env = await setup(t, { privacyPilot: true }), ann = await quietBot(env, 'ann@example.com', 'ann'), ben = await quietBot(env, 'ben@example.com', 'ben');
   await connect(ann, ben, 'Ann');
   env.relay.db.prepare('UPDATE contacts SET privacy_on = 0 WHERE owner_bot = ?').run(ann.botId);
-  assert.match((await ann.b('/app')).text, /<dt>Basket<\/dt><dd>Not sorted yet · asks you first · /);
+  assert.match((await ann.b('/app')).text, /<dt>Basket<\/dt><dd>Not sorted yet · asks you first<\/dd>/);
   putIn(env, ann, ben, 'friends');
   env.relay.db.prepare('UPDATE contacts SET privacy_on = 1 WHERE owner_bot = ?').run(ann.botId);
   const html = (await ann.b('/app')).text;
-  assert.match(html, /<dt>Basket<\/dt><dd><span class="hand basket-word">friends<\/span> · <a /);
+  assert.match(html, /<dt>Basket<\/dt><dd><span class="hand basket-word">friends<\/span><\/dd>/);
   assert.doesNotMatch(html, /contacts\/privacy/);
 });
 
@@ -704,7 +705,7 @@ test('inviting asks right away what the bot should know about the new friend, on
   const ann = await quietBot(env, 'ann@example.com', 'ann'), ben = await quietBot(env, 'ben@example.com', 'ben'), cat = await quietBot(env, 'cat@example.com', 'cat');
   // The dashboard: the box sits under the basket on Ann's invite page, and on the page Ben opens.
   const made = await ann.b('/app/invites', { method: 'POST', form: { bot: ann.botId } });
-  assert.match(made.text, /<label>Anything your bot should know about them\?<textarea name="notes" maxlength="280"/);
+  assert.match(made.text, /<label>Instructions for your bot related to this person<textarea name="notes" maxlength="280"/);
   const code = made.text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   const saved = await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'friends', notes: '  My neighbour. Garden and pickups are fine.  ' } });
   assert.equal(saved.location, '/app');
@@ -712,7 +713,7 @@ test('inviting asks right away what the bot should know about the new friend, on
   // Changing only the basket keeps the notes.
   await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'family', notes: 'My neighbour. Garden and pickups are fine.' } });
   const page = await ben.b(`/i/${code}`);
-  assert.match(page.text, /<label>Anything your bot should know about Ann\?<textarea name="notes"/);
+  assert.match(page.text, /<label>Instructions for your bot related to Ann<textarea name="notes"/);
   await ben.b(`/i/${code}`, { method: 'POST', form: { bot: ben.botId, alias: 'Ann', basket: 'friends', notes: 'From climbing. Only climbing plans.' } });
   assert.equal(contactOf(env, ann, ben).notes, 'My neighbour. Garden and pickups are fine.');
   assert.equal(contactOf(env, ann, ben).circle.name, 'family');
@@ -751,6 +752,39 @@ test('invites you sent wait on the overview until used: open one again, cancel i
   // Used: gone from the list.
   await ben.b(`/i/${code}`, { method: 'POST', form: { bot: ben.botId, alias: 'Ann' } });
   assert.doesNotMatch((await ann.b('/app')).text, /Invites pending/);
+});
+
+test('people you just added show up right away as waiting, until both sides said yes', async (t) => {
+  const env = await setup(t, { privacyPilot: true });
+  const ann = await quietBot(env, 'ann9@example.com', 'ann9'), ben = await quietBot(env, 'ben9@example.com', 'ben9');
+  const people = async () => (await ann.b('/app/people')).text;
+  const basketOf = (html, name) => html.split('<section class="basket"').find((x) => x.includes(`>${name}</h2>`)) || '';
+  // Her bot invites Dan into family: a faded sticker there right away, not draggable, and the overview lists it.
+  const out = await ann.cli('invite', 'dan', '--basket', 'family');
+  let html = await people();
+  assert.match(basketOf(html, 'family'), /<span class="stk stk--wait" role="img" aria-label="dan, in family, waiting for them"[^>]* data-held>/);
+  assert.match(basketOf(html, 'family'), /data-mode="wait">[^]*?<span>1 waiting<\/span>/);
+  assert.doesNotMatch(html, /nobody here yet|When someone connects with you/);
+  let home = (await ann.b('/app')).text;
+  assert.match(home, /Invites pending <span class="count">1<\/span>[^]*<div class="line">[^]*dan[^]*Waiting for them · family · 7 days left/);
+  // One saved from Invite a friend links back to its page.
+  const code = (await ann.b('/app/invites', { method: 'POST', form: { bot: ann.botId } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  await ann.b('/app/invites/basket', { method: 'POST', form: { bot: ann.botId, code, basket: 'friends', alias: 'Eve' } });
+  assert.match(basketOf(await people(), 'friends'), new RegExp(`<a class="stk stk--wait" href="/app/invites/${code}"[^>]*aria-label="Eve, in friends, waiting for them"[^>]* data-held>`));
+  // Ben's bot accepts: Ann's yes is still needed, so Dan waits for it, linked to the overview where she decides.
+  await ben.cli('accept', out.match(/accept ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1], 'Ann');
+  html = await people();
+  assert.match(basketOf(html, 'family'), /<a class="stk stk--wait" href="\/app"[^>]*aria-label="dan, in family, waiting for your yes"[^>]* data-held>/);
+  assert.match((await ben.b('/app/people')).text, /aria-label="Ann, not sorted yet, waiting for your yes"/);
+  // Ann says yes: Dan is a real sticker she can move, still faded until Ben says yes too.
+  await ann.b('/app/contacts/approve', { method: 'POST', form: { bot: ann.botId, peer: ben.botId } });
+  html = await people();
+  assert.match(basketOf(html, 'family'), new RegExp(`<a class="stk stk--wait" href="/app/people/${ann.botId}/${ben.botId}"[^>]*aria-label="dan, in family, waiting for them"[^>]* data-peer="${ben.botId}"`));
+  assert.doesNotMatch(basketOf(html, 'family'), /data-held/);
+  await ben.b('/app/contacts/approve', { method: 'POST', form: { bot: ben.botId, peer: ann.botId } });
+  html = await people();
+  assert.match(basketOf(html, 'family'), new RegExp(`<a class="stk" href="/app/people/${ann.botId}/${ben.botId}"[^>]*aria-label="dan, in family"`));
+  assert.doesNotMatch(basketOf(html, 'family'), /data-mode="wait"/);
 });
 
 test('names: set one when inviting, change it any time, and the bot follows', async (t) => {

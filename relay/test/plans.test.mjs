@@ -28,6 +28,31 @@ test('hosted: the free allowance can be per day (what the hosted relay runs)', a
   assert.match(await ben.cli('send', 'Mia', 'a new day'), /Sent msg_/);
 });
 
+test('hosted: a plan named for one person is only words, the limits stay free', async (t0) => {
+  const env = await setup(t0, { hosted: true, billing: { freeMessages: 1, freePeriod: 'day' } });
+  const tim = await owner(env, t0, 'tim@example.com', 'tim');
+  const mia = await owner(env, t0, 'mia8@example.com', 'mia8');
+  const link = (await tim.b('/app/invites', { method: 'POST', form: { bot: tim.botId } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  await mia.b(`/i/${link}`, { method: 'POST', form: { bot: mia.botId, alias: 'Tim' } });
+  const admin = (body) => fetch(`${env.url}/admin/tier`, { method: 'POST', headers: { authorization: 'Bearer admin-token-for-tests-123456', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await fetch(`${env.url}/admin/tier`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 401);
+  assert.equal((await admin({ email: 'tim@example.com' })).status, 400);
+  assert.equal((await admin({ email: 'tim@example.com', name: 'X', theme: 'disco' })).status, 400);
+  assert.equal((await admin({ email: 'Tim@example.com', name: 'Mr Luckbased', note: 'No perks for you buddy, still 50 messages.' })).status, 200);
+  assert.match((await tim.b('/app')).text, /<span class="umenu__plan">Mr Luckbased<\/span>/);
+  let plan = (await tim.b('/app/billing')).text;
+  assert.match(plan, /<section class="card"><h2>Your plan <span class="umenu__plan">Mr Luckbased<\/span><\/h2><p class="tiernote">No perks for you buddy, still 50 messages\.<\/p>[^]*Free plan: 0 of 1 messages sent today/);
+  // The golf look: the card becomes a fairway with a flag, the pill goes green.
+  assert.equal((await admin({ email: 'tim@example.com', name: 'Mr Luckbased', note: 'No perks for you buddy, still 50 messages.', theme: 'golf' })).status, 200);
+  plan = (await tim.b('/app/billing')).text;
+  assert.match(plan, /<section class="card card--golf"><svg class="golf__scene"[^]*<\/svg><h2>Your plan <span class="umenu__plan umenu__plan--golf">Mr Luckbased<\/span>[^]*class="tiernote"/);
+  assert.match((await tim.b('/app')).text, /<span class="umenu__plan umenu__plan--golf">Mr Luckbased<\/span>/);
+  assert.match(await tim.cli('send', 'Mia8', 'one'), /Sent msg_/);
+  await assert.rejects(tim.cli('send', 'Mia8', 'two'), /free messages for today are used up/);
+  await admin({ email: 'tim@example.com', off: true });
+  assert.doesNotMatch((await tim.b('/app/billing')).text, />Mr Luckbased<|class="tiernote"|card--golf"/);
+});
+
 test('hosted: the Infinite plan has no limit, shows a rainbow Infinite pill, and can be taken back', async (t0) => {
   const env = await setup(t0, { hosted: true, billing: { freeMessages: 1, freePeriod: 'day' } });
   const ben = await owner(env, t0, 'dad@example.com', 'dad');

@@ -109,13 +109,13 @@ export const msgId = (out) => out.match(/Sent (msg_[\w-]+)/)[1];
 export const REDIRECT = 'https://grok.example/oauth/callback';
 
 // The OAuth dance a connected app does: register, send the person to sign in and approve, swap the code.
-export async function connectApp(env, b, handle) {
+export async function connectApp(env, b, handle, name = 'Grok Bot') {
   const meta = await (await fetch(`${env.url}/.well-known/oauth-authorization-server`)).json();
-  const reg = await (await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Grok Bot', redirect_uris: [REDIRECT] }) })).json();
+  const reg = await (await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: name, redirect_uris: [REDIRECT] }) })).json();
   const verifier = randomBytes(32).toString('base64url');
   const params = { response_type: 'code', client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', state: 'xyz' };
   const consent = await b(`/oauth/authorize?${new URLSearchParams(params)}`);
-  assert.match(consent.text, /Connect your bot to bot2bot[^]*Requested by the app "Grok Bot"[^]*not end-to-end encrypted/);
+  assert.match(consent.text, new RegExp(`Connect your bot to bot2bot[^]*Not end-to-end encrypted[^]*Requested by the app "${name}"`));
   const ok = await b('/oauth/authorize', { method: 'POST', form: { ...params, bot: 'new', handle, decision: 'allow' } });
   const loc = new URL(ok.location);
   assert.equal(loc.searchParams.get('state'), 'xyz');

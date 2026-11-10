@@ -51,8 +51,12 @@ test('invite by chat: the bot gets a link, the friend connects, the owner says y
   assert.ok(link.startsWith(`${env.url}/i/`));
   const gran = await login(env, 'gran@example.com');
   const path = new URL(link).pathname;
-  assert.match(out, /Open my invite: http[^]*If you don't have bot2bot yet, it shows you how to connect your Grok Bot first\./);
-  assert.match((await gran(path)).text, /wants your bots to talk[^]*Add the setup bot[^]*I have a bot2bot invite: http[^]*accept_invite tool: code/);
+  assert.match(out, /Open my invite: http[^]*If you don't have bot2bot yet, it shows you how to connect your bot first\./);
+  const invitation = (await gran(path)).text;
+  assert.match(invitation, /wants your bots to talk[^]*Grok Bot[^]*I have a bot2bot invite: http[^]*Add the setup bot[^]*OpenAI dots[^]*href="\/connect\/chatgpt\?invite=[A-Z0-9]{4}-[A-Z0-9]{4}"[^]*OpenClaw[^]*Claude Code[^]*--agent claude-code[^]*Codex[^]*--agent codex[^]*Hermes Agent[^]*Message for Hermes Agent[^]*--agent hermes[^]*Other bots[^]*\/mcp/);
+  const chatgptGuide = invitation.match(/href="(\/connect\/chatgpt\?invite=[A-Z0-9-]+)"/)[1];
+  assert.equal(new URL(chatgptGuide, env.url).searchParams.get('invite'), path.split('/').at(-1));
+  assert.match((await gran(chatgptGuide)).text, new RegExp(`href="${path}"`));
   // Signed out: people who already have bot2bot sign in first; setup comes after.
   assert.match(await (await fetch(env.url + path)).text(), /Already on bot2bot\? Sign in<\/a>[^]*Add the setup bot/);
   await gran(path, { method: 'POST', form: { web: '1', alias: 'Ben' } });
@@ -93,8 +97,9 @@ test('the skill, the backup check, the setup checklist and the bot tiles', async
   assert.ok(guide.includes(`${env.url}/setup`) && !guide.includes('{{RELAY}}'));
 
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
-  // The owner helper tests nothing, so the doorbell isn't verified yet: the checklist shows.
-  assert.match((await ben.b('/app')).text, /Set up @ben[^]*2 of 4/);
+  // The owner helper tests nothing, so the doorbell isn't verified yet: the checklist shows, with turning the
+  // doorbell on (its test ring included) as one step.
+  assert.match((await ben.b('/app')).text, /Set up @ben[^]*1 of 3/);
   assert.match(await ben.cli('whoami'), /Setup: \d of 5 done/);
 
   // Backup check: chosen on the dashboard, done by the bot, shown on the tile.
@@ -122,7 +127,10 @@ test('profile pictures: picked before the dashboard, shown to friends who said y
   assert.equal((await b('/app/activity')).location, '/app/picture?next=%2Fapp%2Factivity');
   const picker = (await b('/app/picture?next=/app/activity')).text;
   assert.match(picker, /Your name and picture/);
-  assert.equal((picker.match(/name="avatar" value="[a-z]+"/g) || []).length, 12, 'the twelve robots, next to any stickers');
+  assert.equal((picker.match(/name="avatar" value="[a-z]+"/g) || []).length, 0, 'the drawn robots are no longer offered');
+  assert.ok((picker.match(/name="avatar" value="sticker:[a-z0-9-]+"/g) || []).length >= 30, 'the stickers are');
+  assert.ok(picker.indexOf('>Computers</legend>') < picker.indexOf('>Stickers</legend>'), 'computers first');
+  assert.match(picker, /value="sticker:[a-z0-9-]+" checked/, 'a computer is picked to start with');
   assert.equal((await b('/app/picture', { method: 'POST', form: { next: '/app/activity' } })).status, 400, 'a picture is required');
   assert.equal((await b('/app/picture', { method: 'POST', form: { avatar: 'nope', next: '/app/activity' } })).status, 400);
   assert.equal((await b('/app/picture', { method: 'POST', form: { avatar: 'visor', next: '//evil.example' } })).location, '/app');
@@ -148,7 +156,7 @@ test('profile pictures: picked before the dashboard, shown to friends who said y
   assert.equal((await ben.b(src)).status, 404, 'blocked: the photo is hidden too');
   assert.ok(!(await ben.b('/app')).text.includes(`<img src="${src}"`));
 
-  // Switching to a robot drops the photo.
+  // Switching to a robot (anyone who already had one can still swap back to it) drops the photo.
   await anna.b('/app/picture', { method: 'POST', form: { avatar: 'mint' } });
   assert.equal((await anna.b(src)).status, 404);
   assert.match((await anna.b('/app/account')).text, /src="\/avatars\/mint\.svg"/);

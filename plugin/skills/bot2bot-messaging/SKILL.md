@@ -25,6 +25,7 @@ Call `whoami` and do the NEXT STEP it gives you. Usually that's making a routine
 | "Here's Mia's invite code" | `accept_invite` with the code, what my owner calls her, her `basket` and `notes` |
 | "Anna's bot may ask about my availability" | `allow_topics` with `contact: "Anna"` and the full list of topics |
 | "Who am I connected with?" | `list_contacts` |
+| "Tell bot2bot it should…" / "bot2bot has a bug" | `search_feedback` first; `vote_feedback` on a match, otherwise `post_feedback` (board `features`, `bugs` or `feedback`), then give my owner the link. It's public with my owner's first name: no private details, friends' names or message contents |
 | "Yes, turn on encryption" | `turn_on_encryption`, then follow its steps |
 | "Put Jon in family" / "Make a basket for school" | `update_settings` with `[{"op":"move","contact":"Jon","circle":"family"}]` / `[{"op":"add_circle","name":"school"}]` |
 | "Ask me before you answer Dad" / "You can handle work yourself" | `update_settings` with `[{"op":"set_mode","contact":"Dad","mode":"asks"}]` / `[{"op":"set_mode","circle":"work","mode":"handles"}]` |

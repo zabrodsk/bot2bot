@@ -1,9 +1,14 @@
 // The human side of b2b: accounts (email code login), a dashboard, self-serve bot setup,
 // doorbell setup with a live test, and invite links. Server-rendered HTML, zero dependencies.
-import { CONNECTOR_DOORBELL, ENCRYPTION_MESSAGE, safeText } from './connector.mjs';
+import { consentMarkup, replayPage, ANALYTICS_CSP } from './analytics.mjs';
+import { webhookKey, AGENTS } from './doorbells.mjs';
+import { ASSISTANT, platformForApp } from './platforms.mjs';
+import { CONNECTOR_DOORBELL, ENCRYPTION_MESSAGE, safeText, isDotApp, wakeOnly, isSender, senderLabel, SENDER } from './connector.mjs';
 import { nextQuestion, QUESTION_BY_ID } from './feedback-questions.mjs';
-import { loginEmail } from './email.mjs';
+import { loginEmail, DOORBELL_VIDEO } from './email.mjs';
 import { t as translator, langFromHeader, normLang } from './i18n.mjs';
+import { setupPrompts } from './setup-prompts.mjs';
+import { isBig, bigParts, filesArt } from './bigupdate.mjs';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -52,12 +57,21 @@ export function migrateApp(db) {
   addColumn('messages', 'choices', 'TEXT');
   addColumn('messages', 'via', "TEXT NOT NULL DEFAULT 'bot'");
   addColumn('users', 'last_notified_at', 'INTEGER');
+  addColumn('users', 'nudged_at', 'INTEGER'); // the last reminder email: the doorbell one or the hosted gift one (L.nudgeGapMs)
   // Quiet hours (0.8): on by default, 22:00 to 08:00 in the person's own timezone.
   addColumn('users', 'tz', 'TEXT');
   addColumn('users', 'infinite_at', 'INTEGER');
+  // A plan name and a line for one person, set by the operator for fun. Only words: the limits stay the free plan's.
+  addColumn('users', 'tier_name', 'TEXT');
+  addColumn('users', 'tier_note', 'TEXT');
+  addColumn('users', 'tier_theme', 'TEXT'); // a look for their Plan card: 'golf'
   addColumn('users', 'name_set_at', 'INTEGER');
   addColumn('users', 'seen_update', 'TEXT');
+  // The newest update one of their bots told them about, and when (server.mjs newsFor).
+  addColumn('users', 'bot_news', 'TEXT');
+  addColumn('users', 'bot_news_at', 'INTEGER');
   addColumn('users', 'lang', 'TEXT');
+  addColumn('users', 'theme', 'TEXT');
   addColumn('users', 'feedback_asked_at', 'INTEGER');
   addColumn('users', 'feedback_questions', 'TEXT'); // JSON list of the feature questions already asked
   addColumn('feedback', 'question', 'TEXT');
@@ -119,7 +133,7 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
-  const { events = null, latestUpdate = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -151,42 +165,51 @@ export function createApp(ctx) {
   // Signed-in pages: a sidebar (places, your bots, you) beside a full-width page with one header.
   // On phones the sidebar folds into a top bar and the places move to a bar at the bottom.
   // Signed-out pages: the brand on top and one centred column.
-  const head = (title, tr) => `<!doctype html><html lang="${tr.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#f3f5f8">
+  // Appearance: no choice follows the device; Light or Dark (picked in Account) pins it.
+  const THEME_COLOR = { light: '#f3f5f8', dark: '#0e131b' };
+  const head = (title, tr, theme = null) => `<!doctype html><html lang="${tr.lang}"${THEME_COLOR[theme] ? ` data-theme="${theme}"` : ''}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><script>addEventListener('pagereveal',(e)=>{if(e.viewTransition)document.documentElement.classList.add('vt');});</script>
+${THEME_COLOR[theme] ? `<meta name="theme-color" content="${THEME_COLOR[theme]}">` : Object.entries(THEME_COLOR).map(([k, c]) => `<meta name="theme-color" content="${c}" media="(prefers-color-scheme: ${k})">`).join('')}
 <title>${esc(title)} · ${esc(product)}</title><meta name="robots" content="noindex"><style>${site ? FONTS : ''}${CSS}</style></head>`;
   const brand = (href) => `<a class="brand" href="${href}">${ICON.bot}<span>${esc(product)}</span></a>`;
   const sim = banner ? `<div class="sim" role="note">${esc(banner)}</div>` : '';
   // Signed out, the other language is one tap away at the top; it is remembered in the lang cookie.
   const langSwitch = (tr) => { const to = tr.lang === 'cs' ? 'en' : 'cs'; return `<a class="langswitch" href="/lang/${to}" hreflang="${to}" lang="${to}">${to === 'cs' ? 'Čeština' : 'English'}</a>`; };
-  const layout = (title, body, { user, tr = user ? T(user) : translator('en'), bar = {}, tab = '', width = 'full', actions = '' } = {}) => {
-    if (!user) return `${head(title, tr)}<body class="out"><header class="topbar">${brand('/')}${langSwitch(tr)}</header>${sim}<main class="col col--narrow">${body}</main>${site ? legal(tr) : ''}<script>${uiJs(tr)}</script></body></html>`;
+  const layout = (title, body, { user, tr = user ? T(user) : translator('en'), bar = {}, tab = '', width = 'full', outWidth = 'narrow', actions = '' } = {}) => {
+    if (!user) return `${head(title, tr)}<body class="out"><header class="topbar">${brand('/')}${langSwitch(tr)}</header>${sim}<main class="col col--${outWidth}">${body}</main>${site ? legal(tr) : ''}<script>${uiJs(tr)}</script></body></html>`;
     const hasWeb = !!q("SELECT 1 FROM bots WHERE user_id = ? AND vendor = 'web' AND disconnected_at IS NULL").get(user.id);
     const place = (key, href, label) => `<a class="tabs__item" href="${href}"${tab === key ? ' aria-current="page"' : ''}>${label}</a>`;
     const gov = govBots(user).length > 0;
     const waiting = gov ? pendingFor(user) : 0;
-    const nav = `<nav class="tabs" aria-label="${tr('Main')}"><span class="tabs__sel" aria-hidden="true"></span>${place('home', '/app', tr('Overview'))}${gov ? place('people', '/app/people', tr('People')) : ''}${place('activity', '/app/activity', tr('Activity'))}${hasWeb ? place('inbox', '/app/inbox', tr('Inbox')) : ''}${place('account', '/app/account', tr('Account'))}${hosted ? place('plan', '/app/billing', tr('Plan')) : ''}</nav>`;
+    const nav = `<nav class="tabs" aria-label="${tr('Main')}"><span class="tabs__sel" aria-hidden="true"></span>${place('home', '/app', tr('Overview'))}${gov ? place('people', '/app/people', tr('People')) : ''}${place('activity', '/app/activity', tr('Activity'))}${hasWeb ? place('inbox', '/app/inbox', tr('Inbox')) : ''}${place('account', '/app/account', tr('Settings'))}${hosted ? place('plan', '/app/billing', tr('Plan')) : ''}</nav>`;
     const planState_ = hosted ? allowance(user).state : '';
-    const planName = hosted ? { paid: tr('Paid'), covered: tr('Covered'), infinite: 'Infinite' }[planState_] || tr('Free') : '';
+    const planName = hosted ? { paid: tr('Paid'), covered: tr('Covered'), infinite: 'Infinite' }[planState_] || (user.tier_name ? esc(user.tier_name) : tr('Free')) : '';
+    const planLook = planState_ === 'infinite' ? ' umenu__plan--infinite' : planState_ === 'free' && user.tier_name && user.tier_theme === 'golf' ? ' umenu__plan--golf' : '';
     const face = avatar(user.name || user.email, 'md', photoUrl(user.id, user.photo_at, user.avatar));
     const me = `<details class="more umenu"><summary class="umenu__trigger" aria-label="${tr('Your account')}">${face}</summary>
-<div class="umenu__panel"><div class="umenu__head">${face}<div class="umenu__id"><span class="umenu__row"><span class="umenu__fullname">${esc(user.name)}</span>${planName ? `<span class="umenu__plan${planState_ === 'infinite' ? ' umenu__plan--infinite' : ''}">${planState_ === 'infinite' ? '<span class="inf" aria-hidden="true">∞</span>' : ''}${planName}</span>` : ''}</span><span class="umenu__email">${esc(user.email)}</span></div></div>
-<div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}${tr('Account')}</a><a class="umenu__item" href="/app/feedback">${ICON.chat}${tr('Send feedback')}</a>${admin ? admin.menuLink(user) : ''}${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}${tr('Plan')}</a>` : ''}
+<div class="umenu__panel"><div class="umenu__head">${face}<div class="umenu__id"><span class="umenu__row"><span class="umenu__fullname">${esc(user.name)}</span>${planName ? `<span class="umenu__plan${planLook}">${planState_ === 'infinite' ? '<span class="inf" aria-hidden="true">∞</span>' : ''}${planName}</span>` : ''}</span><span class="umenu__email">${esc(user.email)}</span></div></div>
+<div class="umenu__sep"></div><a class="umenu__item" href="/app/account">${ICON.person}${tr('Settings')}</a>${boardPages ? `<a class="umenu__item" href="/feedback">${ICON.bulb}${tr('Ideas and bugs')}</a>` : ''}<a class="umenu__item" href="/app/feedback">${ICON.chat}${tr('Send feedback')}</a>${admin ? admin.menuLink(user) : ''}${promo ? promo.menuLink(tr) : ''}${hosted ? `<a class="umenu__item" href="/app/billing">${ICON.card}${tr('Plan')}</a>` : ''}
 <div class="umenu__sep"></div><form method="post" action="/logout"><button class="umenu__item">${ICON.logout}${tr('Log out')}</button></form></div></details>`;
     const back = bar.back ? `<a class="crumb" href="${esc(bar.back)}">${ICON.back}${esc(bar.backLabel || tr('Overview'))}</a>` : '';
     const ownH1 = /<h1[\s>]/.test(body);
-    const pagehead = ownH1 ? (back ? `<header class="pagehead">${back}</header>` : '') : `<header class="pagehead"><div class="pagehead__text">${back}<h1>${esc(bar.title ?? title)}</h1>${bar.sub ? `<p class="pagehead__sub">${esc(bar.sub)}</p>` : ''}</div>${actions ? `<div class="pagehead__actions">${actions}</div>` : ''}</header>`;
+    const pagehead = ownH1 ? (back ? `<header class="pagehead">${back}</header>` : '') : `<header class="pagehead"><div class="pagehead__text">${back}${bar.rename ? nameEdit(bar.title, bar.rename, tr) : `<h1>${esc(bar.title ?? title)}</h1>`}${bar.sub ? `<p class="pagehead__sub">${esc(bar.sub)}</p>` : ''}</div>${actions ? `<div class="pagehead__actions">${actions}</div>` : ''}</header>`;
     const note = takeNotice(user);
-    const news = latestUpdate && user.seen_update !== latestUpdate.iso && hasPicture(user) ? whatsNewDialog(tr) : tab === 'home' && feedbackDue(user) ? feedbackDialog(user, tr) : '';
-    return `${head(title, tr)}<body class="in"><header class="top"><div class="top__in">${brand('/app')}${nav}${me}</div></header>
-<main class="page">${sim}<div class="col col--${width}">${pagehead}${body}</div>${site ? legal(tr) : ''}</main>${note ? toast(note, tr) : ''}${news}<script>${uiJs(tr)}</script></body></html>`;
+    // One dialog at most: what's new first, then (on the Overview, once a bot is connected) inviting friends, then feedback.
+    // Never while a bot's doorbell is still being set up: that page has the owner's attention.
+    const gift = !news0(user) && tab === 'home' && promo && hasPicture(user) && liveBots(user).length && !liveBots(user).some((b) => settingUp(b, tr)) ? promo.splash(user, tr) : '';
+    const news = news0(user) ? whatsNewDialog(tr) : gift || (tab === 'home' && feedbackDue(user) ? feedbackDialog(user, tr) : '');
+    return `${head(title, tr, user.theme)}<body class="in"><header class="top"><div class="top__in">${brand('/app')}${nav}${me}</div></header>
+<main class="page">${sim}<div class="col col--${width}">${pagehead}${body}${bar.bot ? connectionMarker(myBots(user).find((b) => b.id === bar.bot), tr) : ''}</div>${site ? legal(tr) : ''}</main>${note ? toast(note, tr) : ''}${news}<script>${uiJs(tr)}</script></body></html>`;
   };
+  const news0 = (user) => latestUpdate && user.seen_update !== latestUpdate.iso && hasPicture(user);
   // Arc dialog: what changed since their last visit, once. One change is one line; more are a short list.
   // Got it, Escape or a click outside closes it and remembers it was seen.
   const whatsNewDialog = (tr) => {
     const items = latestUpdate.items.map((i) => (typeof i === 'string' ? i : (tr.lang === 'cs' && i.cs) || i.en));
     const body = items.length === 1 ? `<p class="dlg__one">${esc(items[0])}</p>` : `<ul class="dlg__list">${items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>`;
-    return `<dialog class="dlg" id="whatsnew" aria-labelledby="wn-h"><form method="post" action="/app/whatsnew" class="dlg__in"><input type="hidden" name="id" value="${esc(latestUpdate.iso)}">
-<h2 id="wn-h" class="dlg__title">${tr('What&#39;s new')}</h2>${body}
+    // A big update: its own title, the robots passing a message, and its points.
+    const big = isBig(latestUpdate.items[0]) ? bigParts(latestUpdate.items[0], tr.lang) : null;
+    return `<dialog class="dlg${big ? ' dlg--big' : ''}" id="whatsnew" aria-labelledby="wn-h"><form method="post" action="/app/whatsnew" class="dlg__in"><input type="hidden" name="id" value="${esc(latestUpdate.iso)}">
+${big ? `${big.art}<h2 id="wn-h" class="dlg__title bigup__title">${big.title}</h2><p class="bigup__lead">${big.lead}</p>${big.points}` : `<h2 id="wn-h" class="dlg__title">${tr('What&#39;s new')}</h2>${body}`}
 <div class="dlg__foot"><a class="link" href="/changelog/">${tr('See all changes')}</a><button class="btn" autofocus>${tr('Got it')}</button></div></form></dialog>
 <script>(()=>{const d=document.getElementById('whatsnew');if(!d||!d.showModal)return;const f=d.querySelector('form');let done=false;
 const seen=()=>{if(done)return;done=true;fetch('/app/whatsnew',{method:'POST',body:new URLSearchParams(new FormData(f)),keepalive:true}).catch(()=>{});};
@@ -212,7 +235,7 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});d.showModal();})()
       doorbell: !!n(`SELECT count(*) AS n FROM bots WHERE id IN (${ph}) AND doorbell_verified_at IS NOT NULL`, ...ids),
       contacts: n(`SELECT count(*) AS n FROM contacts WHERE owner_bot IN (${ph}) AND approved_at IS NOT NULL`, ...ids),
       sorted: n(`SELECT count(*) AS n FROM contacts WHERE owner_bot IN (${ph}) AND circle_id IS NOT NULL`, ...ids),
-      received: n(`SELECT count(*) AS n FROM messages WHERE to_bot IN (${ph}) AND kind != 'probe'`, ...ids),
+      received: n(`SELECT count(*) AS n FROM messages WHERE to_bot IN (${ph}) AND kind NOT IN ('probe', 'group_event')`, ...ids),
       invited: n(`SELECT count(*) AS n FROM invites WHERE from_bot IN (${ph})`, ...ids),
       asked: n(`SELECT count(*) AS n FROM contacts WHERE owner_bot IN (${ph}) AND mode_override = 'asks'`, ...ids),
     };
@@ -247,9 +270,16 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
   // Artwork made for bot2bot (isometric scenes). Only shown when the file is there.
   const art = (name, cls = '') => ART.has(name) ? `<div class="art ${cls}"><img src="/art/${name}.jpg" alt="" width="${name === 'asleep' ? 800 : name === 'home' ? 1536 : 1200}" height="${name === 'asleep' ? 800 : name === 'home' ? 864 : 800}" decoding="async"></div>` : '';
   const setupBot = setupBotUrl;
+  // A dead end (an expired link, a missing page) still has a way on.
+  const onward = (user, tr) => `<div class="actions"><a class="btn ghost wide" href="${user ? '/app' : '/'}">${user ? tr('Go to overview') : tr('Go to {product}', { product: esc(product) })}</a></div>`;
   // With the landing site on this server, its legal pages are one link away from every dashboard page.
-  const legal = (tr) => `<footer class="legal"><a href="/privacy/">${tr('Privacy')}</a><a href="/terms/">${tr('Terms')}</a><a href="/cookies/">${tr('Cookies')}</a><a href="/legal/">${tr('Legal notice')}</a><a href="/changelog/">${tr('What&#39;s new')}</a><a href="/app/feedback">${tr('Send feedback')}</a></footer>`;
-  const page = (res, status, html, headers = {}) => { res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin', ...headers }); res.end(html); };
+  const legal = (tr) => `<footer class="legal"><a href="/cookies/" class="cookie-settings" data-cookie-settings>${tr('Cookie settings')}</a><a href="/privacy/">${tr('Privacy')}</a><a href="/terms/">${tr('Terms')}</a><a href="/cookies/">${tr('Cookies')}</a><a href="/legal/">${tr('Legal notice')}</a><a href="/changelog/">${tr('What&#39;s new')}</a>${boardPages ? `<a href="/feedback">${tr('Ideas and bugs')}</a>` : ''}${status ? `<a href="/status">${tr('Status')}</a>` : ''}<a href="/app/feedback">${tr('Send feedback')}</a></footer>`;
+  const page = (res, status, html, headers = {}) => {
+    if (site && analyticsKey && replayPage(new URL(res.req.url, 'http://localhost').pathname) && html.includes('class="in"')) {
+      html = html.replace('</body>', () => consentMarkup(translator(html.includes('<html lang="cs"') ? 'cs' : 'en'), analyticsKey) + '</body>');
+      headers['content-security-policy'] = ANALYTICS_CSP;
+    }
+    res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin', ...headers }); res.end(html); };
   const redirect = (res, to) => { res.writeHead(303, { location: to, 'cache-control': 'no-store' }); res.end(); };
   const json = (res, status, data) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); };
   // Every change is confirmed where it happened: a short line at the bottom of the next page, with Undo when the
@@ -309,7 +339,7 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
     await mailer({ to: email, ...loginEmail({ product, code, url, minutes: LOGIN_TTL_MS / 60_000, home: origin, logo: site ? `${origin}/icon-192.png` : '', lang }) });
     return devLogin ? code : null;
   }
-  function finishLogin(res, email, next, tz, lang) {
+  function finishLogin(req, res, email, next, tz, lang) {
     let user = q('SELECT * FROM users WHERE email = ?').get(email);
     if (!user) {
       const nm = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).slice(0, 40);
@@ -318,6 +348,7 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
       q('INSERT INTO users (email, name, created_at, email_verified_at, seen_update, lang) VALUES (?, ?, ?, ?, ?, ?)').run(email, nm, clock(), clock(), latestUpdate?.iso ?? null, lang === 'cs' ? 'cs' : null);
       user = q('SELECT * FROM users WHERE email = ?').get(email);
       log(null, 'user_created', { user: user.id });
+      usage?.noteCountry(user.id, req, { signup: true }); // the country only (hosted), never the address
     }
     if (!user.tz && tz && validTz(tz)) q('UPDATE users SET tz = ? WHERE id = ?').run(tz, user.id);
     startSession(res, user.id);
@@ -331,10 +362,25 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
   const pendingCode = (u) => q('SELECT * FROM enroll_codes WHERE user_id = ? AND used_at IS NULL AND expires_at > ? ORDER BY expires_at DESC').get(u.id, clock());
   const setupMessage = (code) => `Please set yourself up for ${product}. Read the guide with: curl -fsSL ${origin}/setup
 Then install the tool and join with code ${code}. Add the "b2b messaging" skill from ${origin}/skill. Make a routine called "b2b doorbell" with a webhook trigger, using the instruction from the guide. Don't print any keys or tokens in this chat.`;
+  // Another assistant (joined with --agent other) usually can't be woken from outside: it sees messages when its
+  // owner talks to it, so there's no doorbell step for it. If it can take webhooks, it sets one with "b2b doorbell set".
+  // An assistant we know by name (Poke, Instinct…) or another app on quick connect sets its own doorbell from its tool:
+  // an email to its own address, its inbound API, or a recurring check. Until it does, it sees messages when you talk to it.
+  const noDoorbell = (b) => (b.platform === 'other' || b.platform === 't3code' || !!ASSISTANT[b.platform]) && !b.webhook_url;
+  // A connected app that isn't Grok Bot (it signed in under another name) can't be woken at all, so it has no doorbell step.
+  const doorbellless = (b) => b.vendor === 'connector' && !b.webhook_url && originOf(b, T({})).key === 'app';
+  // Still on its doorbell step: joined, but friends' bots can't wake it yet.
+  const settingUp = (b, tr) => b.vendor !== 'web' && ['needs_doorbell', 'needs_test'].includes(botStatus(b, tr).key) && !doorbellless(b);
+  // Grok Bot's routines list, on a computer. The owner clicks b2b doorbell there.
+  const GROK_ROUTINES = 'https://cursor.com/grok-bot/link/v1/sidebar?tab=routines';
   const botStatus = (b, tr) => b.disconnected_at ? { key: 'off', label: tr('Disconnected') }
     : b.paused_at ? { key: 'paused', label: tr('Paused') }
     : b.vendor === 'web' ? { key: 'ready', label: tr('Web inbox') }
-    : !b.webhook_url ? { key: 'needs_doorbell', label: tr('Doorbell off') } : b.doorbell_verified_at ? { key: 'ready', label: tr('Ready') } : { key: 'needs_test', label: tr('Doorbell not tested') };
+    : isSender(b) ? { key: 'ready', label: tr('Connected') }
+    : noDoorbell(b) ? { key: 'ready', label: tr('Connected') }
+    : !b.webhook_url ? { key: 'needs_doorbell', label: AGENTS[b.platform] ? tr('Watcher off') : tr('Doorbell off') } : b.doorbell_verified_at ? { key: 'ready', label: tr('Ready') } : { key: 'needs_test', label: tr('Doorbell not tested') };
+  const connectionMarker = (b, tr) => b && b.vendor !== 'web' && !b.disconnected_at && !b.paused_at && (botStatus(b, tr).key === 'ready' || doorbellless(b))
+    ? `<span hidden data-analytics-connected="${b.id}" data-vendor="${esc(b.vendor)}"></span>` : '';
   // Arc badge tones: success for ready, warning for a step that's missing, info for paused.
   const toneOf = (key) => key === 'ready' ? 'success' : key === 'needs_doorbell' || key === 'needs_test' ? 'warning' : key === 'paused' ? 'info' : 'neutral';
   // Arc input: a labelled single-line field with optional helper copy and an error row (role=alert, aria-invalid).
@@ -370,10 +416,15 @@ Then install the tool and join with code ${code}. Add the "b2b messaging" skill 
     return base;
   };
   const hasPicture = (u) => !!(u.photo_at && (u.photo || ROBOT.has(u.avatar) || isSticker(u.avatar)));
+  // The public feedback board (hosted only): the pages live in hosted-board.mjs. Photos stay private there, so only
+  // drawn robots and stickers show; everyone else gets their initial.
+  const boardPages = board ? board.pages({ layout, avatar, avatarSrc: (pic) => photoUrl(null, null, pic), form, page, redirect, json, tell, icon: ICON }) : null;
+  // Invite links and their bonus (hosted only): the pages live in hosted-invites.mjs.
+  const promo = invites && hostedInvites ? hostedInvites.invitePages({ invites, layout, esc, avatar, photoUrl, icon: ICON, stickers: { has: (k) => stickers().has(k) }, clock }) : null;
   // Arc presence dot: shape and colour change together, so a bot's state never rests on colour alone.
   const presence = (key) => `<span class="pdot" data-status="${key === 'ready' ? 'available' : key === 'needs_doorbell' || key === 'needs_test' ? 'away' : 'offline'}" aria-hidden="true"></span>`;
   // Arc code block with a copy button: every message you paste into your bot.
-  const codeBlock = (id, title, text, tr) => `<div class="code"><div class="code__head"><span class="code__title">${ICON.chat}${esc(title)}</span><button type="button" class="copybtn" data-copy="#${id}"><span class="copybtn__icon">${ICON.copy}${ICON.check}</span><span class="copybtn__label">${tr('Copy')}</span></button></div><pre class="code__pre" id="${id}">${esc(text)}</pre></div>`;
+  const codeBlock = (id, title, text, tr, icon = ICON.chat) => `<div class="code"><div class="code__head"><span class="code__title">${icon}${esc(title)}</span><button type="button" class="copybtn" data-copy="#${id}"><span class="copybtn__icon">${ICON.copy}${ICON.check}</span><span class="copybtn__label">${tr('Copy')}</span></button></div><pre class="code__pre" id="${id}">${esc(text)}</pre></div>`;
   // Arc stepper: done, current and next steps on one connected track.
   const stepper = (steps, current, dir, tr) => `<ol class="stepper stepper--${dir}">${steps.map((label, i) => {
     const st = i < current ? 'complete' : i === current ? 'current' : 'upcoming';
@@ -421,32 +472,93 @@ ${bar}</div>`;
     log(b.id, 'connector_bot_created', {});
     return b;
   }
+  // Send only (bot2bot.link/send): one sender per chat app, named after it. Connecting again brings the same one back.
+  function senderBot(u, label) {
+    const had = q("SELECT * FROM bots WHERE user_id = ? AND vendor = 'connector' AND platform = ? AND display_name = ? AND removed_at IS NULL ORDER BY created_at DESC").get(u.id, SENDER, label);
+    if (had) { if (had.disconnected_at) q('UPDATE bots SET disconnected_at = NULL WHERE id = ?').run(had.id); return had; }
+    const slug = (v) => String(v).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const base = `${slug(u.name || u.email.split('@')[0]).slice(0, 18) || 'my'}-${slug(label).slice(0, 12) || 'chat'}`;
+    let handle = base;
+    for (let n = 2; q('SELECT 1 FROM bots WHERE handle = ?').get(handle) || q('SELECT 1 FROM enroll_codes WHERE handle = ? AND used_at IS NULL').get(handle); n++) handle = `${base}-${n}`;
+    q("INSERT INTO bots (handle, display_name, token_hash, created_at, user_id, vendor, platform) VALUES (?, ?, NULL, ?, ?, 'connector', ?)").run(handle, label, clock(), u.id, SENDER);
+    const b = q('SELECT * FROM bots WHERE handle = ?').get(handle);
+    log(b.id, 'sender_created', { app: label });
+    return b;
+  }
+  // Who's signing in, and a way to sign in as someone else (two bot2bot accounts in one chat app, or the wrong one).
+  // Who asked and who's signing in sit under the buttons, apart from the decision itself.
+  const signedInAs = (user, tr, params, client) => `<div class="card__aside"><p>${tr('Requested by the app "{name}".', { name: esc(client.name) })}</p><form method="post" action="/logout">${tr('Signed in as {email}.', { email: esc(user.email) })} <input type="hidden" name="next" value="${esc(`/oauth/authorize?${new URLSearchParams(params)}`)}"><button class="link">${tr('Use another account')}</button></form></div>`;
+  // Yes and no side by side. Yes comes first in the form, so Enter connects.
+  const decide = (tr, yes) => `<div class="decide"><button class="btn" name="decision" value="allow">${yes}</button><button class="btn ghost" name="decision" value="deny">${tr('Cancel')}</button></div>`;
+  function sendAuthorizePage(user, client, params) {
+    const tr = T(user);
+    const app = esc(senderLabel(client.name));
+    const hidden = Object.entries(params).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
+    const none = !liveBots(user).some((b) => b.vendor !== 'web' && !isSender(b));
+    return layout(tr('Connect'), `<section class="card">
+<h1>${tr('Let {app} send to your bots?', { app })}</h1>
+<p>${tr("When you ask, {app} sends briefs, notes and files to your own bots. It can't read your messages, see your account or reach your friends.", { app })}</p>
+${none ? `<p>${tr('You have no bots yet. Connect one too, so it has somewhere to send.')}</p>` : ''}
+<p class="muted small">${tr('Not end-to-end encrypted: {app} hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.', { app })}</p>
+<form method="post" action="/oauth/authorize" class="stack">${hidden}
+${decide(tr, tr('Connect'))}</form>
+${signedInAs(user, tr, params, client)}</section>`, { user, width: 'narrow', bar: { title: tr('Send to your bots') } });
+  }
   // Consent for a connected app (OAuth). The app gets one bot of this person's, nothing else.
   function authorizePage(user, client, params, { error = '' } = {}) {
     const tr = T(user);
-    const bots = myBots(user).filter((b) => b.vendor === 'connector');
+    // A dot in private mode can sign ChatGPT in again, for wake-ups only: its messages stay end-to-end encrypted.
+    const dotApp = isDotApp(client);
+    const bots = myBots(user).filter((b) => (b.vendor === 'connector' && !isSender(b)) || (dotApp && wakeOnly(b)));
     const hidden = Object.entries(params).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
     const suggested = suggestHandle(user);
     // A disconnected bot waiting to come back is the likely choice; otherwise a new bot, so nobody hands an
     // existing bot to an app by accident. Apps name themselves (Grok Bot signs in as "Cursor"), so that's small print.
     const back = bots.find((b) => b.disconnected_at);
     return layout(tr('Connect'), `<section class="card">
-<p class="muted small">${tr('Requested by the app "{name}".', { name: esc(client.name) })}</p>
 ${error ? `<p class="error" role="alert">${esc(tr.msg(error))}</p>` : ''}
-<p>${tr("Your bot will be able to send and receive messages with people you connect with, as one {product} bot. It can't see your account or anyone else's bots.", { product: esc(product) })}</p>
-<p class="muted small">${tr('Connected-app chats are not end-to-end encrypted: we pass the text on and delete it 7 days after delivery. For end-to-end encryption, set your bot up in private mode instead.')}</p>
+<p>${tr('Your bot can message the people you connect with.')} ${tr("It can't see your account or anyone else's bots.")}</p>
+<p class="muted small">${tr('Not end-to-end encrypted: we pass the text on and delete it 7 days after delivery. Want end-to-end encryption? Set your bot up in private mode instead.')}</p>
 <form method="post" action="/oauth/authorize" class="stack">${hidden}
-${bots.length ? `<label>${tr('Which bot')}<select name="bot" id="pick"><option value="new"${back ? '' : ' selected'}>${tr('A new bot')}</option>${bots.map((b) => `<option value="${b.id}"${b === back ? ' selected' : ''}>@${esc(b.handle)}${b.disconnected_at ? ` (${tr('reconnect')})` : ''}</option>`).join('')}</select></label>` : '<input type="hidden" name="bot" value="new">'}
+<label>${tr('Which bot')}<select name="bot" id="pick"><option value="new"${back ? '' : ' selected'}>${tr('A new bot')}</option>${bots.map((b) => `<option value="${b.id}"${b === back ? ' selected' : ''}>@${esc(b.handle)}${b.disconnected_at ? ` (${tr('reconnect')})` : wakeOnly(b) ? ` (${tr('wake-ups only, stays end-to-end encrypted')})` : ''}</option>`).join('')}<option value="send">${tr('Send only: it hands things to my bots')}</option></select></label>
 <label id="newname"${back ? ' hidden' : ''}>${tr('Name for the new bot')}<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
-<button class="btn" name="decision" value="allow">${tr('Connect')}</button><button class="link" name="decision" value="deny">${tr('Cancel')}</button></form></section>
-${bots.length ? `<script>const p=document.getElementById('pick'),n=document.getElementById('newname');p.addEventListener('change',()=>{n.hidden=p.value!=='new';});</script>` : ''}`, { user, width: 'narrow', bar: { title: tr('Connect your bot to {product}', { product }) } });
+${decide(tr, tr('Connect'))}</form>
+${signedInAs(user, tr, params, client)}</section>
+<script>const p=document.getElementById('pick'),n=document.getElementById('newname');p.addEventListener('change',()=>{n.hidden=p.value!=='new';});</script>`, { user, width: 'narrow', bar: { title: tr('Connect your bot to {product}', { product }) } });
   }
-  const quickMessage = `Add the custom MCP connector ${origin}/mcp (name: bot2bot) and sign me in. Then call its whoami tool and do the next step it gives you.`;
-  // Private mode is the default: one message, no code to copy. The bot makes its own keys and gives its owner
-  // a link; the owner signs in there and says yes, the same one sign-in as quick connect.
-  const privateMessage = `Set yourself up for ${product} in private mode (end-to-end encrypted). Read the guide with: curl -fsSL ${origin}/setup
-Install the tool, then run: node ~/bin/b2b.mjs join ${origin}
-Give me the link it prints so I can approve you, then run the same join command again: it waits until I've said yes. Add the "b2b messaging" skill from ${origin}/skill and make the "b2b doorbell" routine from the guide. Don't print any keys or tokens in this chat.`;
+  // What people paste into their assistant (setup-prompts.mjs, shared with the website).
+  const prompts = setupPrompts({ origin, product });
+  const agentTool = prompts.agentTool;
+  const WATCH_INSTALL = `Update the bot2bot tool: ${agentTool}
+Then run: node ~/bin/b2b.mjs watch --install and do what it says. Don't print any keys or tokens.`;
+  // A setup choice's heading: the assistants' marks, then its name.
+  const diyName = (marks, label) => `<span class="diy__name">${marks.length ? `<span class="diy__marks">${marks.join('')}</span>` : ''}${label}</span>`;
+  // Claude Code, Codex, Cursor and Hermes Agent, each on its own: on a computer that stays on, with the watcher that wakes it.
+  const agentWay = (tr, after = '') => [
+    ['acc', MARK.claude, 'Claude Code', prompts.agent('claude-code', after)],
+    ['acx', MARK.codex, 'Codex', prompts.agent('codex', after)],
+    ['acu', MARK.cursor, 'Cursor', prompts.agent('cursor', after)],
+    ['ahm', MARK.hermes, 'Hermes Agent', prompts.hermes(after)],
+  ].map(([id, mark, agent, text]) => `<details class="diy"><summary>${diyName([mark], id === 'ahm' || id === 'acu' ? `${agent} ${badge(tr('Beta'), 'info')}` : agent)}</summary>
+<p class="muted" style="margin-top:10px">${tr('On a computer that stays on, paste this into {agent}. It installs a small tool, gives you a link to approve it and starts a watcher that wakes it when a message comes in. Only the bots can read your messages.', { agent })}</p>
+${codeBlock(id, tr('Message for {agent}', { agent }), text, tr, mark)}</details>`).join('\n');
+  // Every assistant but Grok Bot, in the order the site lists them: Instinct, dots, OpenClaw, the agents on a computer
+  // that stays on, then other bots (in beta) that add bot2bot as an app, or paste one message if they run commands.
+  const otherWays = (tr, { after = '', invite = null } = {}) => `<details class="diy"><summary>${diyName([MARK.instinct], 'Instinct')}</summary>
+<p class="muted" style="margin-top:10px">${tr('Paste this into Instinct. It installs a small tool and gives you a link to approve it. Only the bots can read your messages.')}</p>
+${codeBlock('im', tr('Message for Instinct'), prompts.instinct(after), tr, MARK.instinct)}</details>
+<details class="diy"><summary>${diyName([MARK.dots], 'OpenAI dots')}</summary>
+<p class="muted" style="margin-top:10px">${tr('Connect bot2bot in your own ChatGPT account, then check it in your chat. Your dot then turns on end-to-end encryption on its own computer. If it can’t, it stays on Quick connect, which isn’t end-to-end encrypted.')}</p>
+<a class="btn wide" href="/connect/chatgpt${invite ? `?invite=${encodeURIComponent(invite.split('/').at(-1))}` : ''}">${tr('Connect dots')}</a></details>
+<details class="diy"><summary>${diyName([MARK.openclaw], 'OpenClaw')}</summary>
+<p class="muted" style="margin-top:10px">${tr('Paste this into OpenClaw. It installs a small tool and the skill, gives you a link to approve it and sets up its doorbell. Only the bots can read your messages.')}</p>
+${codeBlock('om', tr('Message for OpenClaw'), prompts.openclaw(after), tr, MARK.openclaw)}</details>
+${agentWay(tr, after)}
+<details class="diy"><summary>${diyName(['poke', 'manus', 'town'].map((k) => `<svg viewBox="${ASSISTANT[k].mark.viewBox}" aria-hidden="true">${ASSISTANT[k].mark.body}</svg>`), `${tr('Other bots')} ${badge(tr('Beta'), 'info')}`)}</summary>
+<p class="muted" style="margin-top:10px">${tr('Poke, Manus, Town, Claude Duet, Muse, Perplexity and more. Add bot2bot as a custom MCP server with this address and sign in. Then tell your assistant: "Set up bot2bot: call whoami and do the next step."')}</p>
+${codeBlock('xu', tr('Server URL'), `${origin}/mcp`, tr, MARK.app)}
+<p class="muted small">${tr("This way isn't end-to-end encrypted. If your assistant can run commands, paste this instead, and only the bots can read your messages:")}</p>
+${codeBlock('xm', tr('Message for your assistant'), prompts.other(after), tr)}</details>`;
   const isPaused = (u) => liveBots(u).some((b) => b.paused_at);
   // One of my bots and one of its contacts, by bot id and the contact's bot id.
   const ownContact = (u, botId, peerId) => {
@@ -463,7 +575,7 @@ Give me the link it prints so I can approve you, then run the same join command 
   // ───── pages ─────
   function landing(user, tr) {
     return layout(tr('Bot to bot'), `<section class="hero"><h1>${tr("Let your AI bot message your friends' bots.")}</h1>
-<p class="lead">${tr('Free and open source. Works with GrokBot today.')}</p>
+<p class="lead">${tr('Free and open source. Works with Grok Bot today.')}</p>
 <a class="btn" href="${user ? '/app' : '/login'}">${user ? tr('Open your dashboard') : tr('Get started')}</a>${hosted ? `<p><a class="link" href="/pricing">${tr('Pricing')}</a></p>` : ''}</section>`, { user, tr, bar: { title: product } });
   }
 
@@ -483,9 +595,17 @@ Give me the link it prints so I can approve you, then run the same join command 
     if (!a.limited) return { alert: '', meter: '' };
     const alert = a.left > 0 ? '' : alertBox('warning', tr("You've used your {n} free messages {period}", { n: a.limit, period: periodWord(tr) }),
       tr("Your bot can't send until {when}. Receiving still works. {price} removes the limit for you and {n} others.", { when: B.freePeriod === 'day' ? tr('tomorrow (midnight UTC)') : tr.date(a.resets), price: esc(tr.msg(B.priceLabel)), n: B.householdSize - 1 }),
-      `<a class="btn small" href="/app/billing">${tr('Remove the limit')}</a>`);
+      `<a class="btn small" href="/app/billing">${tr('Remove the limit')}</a>${promo && !a.boost && invites.left(user) ? `<a class="btn small ghost" href="/app/gifts">${promo.words(tr)('Invite friends')}</a>` : ''}`);
     return { alert, meter: `<a class="card card--meter" href="/app/billing">${usageMeter(a, { compact: true, tr })}</a>` };
   }
+  // A golf hole for the golf Plan card: the green, the cup, a flag in the breeze and a ball just short of it.
+  const GOLF_SCENE = `<svg class="golf__scene" viewBox="0 0 220 132" aria-hidden="true" focusable="false">
+<ellipse cx="128" cy="112" rx="104" ry="24" fill="#4fae66"/><ellipse cx="128" cy="109" rx="88" ry="17" fill="#5cbd72"/>
+<ellipse cx="146" cy="108" rx="8" ry="2.8" fill="#123a22"/><ellipse cx="146" cy="107.4" rx="6" ry="1.6" fill="#0b2616"/>
+<line x1="146" y1="108" x2="146" y2="20" stroke="#f4f6f1" stroke-width="2.2" stroke-linecap="round"/>
+<g class="golf__flag"><path d="M147 21 C160 18 168 27 182 23 L180 38 C167 42 159 33 147 37 Z" fill="#ffd34d"/><path d="M147 21 C160 18 168 27 182 23 L181.4 27 C168 31 160 22 147 25 Z" fill="#fff" opacity=".28"/></g>
+<ellipse cx="104" cy="111.5" rx="6" ry="1.6" fill="#1d5a32" opacity=".55"/><circle cx="104" cy="106" r="5.2" fill="#fbfcf8"/>
+<circle cx="102.4" cy="104.6" r=".7" fill="#c9d1c6"/><circle cx="105" cy="104" r=".7" fill="#c9d1c6"/><circle cx="103.6" cy="107" r=".7" fill="#c9d1c6"/><circle cx="106.2" cy="106.6" r=".7" fill="#c9d1c6"/></svg>`;
   function billingPage(user, { error = '', paid = false } = {}) {
     const tr = T(user);
     const c = allowance(user);
@@ -496,14 +616,17 @@ Give me the link it prints so I can approve you, then run the same join command 
       : c.state === 'paid' ? tr('Paid until {date}.', { date: tr.date(c.until) })
       : c.state === 'covered' ? tr('Covered by {payer} until {date}.', { payer: esc(c.payer), date: tr.date(c.until) })
       : tr('Free plan: {used} of {limit} messages sent {period}. It starts again {when}. Receiving is never limited.', { used: c.used, limit: c.limit, period: periodWord(tr), when: B.freePeriod === 'day' ? tr('at midnight UTC') : tr('on {date}', { date: tr.date(c.resets) }) });
-    return layout(tr('Plan'), `<section class="card"><h2>${tr('Your plan')}${c.state === 'infinite' ? ' <span class="umenu__plan umenu__plan--infinite"><span class="inf" aria-hidden="true">∞</span>Infinite</span>' : ''}</h2>${paid ? `<p class="okmsg" role="status">${tr('Thanks! Payment received.')}</p>` : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
+    const tier = c.state === 'free' && user.tier_name;
+    const golf = tier && user.tier_theme === 'golf';
+    return layout(tr('Plan'), `<section class="card${golf ? ' card--golf' : ''}">${golf ? GOLF_SCENE : ''}<h2>${tr('Your plan')}${c.state === 'infinite' ? ' <span class="umenu__plan umenu__plan--infinite"><span class="inf" aria-hidden="true">∞</span>Infinite</span>' : tier ? ` <span class="umenu__plan${golf ? ' umenu__plan--golf' : ''}">${esc(user.tier_name)}</span>` : ''}</h2>${tier && user.tier_note ? `<p class="tiernote">${esc(user.tier_note)}</p>` : ''}${paid ? `<p class="okmsg" role="status">${tr('Thanks! Payment received.')}</p>` : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
 ${c.limited ? `<div class="card__block">${usageMeter(c, { tr })}</div>` : ''}<p>${status}</p>
 ${c.state === 'covered' || c.state === 'infinite' ? '' : canPay ? `<form method="post" action="/app/billing/checkout"><button class="btn">${c.state === 'paid' ? tr('Add another year') : tr('Pay {price}', { price })}</button></form><p class="muted small">${c.state === 'paid' ? '' : `${tr('No monthly limit for you and your household.')} `}${tr('One payment a year. No subscription, nothing renews by itself.')}</p>`
   : `<p class="muted small">${tr('The paid plan is coming soon.')}</p>`}</section>
+${promo && c.state === 'free' ? promo.planLine(user, tr) : ''}
 <section class="card"><h2>${tr('Your household')}</h2><p>${tr('A paid plan covers you and up to {n} people. Add the email they sign in with. They never see your conversations.', { n: B.householdSize - 1 })}</p>
 ${members.map((m) => `<div class="row"><span>${esc(m.email)}</span><form method="post" action="/app/billing/members" class="more"><input type="hidden" name="remove" value="${esc(m.email)}"><button class="link danger">${tr('Remove')}</button></form></div>`).join('')}
 ${members.length < B.householdSize - 1 ? `<form method="post" action="/app/billing/members" class="stack"><label>${tr('Email')}<input name="email" type="email" required autocomplete="off"></label><button class="btn small ghost">${tr('Add to my household')}</button></form>` : ''}
-${c.state !== 'paid' && members.length ? `<p class="muted small">${tr('They have no limit once you have paid.')}</p>` : ''}</section>`, { user, tab: 'plan', width: 'read', bar: { title: tr('Plan'), sub: tr('What you can send and who your plan covers') } });
+${c.state !== 'paid' && members.length ? `<p class="muted small">${tr('They have no limit once you have paid.')}</p>` : ''}</section>`, { user, tab: 'plan', width: 'read', bar: { title: tr('Plan') } });
   }
 
   function loginPage(tr, { email = '', sent = false, error = '', next = '', devCode = null } = {}) {
@@ -520,17 +643,85 @@ ${devCode ? `<p class="dev">${tr('Dev mode: your code is <b>{code}</b>', { code:
 </section>`, { tr });
   }
 
+  // Send only: how to add bot2bot to ChatGPT or Claude, so a chat can hand a brief to your bot. One card: pick the
+  // chat, copy one address, sign in. The page waits for the sign-in, then says it worked and what to say first.
+  function sendSetupPage(user, tr, want = '') {
+    const url = `${origin}/send`;
+    const live = user ? liveBots(user) : [];
+    const senders = live.filter(isSender);
+    const targets = live.filter((b) => b.vendor !== 'web' && !isSender(b));
+    const target = targets.length ? originOf(targets[0], tr).name : 'Codex';
+    const tryText = `Write up what we figured out as a brief and send it to my ${target} with bot2bot.`;
+    const has = (label) => senders.some((b) => b.display_name === label);
+    const pick = CHAT_APPS.some((a) => a.key === want) ? want : CHAT_APPS.find((a) => !has(a.label))?.key ?? 'chatgpt';
+    const done = senders.length ? `<section class="card"><div class="card__head"><h2>${tr('Ready to send')}</h2>${badge(tr('Connected'), 'success')}</div>
+<p>${tr('{apps} can send to your bots. Say this in your chat:', { apps: senders.map((b) => esc(b.display_name)).join(', ') })}</p>
+${codeBlock('send-try', tr('Say this in your chat'), tryText, tr)}
+<p class="muted small">${tr('Your bot shows you the brief and asks before it starts.')}</p></section>` : '';
+    const none = user && !targets.length ? alertBox('info', tr('Connect a bot first'), tr('Briefs need somewhere to land: your coding agent, Grok Bot or another bot.'), `<a class="btn small" href="/app">${tr('Connect a bot')}</a>`) : '';
+    // Step one opens the chat app's settings; step two is the address to paste there.
+    const panel = (key, [one, two], link, linkLabel, mark, note = '') => `<div data-dir="${key}"${key === pick ? '' : ' hidden'}><div class="stack">
+<ol class="howto" style="margin:0"><li>${one}</li></ol>
+<a class="btn ghost wide" href="${link}" target="_blank" rel="noopener noreferrer">${linkLabel}${ICON.out}</a>
+<ol class="howto" start="2" style="margin:0"><li>${two}</li></ol>
+${codeBlock(`send-${key}-url`, tr('Server URL'), url, tr, mark)}${note ? `<p class="muted small" style="margin:0">${note}</p>` : ''}</div></div>`;
+    const ask = tr('If bot2bot asks which bot, pick Send only.');
+    const setup = `<div class="apppick" role="group" aria-label="${tr('Your chat app')}" data-for="#send-apps">${CHAT_APPS.map((a) => `<button type="button" aria-pressed="${a.key === pick}" data-filter="${a.key}">${MARK[a.key]}<span>${a.label}</span></button>`).join('')}</div>
+<div id="send-apps">
+${panel('chatgpt', [tr('In ChatGPT Plugins, select Add, then Add custom MCP server.'), tr('Name it bot2bot and paste this address under Server URL. Keep OAuth, tick I understand and continue. Then sign in to bot2bot and select Connect.')], 'https://chatgpt.com/plugins', tr('Open ChatGPT Plugins'), MARK.chatgpt, `${tr('Want it to look right? Add <a class="link" href="/icon-512.png" download="bot2bot.png">our icon</a> and this description: “Send briefs from this chat to my bots.”')} ${tr('Needs a paid ChatGPT plan. In a work account, your admin has to allow custom servers.')} ${tr('Two bot2bot accounts? Open bot2bot in ChatGPT Plugins and connect another account.')}`)}
+${panel('claude', [tr('In Claude settings, open Connectors and select Add custom connector.'), tr('Name it bot2bot and paste this address. Then select Connect and sign in to bot2bot.')], 'https://claude.ai/settings/connectors', tr('Open Claude connectors'), MARK.claude)}
+${panel('gemini', [tr('In Gemini, open Settings, then Connected Apps, and select Add a custom app.'), tr('Paste this address, select Next and sign in to bot2bot. When it asks which bot, pick Send only.')], 'https://gemini.google.com/apps', tr('Open Gemini connected apps'), MARK.gemini, tr('For personal Google accounts in the US for now.'))}
+${panel('grok', [tr('In Grok, open Connectors and select New Connector, then Custom.'), `${tr('Paste this address and sign in to bot2bot.')} ${ask}`], 'https://grok.com/connectors', tr('Open Grok connectors'), MARK.grok, tr('Needs a paid Grok plan.'))}
+${panel('perplexity', [tr('In Perplexity, open Connectors and select Add custom, then Add MCP connector and Remote.'), `${tr('Name it bot2bot, paste this address, tick the box and select Add. Then select its card and sign in to bot2bot.')} ${ask}`], 'https://www.perplexity.ai/account/connectors', tr('Open Perplexity connectors'), MARK.perplexity, tr('Needs Perplexity Pro or Max.'))}
+${panel('lechat', [tr('In Le Chat, open Connectors, select Add Connector, then the Custom MCP Connector tab.'), `${tr('Name it bot2bot, paste this address and select Connect. Then sign in to bot2bot.')} ${ask}`], 'https://chat.mistral.ai', tr('Open Le Chat'), MARK.lechat)}
+</div>
+${user ? `<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for you to connect…')}</p>
+<script>(function poll(){fetch('/app/status').then(r=>r.json()).then(d=>{if((d.senders||0)>${senders.length})location.reload();else setTimeout(poll,2500);}).catch(()=>setTimeout(poll,4000));})();</script>` : ''}
+<p class="muted small">${tr("It only sends, and only to your own bots. It can't read your messages. Not end-to-end encrypted: the chat hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.")}</p>`;
+    return layout('bot2bot send', `${none}${done}${senders.length && !want
+  ? `<section class="card"><details class="diy"><summary>${tr('Connect another chat')}</summary><div class="stack" style="margin-top:12px">${setup}</div></details></section>`
+  : `<section class="card stack"><h1>bot2bot send</h1><p>${tr('Say "send this to my Codex" in ChatGPT, Claude, Gemini, Grok or Perplexity, and the brief goes straight to your bot. In ChatGPT, you can send attachments too.')}</p>${setup}</section>`}`, { user, tr, width: 'read', outWidth: 'read', bar: { back: user ? '/app' : '' } });
+  }
+
+  // Keep setup in the owner's ChatGPT session. Only a tool call in their chat can confirm it worked.
+  function chatgptSetupPage(user, tr, invite) {
+    const inviteCode = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(invite || '') ? invite : '';
+    const after = inviteCode ? `Then ask me to open ${origin}/i/${inviteCode} to finish accepting my invite.` : '';
+    return layout(tr('Connect dots'), `<section class="card"><h1>${tr('Connect dots')}</h1>
+<p>${tr('Connect bot2bot in the same ChatGPT account as your dot, then return to the dots app to check the connection.')}</p>
+<p class="muted small">${tr('On your phone? Open ChatGPT in your browser. If you cannot find Plugins or add a custom server there, use a computer with the same ChatGPT account. Your account or workspace must allow custom servers.')}</p>
+<p class="muted small">${tr('If your dot can’t turn on end-to-end encryption, it stays on Quick connect. bot2bot can read those messages and deletes their text 7 days after delivery.')}</p></section>
+<section class="card" aria-labelledby="chatgpt-open"><h2 id="chatgpt-open">1. ${tr('Open ChatGPT Plugins')}</h2>
+<p>${tr('Use the same email address as in your dots app. Under Personal, open your existing remote bot2bot plugin and choose Install plugin or Connect. You do not need to create it again.')}</p>
+<a class="btn wide" href="https://chatgpt.com/plugins" target="_blank" rel="noopener noreferrer">${tr('Open ChatGPT Plugins')}${ICON.out}</a></section>
+<section class="card" aria-labelledby="chatgpt-add"><h2 id="chatgpt-add">2. ${tr('Add bot2bot and sign in')}</h2>
+<p>${tr('For a new connection, select +, then Add custom MCP server. Enter these values:')}</p>
+<dl class="facts"><div class="fact"><dt>${tr('Name')}</dt><dd><b>bot2bot</b></dd></div><div class="fact"><dt>${tr('Authentication')}</dt><dd><b>OAuth</b></dd></div></dl>
+${codeBlock('chatgpt-url', tr('Server URL'), `${origin}/mcp`, tr, MARK.dots)}
+<p>${tr('Review the warning, confirm if you agree, and select Create as a plugin. Wait for the tools to load, install the plugin, then choose Connect if shown.')}</p>
+<p>${tr('When bot2bot opens, sign in there yourself, choose your bot or name a new one, and select Connect. Follow the return to ChatGPT in that same browser until the connection finishes.')}</p>
+<p class="muted small">${tr('Keep the sign-in page in this flow. Do not copy its address into chat or move it to another browser. Enter your email code only on bot2bot.')}</p></section>
+<section class="card" aria-labelledby="chatgpt-check"><h2 id="chatgpt-check">3. ${tr('Check it in your chat')}</h2>
+<p>${tr('Return to your dot in the dots app and paste this message. For an ordinary ChatGPT chat, type @ and select bot2bot first:')}</p>
+${codeBlock('chatgpt-check-message', tr('Message for ChatGPT'), prompts.chatgptReady(after), tr, MARK.dots)}
+<p>${tr('The connection works when ChatGPT returns your bot name from its check. Your dot then makes its own keys on its computer, so your messages are end-to-end encrypted. Watching for new messages is a separate step and may not be available in every chat.')}</p>
+${inviteCode ? `<a class="btn ghost wide" href="/i/${inviteCode}">${tr('Return to your invite')}</a>` : ''}</section>
+<section class="card"><details class="diy"><summary>${tr('Still says Connect?')}</summary>
+<p>${tr('Return to Plugins in your own ChatGPT account and select Connect on bot2bot again. Finish sign-in and return to ChatGPT in the same browser. Then repeat the check in a new chat with bot2bot selected.')}</p>
+<p class="muted small">${tr('Signing in to bot2bot alone does not confirm that ChatGPT connected. Your bot must complete the connection check.')}</p></details></section>`, { user, tr, width: 'read', outWidth: 'read', bar: { back: user ? '/app' : '' } });
+  }
+
   // No bot yet: the setup bot first (it does everything with you), doing it yourself second.
-  function setupChoices(tr, { message = privateMessage, quick = quickMessage, invite = null } = {}) {
-    return `<section class="card"><div class="way"><div class="way__head"><h2>${tr('Add the setup bot')}</h2>${badge(tr('Easiest'), 'info')}</div>
-<p class="muted">${tr('A Grok Bot that sets everything up with you: sign-in, your bot, the doorbell and a test.')}${invite ? ` ${tr('Then tell it: "I have a bot2bot invite: {link}"', { link: invite })}` : ''}</p>
-<a class="btn blue wide" href="${esc(setupBot)}" target="_blank" rel="noopener">${tr('Add the setup bot')}${ICON.out}</a></div>
-<div class="way"><details class="diy"><summary>${tr('Or paste one message into your bot')}</summary>
+  function setupChoices(tr, { after = '', invite = null } = {}) {
+    // Grok Bot first (the setup bot does it all), then each assistant by name, each with its own message.
+    return `<section class="card"><div class="way"><div class="way__head"><h2>${tr('Grok Bot')}</h2>${badge(tr('Easiest'), 'info')}</div>
+<p class="muted">${tr('A Grok Bot that sets it all up with you. One step needs a computer.')}${invite ? ` ${tr('Then tell it: "I have a bot2bot invite: {link}"', { link: invite })}` : ''}</p>
+<a class="btn blue wide" href="${esc(setupBot)}" target="_blank" rel="noopener">${tr('Add the setup bot')}${ICON.out}</a>
+<details class="diy"><summary>${diyName([MARK.grok], tr('Or paste one message into your own Grok Bot'))}</summary>
 <p class="muted" style="margin-top:10px">${tr("Paste this into your bot's chat in Grok Bot. It installs a small tool, makes its own keys and gives you a link to approve it. Only the bots can read your messages.")}</p>
-${codeBlock('pm', tr('Message for your bot'), message, tr)}
-<details class="diy"><summary class="muted small">${tr("Bot can't run commands? Quick connect")}</summary>
-<p class="muted small" style="margin-top:8px">${tr('It adds {product} as an app and asks you to sign in once. Quick connect is not end-to-end encrypted: your bot hands us the text, and we delete it 7 days after delivery.', { product: esc(product) })}</p>
-${codeBlock('qc', tr('Message for your bot'), quick, tr)}</details></details></div></section>`;
+${codeBlock('pm', tr('Message for your bot'), prompts.grok(after), tr, MARK.grok)}</details></div>
+<div class="way">
+${otherWays(tr, { after, invite })}</div></section>`;
   }
 
   // Messages, newest first, as an Arc data table. The overview shows a few, the activity page shows 30.
@@ -540,7 +731,7 @@ ${codeBlock('qc', tr('Message for your bot'), quick, tr)}</details></details></d
     const ids = bots.map((b) => b.id);
     const ph = ids.map(() => '?').join(',') || 'NULL';
     const rows = q(`SELECT m.*, fb.handle AS from_handle, tb.handle AS to_handle FROM messages m JOIN bots fb ON fb.id = m.from_bot JOIN bots tb ON tb.id = m.to_bot
-      WHERE (m.from_bot IN (${ph}) OR m.to_bot IN (${ph})) AND m.kind != 'probe' ORDER BY m.created_at DESC LIMIT ?`).all(...ids, ...ids, limit);
+      WHERE (m.from_bot IN (${ph}) OR m.to_bot IN (${ph})) AND m.kind NOT IN ('probe', 'group_event') ORDER BY m.created_at DESC LIMIT ?`).all(...ids, ...ids, limit);
     const mine = new Set(ids);
     const row = (m) => {
       const out = mine.has(m.from_bot);
@@ -562,17 +753,19 @@ ${codeBlock('qc', tr('Message for your bot'), quick, tr)}</details></details></d
       const code = pendingCode(user);
       if (code) return layout(tr('Set up'), `${art('setup', 'small')}<section class="card"><h2>${tr('Connect your bot')}</h2>${waitingForBot(tr, { plain: code.plain_code })}</section>`, { user, tab: 'home', width: 'read', bar: { title: tr('Connect your bot'), sub: tr('Private mode') } });
       return layout(tr('Set up'), `${art('setup', 'small')}${setupChoices(tr)}
-<p class="wait" id="wait" style="justify-content:center"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p>
-<script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`, { user, tab: 'home', width: 'read', bar: { title: tr('Connect your Grok Bot'), sub: tr('Takes a few minutes') } });
+<p class="wait center" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p>
+<script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`, { user, tab: 'home', width: 'read', bar: { title: tr('Connect your bot'), sub: tr('Takes a few minutes') } });
     }
+    linkOwnBots(user.id);
     const botIds = bots.map((b) => b.id);
     const ph = botIds.map(() => '?').join(',');
-    const contacts = q(`SELECT c.owner_bot, c.peer_bot, c.alias, c.blocked, c.privacy_on, c.circle_id, (SELECT name FROM circles WHERE id = c.circle_id) AS circle_name, c.mode_override, c.approved_at, back.approved_at AS their_ok, back.blocked AS they_blocked,
+    // Your own bots talk to each other without being friends, so they're only under Your bots.
+    const contacts = q(`SELECT c.owner_bot, c.peer_bot, c.alias, c.blocked, c.privacy_on, c.circle_id, (SELECT name FROM circles WHERE id = c.circle_id) AS circle_name, (SELECT name_key FROM circles WHERE id = c.circle_id) AS circle_key, c.mode_override, c.approved_at, back.approved_at AS their_ok, back.blocked AS they_blocked,
         b.handle, b.vendor, b.box_pub, ob.box_pub AS my_box, ob.vendor AS my_vendor, c.codes_compared_at, c.can_ask, back.can_ask AS they_let_me_ask, u.name, u.email_verified_at, u.id AS peer_user, u.photo_at, u.avatar, ob.handle AS my_handle,
-        (SELECT max(created_at) FROM messages m WHERE (m.from_bot = c.owner_bot AND m.to_bot = c.peer_bot) OR (m.from_bot = c.peer_bot AND m.to_bot = c.owner_bot)) AS last_at
+        (SELECT max(created_at) FROM messages m WHERE m.group_id IS NULL AND ((m.from_bot = c.owner_bot AND m.to_bot = c.peer_bot) OR (m.from_bot = c.peer_bot AND m.to_bot = c.owner_bot))) AS last_at
       FROM contacts c JOIN bots b ON b.id = c.peer_bot JOIN bots ob ON ob.id = c.owner_bot LEFT JOIN users u ON u.id = b.user_id
       LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot
-      WHERE c.owner_bot IN (${ph}) ORDER BY c.alias`).all(...botIds);
+      WHERE c.owner_bot IN (${ph}) AND coalesce(b.user_id, 0) != ? ORDER BY c.alias`).all(...botIds, user.id);
     const requests = contacts.filter((c) => !c.approved_at);
     const settled = contacts.filter((c) => c.approved_at);
     const live = bots.filter((b) => !b.disconnected_at);
@@ -593,14 +786,33 @@ ${codeBlock('qc', tr('Message for your bot'), quick, tr)}</details></details></d
       return `<div class="asks">${mine.length ? `<div><span class="muted">${tr('{name} can ask about', { name: esc(c.alias) })}</span> ${mine.map((t) => `<span class="topic">${esc(t)}<form method="post" action="/app/contacts/disallow" class="inline">${ids}<input type="hidden" name="topic" value="${esc(t)}"><button class="x" aria-label="${tr('Stop letting {name} ask about {topic}', { name: esc(c.alias), topic: esc(t) })}" title="${tr('Stop')}">×</button></form></span>`).join(' ')}</div>` : ''}
 ${theirs.length ? `<div><span class="muted">${tr('You can ask {name} about', { name: esc(c.alias) })}</span> ${theirs.map((t) => `<span class="topic">${esc(t)}</span>`).join(' ')}</div>` : ''}</div>`;
     };
-    const aiBots = live.filter((b) => b.vendor !== 'web');
+    const aiBots = live.filter((b) => b.vendor !== 'web' && !isSender(b));
+    // Chat apps (ChatGPT, Claude, Gemini) only hand your bots things, so they have a section of their own and never
+    // count as bots. It shows once there's a bot to send to: a row per app, connected or not.
+    const agents = bots.filter((b) => !isSender(b));
+    const senders = bots.filter(isSender);
+    const appRow = (label, mark, key) => {
+      const b = senders.find((x) => x.display_name === label && !x.disconnected_at) || senders.find((x) => x.display_name === label);
+      const on = b && !b.disconnected_at;
+      const sub = on ? tr('Sends to your bots') : b ? tr('Disconnected') : tr('Not connected');
+      const href = on ? `/app/bots/${b.id}` : `/connect/send?app=${key}`;
+      return `<li><a class="line line--link" href="${href}"><span class="botmark" data-origin="sender" title="${esc(label)}">${mark}${on ? presence('ready') : ''}</span><span class="line__main"><span class="line__title">${esc(label)}</span><span class="line__sub">${sub}</span></span>${on ? ICON.chev : `<span class="btn small ghost" aria-hidden="true">${tr('Connect')}</span>`}</a></li>`;
+    };
+    // The first five always have a row; Le Chat (and any other app) shows once it's connected.
+    const known = CHAT_APPS.slice(0, 5).map((a) => [a.label, MARK[a.key], a.key]);
+    const others = senders.filter((b) => !known.some(([l]) => l === b.display_name) && !b.disconnected_at);
+    const linked = senders.filter((b) => !b.disconnected_at).length;
+    const chatApps = aiBots.length || senders.length ? `<section class="group" aria-labelledby="chats-h"><div class="group__head"><h2 id="chats-h">${tr('Chat apps')} <span class="count">${linked}</span></h2><a class="btn small ghost" href="/connect/send">${ICON.plus}${tr('Connect a chat app')}</a></div>
+<div class="card card--list"><ul class="list">${known.map(([l, m, k]) => appRow(l, m, k)).join('')}${others.map((b) => appRow(b.display_name, MARK[CHAT_APPS.find((a) => a.label === b.display_name)?.key] ?? MARK.app, '')).join('')}</ul></div>${linked ? '' : `<p class="muted small">${tr('Hand your bots a brief straight from a chat.')}</p>`}</section>` : '';
     const ready = aiBots.filter((b) => botStatus(b, tr).key === 'ready').length;
     const botRow = (b) => {
       const st = botStatus(b, tr);
-      const label = b.vendor === 'web' ? tr('Web inbox') : st.key === 'ready' ? (b.last_ring_at ? tr('Ready') : tr('Ready, asleep')) : st.label;
-      const mode = b.vendor === 'web' ? tr('Read in your browser') : b.vendor === 'connector' ? tr('Quick connect') : tr('Private mode');
-      return `<li><a class="line line--link" href="${b.vendor === 'web' && !b.disconnected_at ? '/app/inbox' : `/app/bots/${b.id}`}">${presence(st.key)}
-<span class="line__main"><span class="line__title handle">@${esc(b.handle)}</span><span class="line__sub">${label} · ${mode}</span></span>${ICON.chev}</a></li>`;
+      const mode = b.vendor === 'web' ? tr('Read in your browser') : isSender(b) ? tr('Send only') : b.vendor === 'connector' ? tr('Quick connect') : tr('Private mode');
+      const o = originOf(b, tr), bell = bellOf(b, o, tr);
+      if (bell.state === 'none' && st.key === 'needs_doorbell') st.key = 'ready'; // nothing to set up: it can't have one
+      const label = b.vendor === 'web' ? tr('Web inbox') : bell.state === 'none' && st.key === 'ready' ? tr('Connected') : st.key === 'ready' ? (b.last_ring_at ? tr('Ready') : tr('Ready, asleep')) : st.label;
+      return `<li>${connectionMarker(b, tr)}<a class="line line--link" href="${b.vendor === 'web' && !b.disconnected_at ? '/app/inbox' : `/app/bots/${b.id}`}"><span class="botmark" data-origin="${o.key}" title="${esc(o.name)}">${o.mark}${presence(st.key)}</span>
+<span class="line__main"><span class="line__title handle">@${esc(b.handle)}</span><span class="line__sub">${b.vendor === 'web' ? '' : `${esc(o.name)}${o.beta ? ` · ${tr('Beta')}` : ''} · `}${label} · ${mode}</span></span><span class="bell" data-state="${bell.state}">${bell.icon}<span class="bell__tip" aria-hidden="true">${bell.tip}</span><span class="sr">${bell.tip}</span></span>${ICON.chev}</a></li>`;
     };
     const friendRow = (c) => {
       const ids = `<input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}">`;
@@ -609,21 +821,24 @@ ${theirs.length ? `<div><span class="muted">${tr('You can ask {name} about', { n
       const topics = asks(c, ids);
       // Pilot owners manage this per basket on People. Outside it, existing protection stays visible so it can be turned off.
       const asksFirst = !inPilot(user) && !!c.privacy_on;
-      const basketRow = inPilot(user) && c.my_vendor !== 'web' ? `<div><dt>${tr('Basket')}</dt><dd>${c.circle_name ? `<span class="hand basket-word">${esc(c.circle_name)}</span>` : tr('Not sorted yet')}${effectiveMode(c) === 'asks' ? ` · ${tr('asks you first')}` : ''} · <a href="/app/people/${c.owner_bot}/${c.peer_bot}">${tr('Change')}</a></dd></div>` : '';
+      const basketRow = inPilot(user) && c.my_vendor !== 'web' ? `<div><dt>${tr('Basket')}</dt><dd>${c.circle_name ? `<span class="hand basket-word">${esc(c.circle_name)}</span>` : tr('Not sorted yet')}${effectiveMode(c) === 'asks' ? ` · ${tr('asks you first')}` : ''}</dd></div>` : '';
+      // Their page holds everything about them (basket, name, notes, topics, rules), so it leads the actions.
+      const settings = basketRow ? `<a class="btn small" href="/app/people/${c.owner_bot}/${c.peer_bot}" aria-label="${tr('Settings for {name}', { name: esc(c.alias) })}">${tr('Settings')}${ICON.chev}</a>` : '';
       const askFirst = asksFirst ? `<form method="post" action="/app/contacts/privacy" class="setrow setrow--flush acc__setting">${ids}
 <div><p class="setrow__label" id="${id}-ask">${tr('Ask me before my bot writes to {name}', { name: esc(c.alias) })}</p><p class="setrow__desc">${tr("Your bot can't send them anything until you say yes. Approving from here comes next.")}</p></div>
 <label class="switch"><input type="checkbox" role="switch" name="on" value="1" aria-labelledby="${id}-ask" data-autosave${asksFirst ? ' checked' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label><noscript><button class="btn small ghost">${tr('Save')}</button></noscript></form>` : '';
-      return `<li class="acc" data-open="false"><button type="button" class="acc__head" aria-expanded="false" aria-controls="${id}">${avatar(c.alias, 'md', c.their_ok && !c.they_blocked ? photoUrl(c.peer_user, c.photo_at, c.avatar) : '')}
+      return `<li class="acc" data-open="false" data-who="${esc(`${c.alias} ${c.name || ''} ${c.handle}`.toLowerCase())}"><button type="button" class="acc__head" aria-expanded="false" aria-controls="${id}">${avatar(c.alias, 'md', c.their_ok && !c.they_blocked ? photoUrl(c.peer_user, c.photo_at, c.avatar) : '')}
 <span class="line__main"><span class="line__title item__title">${esc(c.alias)}</span><span class="line__sub">${state} · ${c.last_at ? tr('last message {ago}', { ago: esc(tr.ago(c.last_at, now)) }) : tr('no messages yet')}</span></span>${ICON.chevDown}</button>
 <div class="acc__panel" id="${id}" role="region" aria-label="${esc(c.alias)}" inert><div class="acc__inner"><div class="acc__body">
 <dl class="kv"><div><dt>${tr('Their bot')}</dt><dd><span class="handle">@${esc(c.handle)}</span>${c.name && c.name.toLowerCase() !== c.alias.toLowerCase() ? ` · ${esc(c.name)}` : ''}</dd></div>
 <div><dt>${tr('Email')}</dt><dd>${c.email_verified_at ? tr('Verified') : tr('Not verified')}</dd></div>
 <div><dt>${tr('Encryption')}</dt><dd>${esc(lock(c))}</dd></div>${multi ? `<div><dt>${tr('Your bot')}</dt><dd><span class="handle">@${esc(c.my_handle)}</span></dd></div>` : ''}
 ${basketRow}${topics ? `<div><dt>${tr('Topics')}</dt><dd>${topics}</dd></div>` : ''}</dl>
-${askFirst}<div class="acc__actions"><form method="post" action="/app/contacts/block">${ids}${c.blocked ? `<input type="hidden" name="unblock" value="1"><button class="btn small ghost">${tr('Unblock')}</button>` : `<button class="btn small ghost">${tr('Block')}</button>`}</form>
+${askFirst}<div class="acc__actions">${settings}<form method="post" action="/app/contacts/block"${settings ? ' class="acc__end"' : ''}>${ids}${c.blocked ? `<input type="hidden" name="unblock" value="1"><button class="btn small ghost">${tr('Unblock')}</button>` : `<button class="btn small ghost">${tr('Block')}</button>`}</form>
 ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: tr('Remove'), prompt: tr('Remove {name}?', { name: c.alias }), confirm: tr('Remove'), pending: tr('Removing'), tr })}</div>
 </div></div></div></li>`;
     };
+    const founderLink = (tr) => founder() && live.some((b) => b.vendor !== 'web') ? `<a class="btn small ghost" href="/founder">${ICON.chat}${tr('Text the founder')}</a>` : '';
     const inviteForm = (cls) => live.length ? `<form method="post" action="/app/invites"><input type="hidden" name="bot" value="${live[0].id}"><button class="btn${cls ? ` ${cls}` : ''}" data-busy><span class="btn__label">${ICON.invite}${tr('Invite a friend')}</span><span class="btn__spin" aria-hidden="true"></span></button></form>` : '';
     const sub = paused ? tr('Everything is paused') : [`${ready ? tr.n(ready, '{n} bot ready|{n} bots ready') : tr('Setting up')}`, tr.n(settled.length, '{n} friend|{n} friends')].join(' · ');
     const alerts = [
@@ -638,24 +853,50 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: tr('Remove'
 <form method="post" action="/app/contacts/remove"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small ghost">${tr('No, remove')}</button></form>`)),
     ].filter(Boolean).join('');
     const first = (user.name || '').trim().split(/\s+/)[0];
-    // Invites saved from here that nobody has used yet (opening Invite a friend and going back lists nothing): who they're for (the note), where they'll go, how long left.
-    const open = live.length ? q(`SELECT i.*, b.handle FROM invites i JOIN bots b ON b.id = i.from_bot WHERE i.from_bot IN (${live.map(() => '?').join(',')})
-      AND i.by_owner = 1 AND i.plain_code IS NOT NULL AND i.saved_at IS NOT NULL AND i.used_at IS NULL AND i.expires_at > ? ORDER BY i.created_at DESC`).all(...live.map((b) => b.id), clock()) : [];
+    // Invites nobody has used yet: who they're for (the name or note), where they'll go, how long left. Ones the bot made have no link to open here.
+    const open = openInvites(live.map((b) => b.id));
     const daysLeft = (i) => Math.max(1, Math.ceil((i.expires_at - clock()) / 86_400_000));
-    const inviteRow = (i) => `<li><a class="line line--link" href="/app/invites/${esc(i.plain_code)}"><span class="pdot" data-status="away" aria-hidden="true"></span>
-<span class="line__main"><span class="line__title">${!i.alias.startsWith('friend-') ? esc(i.alias) : i.notes ? esc(i.notes.length > 48 ? `${i.notes.slice(0, 47)}…` : i.notes) : tr('Invite link')}</span><span class="line__sub">${tr('Waiting for them')} · ${i.basket ? esc(i.basket) : tr('not sorted yet')} · ${tr.n(daysLeft(i), '{n} day left|{n} days left')}</span></span>${ICON.chev}</a></li>`;
+    const inviteRow = (i) => { const inner = `<span class="pdot" data-status="away" aria-hidden="true"></span>
+<span class="line__main"><span class="line__title">${!i.alias.startsWith('friend-') ? esc(i.alias) : i.notes ? esc(i.notes.length > 48 ? `${i.notes.slice(0, 47)}…` : i.notes) : tr('Invite link')}</span><span class="line__sub">${tr('Waiting for them')} · ${i.basket ? esc(i.basket) : tr('not sorted yet')} · ${tr.n(daysLeft(i), '{n} day left|{n} days left')}</span></span>`;
+      return i.plain_code ? `<li><a class="line line--link" href="/app/invites/${esc(i.plain_code)}">${inner}${ICON.chev}</a></li>` : `<li><div class="line">${inner}</div></li>`; };
+    // Friends by basket (People users): each basket folds away, and can be hidden from here. A filter finds anyone.
+    const keyOf = (c) => c.circle_key || '';
+    const baskets = inPilot(user) ? q(`SELECT name_key, min(name) AS name, max(hidden) AS hidden, min(position) AS position FROM circles WHERE owner_bot IN (${ph}) GROUP BY name_key ORDER BY min(position), name_key`).all(...botIds) : [];
+    const hiddenKeys = new Set(baskets.filter((g) => g.hidden).map((g) => g.name_key));
+    // Hidden baskets are gone from here; Account lists them, to show them again.
+    const showing = settled.filter((c) => !hiddenKeys.has(keyOf(c)));
+    const basketMenu_ = (g) => `<details class="more bsec__menu"><summary class="iconbtn" aria-label="${tr('More for {name}', { name: esc(g.name) })}">${ICON.dots}</summary><div class="menu"><form method="post" action="/app/baskets/hide"><input type="hidden" name="basket" value="${esc(g.name_key)}"><input type="hidden" name="on" value="1"><button>${tr('Hide from the overview')}</button></form></div></details>`;
+    const bsec = (g, people) => `<div class="bsec" data-key="${esc(g.name_key)}"><details class="bsec__d" open><summary class="bsec__head">${ICON.chevDown}${g.name_key ? `<span class="hand basket-word">${esc(g.name)}</span>` : `<span>${tr('Not sorted yet')}</span>`}<span class="count">${people.length}</span></summary>
+<ul class="list">${people.map(friendRow).join('')}</ul></details>${g.name_key ? basketMenu_(g) : ''}</div>`;
+    const sections = [{ name_key: '', name: '' }, ...baskets.filter((g) => !g.hidden)].map((g) => [g, showing.filter((c) => keyOf(c) === g.name_key)]).filter(([, people]) => people.length);
+    const friendsList = !inPilot(user) ? `<ul class="list">${showing.map(friendRow).join('')}</ul>`
+      : sections.length ? sections.map(([g, people]) => bsec(g, people)).join('') : `<p class="ffind__none">${tr('Everyone is in a hidden basket.')}</p>`;
+    const finder = settled.length >= 6 ? `<div class="ffind" data-find hidden><label class="sr" for="ffind-in">${tr('Find a friend')}</label><input id="ffind-in" type="search" placeholder="${tr('Find a friend')}" autocomplete="off" spellcheck="false"></div>` : '';
     const invitesGroup = open.length ? `<section class="group" aria-labelledby="inv-h"><div class="group__head"><h2 id="inv-h">${tr('Invites pending')} <span class="count">${open.length}</span></h2></div>
 <div class="card card--list"><ul class="list">${open.map(inviteRow).join('')}</ul></div></section>` : '';
-    return layout(tr('Overview'), `${alerts ? `<div class="stack-alerts">${alerts}</div>` : ''}
-${checklist(live, settled, paused, tr)}
-<section class="group" aria-labelledby="friends-h"><div class="group__head"><h2 id="friends-h">${tr('Friends')} <span class="count">${settled.length}</span></h2></div>
-<div class="card card--list">${settled.length ? `<ul class="list">${settled.map(friendRow).join('')}</ul>` : emptyState('people', tr('No friends yet'), tr('Invite someone and their bot can message yours.'), inviteForm('small'))}</div></section>
-${invitesGroup}
-<section class="group" aria-labelledby="bots-h"><div class="group__head"><h2 id="bots-h">${tr('Your bots')} <span class="count">${bots.length}</span></h2><form method="post" action="/app/bots/new"><button class="btn small ghost">${ICON.plus}${tr('Add a bot')}</button></form></div>
-<div class="card card--list"><ul class="list">${bots.map(botRow).join('')}</ul></div></section>
-${plan.meter}
-<div class="foot">${live.length && !paused ? confirmMorph({ action: '/app/pause', fields: '<input type="hidden" name="on" value="1">', label: tr('Pause everything'), icon: ICON.pause, prompt: tr('Pause all your bots?'), confirm: tr('Pause'), pending: tr('Pausing'), tone: 'neutral', tr }) : ''}${refreshNote(tr)}</div>
-<script>${REFRESH_JS}</script>`, { user, tab: 'home', bar: { title: first ? tr('Hi, {name}', { name: first }) : tr('Overview'), sub }, actions: inviteForm('') });
+    // The overview's pieces, shared by every layout.
+    const alertsHtml = alerts ? `<div class="stack-alerts">${alerts}</div>` : '';
+    const checklistHtml = checklist(live, settled, paused, tr);
+    const friendsSec = `<section class="group" aria-labelledby="friends-h"><div class="group__head"><h2 id="friends-h">${tr('Friends')} <span class="count">${showing.length}</span></h2>${finder}</div>
+<div class="card card--list${inPilot(user) && settled.length ? ' card--menus' : ''}" id="friends">${settled.length ? `${friendsList}<p class="ffind__none" hidden>${tr('Nobody by that name')}</p>` : emptyState('people', tr('No friends yet'), tr('Invite someone and their bot can message yours.'), inviteForm('small') + founderLink(tr))}</div></section>
+${invitesGroup}`;
+    const groupsSec = groupsSection(user, tr);
+    const botsSec = `<section class="group" aria-labelledby="bots-h"><div class="group__head"><h2 id="bots-h">${tr('Your bots')} <span class="count">${agents.length}</span></h2><form method="post" action="/app/bots/new"><button class="btn small ghost">${ICON.plus}${tr('Add a bot')}</button></form></div>
+<div class="card card--list card--tips"><ul class="list">${agents.map(botRow).join('')}</ul></div>${aiBots.length > 1 ? `<p class="muted small">${tr('Your bots can message each other. No invite needed.')}</p>` : ''}</section>`;
+    const footHtml = `<div class="foot">${live.length && !paused ? confirmMorph({ action: '/app/pause', fields: '<input type="hidden" name="on" value="1">', label: tr('Pause everything'), icon: ICON.pause, prompt: tr('Pause all your bots?'), confirm: tr('Pause'), pending: tr('Pausing'), tone: 'neutral', tr }) : ''}${refreshNote(tr)}</div>`;
+    const groupN = groups && groupBots(user).length ? groups.forUser(user.id, { all: true }).filter((r) => !r.hidden).length : 0;
+    // Arc tabs, vertical: All keeps the whole overview as one list, the rest show one section each.
+    // One panel whose content follows the selected tab; the choice is remembered on this device.
+    const panes = [['all', ICON.list, tr('All'), ''], ['friends', ICON.people, tr('Friends'), showing.length], groupsSec ? ['groups', ICON.chat, tr('Groups'), groupN] : null,
+      ['bots', ICON.bot, tr('Your bots'), agents.length], chatApps ? ['chats', MARK.app, tr('Chat apps'), linked] : null].filter(Boolean);
+    const tab = ([k, icon, label, n]) => `<button type="button" role="tab" class="ovtabs__tab" id="ovtab-${k}" data-pane="${k}" aria-selected="${k === 'friends'}" aria-controls="ov-panel" tabindex="${k === 'friends' ? 0 : -1}">${icon}<span class="ovtabs__label">${label}</span>${n === '' ? '' : `<span class="count">${n}</span>`}</button>`;
+    return layout(tr('Overview'), `${alertsHtml}
+${checklistHtml}
+<div class="ovtabs"><div class="ovtabs__list" role="tablist" aria-orientation="vertical" aria-label="${tr('Overview')}"><span class="ovtabs__sel" aria-hidden="true"></span>${panes.map(tab).join('')}</div>
+<div class="ovtabs__panel" id="ov-panel" role="tabpanel" aria-labelledby="ovtab-friends"><div data-pane-body="friends">${friendsSec}</div>${groupsSec ? `<div data-pane-body="groups">${groupsSec}</div>` : ''}<div data-pane-body="bots">${botsSec}</div>${chatApps ? `<div data-pane-body="chats">${chatApps}</div>` : ''}${plan.meter ? `<div data-pane-body="bots">${plan.meter}</div>` : ''}</div></div>
+<script>${OVTABS_JS}</script>
+${footHtml}
+<script>${REFRESH_JS}${settled.length ? FRIENDS_JS : ''}</script>`, { user, tab: 'home', width: 'tabs', bar: { title: first ? tr('Hi, {name}', { name: first }) : tr('Overview'), sub }, actions: inviteForm('') });
   }
 
   // Recent messages, newest first.
@@ -665,11 +906,11 @@ ${plan.meter}
     const ids = myBots(user).map((b) => b.id);
     if (!ids.length) return '';
     const ph = ids.map(() => '?').join(','), now = clock(), DAY = 86_400_000, since = now - 30 * DAY;
-    const msgs = q(`SELECT from_bot, to_bot, created_at, delivered_at, status FROM messages WHERE (from_bot IN (${ph}) OR to_bot IN (${ph})) AND kind != 'probe' AND created_at >= ?`).all(...ids, ...ids, since);
+    const msgs = q(`SELECT from_bot, to_bot, created_at, delivered_at, status FROM messages WHERE (from_bot IN (${ph}) OR to_bot IN (${ph})) AND kind NOT IN ('probe', 'group_event') AND created_at >= ?`).all(...ids, ...ids, since);
     if (!msgs.length) return '';
     const mine = new Set(ids);
     const sent = msgs.filter((m) => mine.has(m.from_bot)), got = msgs.filter((m) => mine.has(m.to_bot) && !mine.has(m.from_bot));
-    const friends = q(`SELECT count(*) AS n FROM contacts WHERE owner_bot IN (${ph}) AND approved_at IS NOT NULL`).get(...ids).n;
+    const friends = q(`SELECT count(*) AS n FROM contacts c JOIN bots pb ON pb.id = c.peer_bot WHERE c.owner_bot IN (${ph}) AND c.approved_at IS NOT NULL AND coalesce(pb.user_id, 0) != ?`).get(...ids, user.id).n;
     const waits = sent.filter((m) => m.delivered_at).map((m) => m.delivered_at - m.created_at).sort((a, b) => a - b);
     const median = waits.length ? waits[Math.floor(waits.length / 2)] : null;
     const dur = (ms) => (ms < 60_000 ? tr('{n} s', { n: Math.max(1, Math.round(ms / 1000)) }) : ms < 3_600_000 ? tr('{n} min', { n: Math.round(ms / 60_000) }) : tr('{n} h', { n: Math.round(ms / 3_600_000) }));
@@ -709,17 +950,19 @@ g.addEventListener('pointerenter',show);g.addEventListener('pointerleave',()=>{t
     return layout(tr('Activity'), `${activityStats(user, tr)}${t.n ? `<section class="group" aria-labelledby="msgs-h"><div class="group__head"><h2 id="msgs-h" class="sr">${tr('Messages')}</h2>
 <div class="seg" role="group" aria-label="${tr('Show')}" data-for="#msgs"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span><button type="button" aria-pressed="true" data-filter="all">${tr('All')}</button><button type="button" aria-pressed="false" data-filter="in">${tr('From friends')}</button><button type="button" aria-pressed="false" data-filter="out">${tr('From you')}</button></div></div></div><div class="card card--list" id="msgs">${t.html}</div></section>
 ${refreshNote(tr)}<script>${REFRESH_JS}</script>`
-  : `<section class="card">${emptyState('activity', tr('Nothing yet'), tr('Messages your bots send and receive show up here. Ask your bot to message a friend: "Tell Anna I\'m on my way".'))}</section>`}`, { user, tab: 'activity', bar: { title: tr('Activity'), sub: tr('What your bots sent and received') } });
+  : `<section class="card">${emptyState('activity', tr('Nothing yet'), tr('Messages your bots send and receive show up here. Ask your bot to message a friend: "Tell Anna I\'m on my way".'))}</section>`}`, { user, tab: 'activity', bar: { title: tr('Activity') } });
   }
 
   // Setup, step by step, until the first friend is connected (Arc onboarding checklist).
   function checklist(live, settled, paused, tr) {
-    const bot = live.find((b) => b.vendor !== 'web');
+    const bot = live.find((b) => b.vendor !== 'web' && !isSender(b));
     if (!bot || paused) return '';
     const steps = [
       { label: tr('Connect your bot'), done: true },
-      { label: tr('Turn on the doorbell'), done: !!bot.webhook_url, href: `/app/bots/${bot.id}` },
-      { label: tr('Test the doorbell'), done: !!bot.doorbell_verified_at, href: `/app/bots/${bot.id}` },
+      // Turning the doorbell on includes its test ring (saving rings it), so it's one step, done once it works.
+      ...(noDoorbell(bot) || doorbellless(bot) ? [] : [
+        { label: AGENTS[bot.platform] ? tr('Start the watcher') : tr('Turn on the doorbell'), done: botStatus(bot, tr).key === 'ready', href: `/app/bots/${bot.id}` },
+      ]),
       { label: tr('Invite a friend'), done: settled.some((c) => c.owner_bot === bot.id), form: bot.id },
     ];
     const done = steps.filter((s) => s.done).length;
@@ -727,31 +970,38 @@ ${refreshNote(tr)}<script>${REFRESH_JS}</script>`
     const next = steps.find((s) => !s.done);
     return `<section class="card" aria-labelledby="setup-h"><div class="card__head"><h2 id="setup-h">${tr('Set up @{handle}', { handle: esc(bot.handle) })}</h2><span class="muted small">${tr('{done} of {total} done', { done, total: steps.length })}</span></div>
 ${stepper(steps.map((x) => x.label), steps.indexOf(next), 'v', tr)}
-${next.form ? `<form method="post" action="/app/invites" class="card__block"><input type="hidden" name="bot" value="${next.form}"><button class="btn wide">${tr('Invite a friend')}</button></form><p class="muted small" style="margin:10px 0 0">${tr('Or tell your bot "invite Anna". It gives you a message to send.')}</p>` : `<a class="btn wide card__block" href="${next.href}">${next.label}</a>`}</section>`;
+${next.form ? `<form method="post" action="/app/invites" class="card__block"><input type="hidden" name="bot" value="${next.form}"><button class="btn wide">${tr('Invite a friend')}</button></form><p class="muted small" style="margin:10px 0 0">${tr('Or tell your bot "invite Anna". It gives you a message to send.')}${founder() ? ` <a href="/founder">${tr('Or try it with the founder first.')}</a>` : ''}</p>` : `<a class="btn wide card__block" href="${next.href}">${next.label}</a>`}</section>`;
   }
 
   // A working bot at a glance: one row per thing it has.
   function botTiles(user, b, tr) {
-    const n = q('SELECT count(*) AS n FROM contacts WHERE owner_bot = ? AND approved_at IS NOT NULL').get(b.id).n;
+    const n = q('SELECT count(*) AS n FROM contacts c JOIN bots pb ON pb.id = c.peer_bot WHERE c.owner_bot = ? AND c.approved_at IS NOT NULL AND coalesce(pb.user_id, 0) != ?').get(b.id, b.user_id || 0).n;
     const quietOn = !!(user.quiet_on && user.tz);
     const quiet = quietOn ? tr('{from} to {to}', { from: hhmm(user.quiet_start), to: hhmm(user.quiet_end) }) : tr('Off');
     const rows = [
-      [tr('Doorbell'), b.doorbell_kind === 'mcp_events' ? tr('On ({platform} is watching)', { platform: platformName(b, tr) }) : b.doorbell_verified_at ? tr('On') : b.webhook_url ? tr('Not tested') : tr('Off'), tr('Last woken {ago}', { ago: tr.ago(b.last_ring_at, clock()) })],
+      [tr('Doorbell'), b.doorbell_kind === 'watch' ? (watching(b) ? tr('On (watcher running)') : tr('Watcher not running')) : b.doorbell_kind === 'mcp_events' ? tr('On ({platform} is watching)', { platform: platformName(b, tr) }) : b.doorbell_verified_at ? tr('On') : b.webhook_url ? tr('Not tested') : tr('Off'), tr('Last woken {ago}', { ago: tr.ago(b.last_ring_at, clock()) })],
       [tr('Encryption'), b.box_pub ? tr('On') : tr('Off'), b.box_pub ? tr('Only the bots can read messages') : b.vendor === 'connector' ? tr('Quick connect is not end-to-end encrypted') : tr('Ask your bot to run "b2b keys"')],
       [tr('Friends'), String(n), n === 1 ? tr('friend connected') : tr('friends connected')],
       [tr('Quiet hours'), quiet, quietOn ? tr('Nobody wakes it at night') : tr('Messages can wake it any time')],
       [tr('Backup check'), b.backup_every_h ? tr('Every {n} h', { n: b.backup_every_h }) : tr('Off'), b.last_claim_at ? tr('Last checked in {ago}', { ago: tr.ago(b.last_claim_at, clock()) }) : tr('Never checked in yet')],
     ];
     const tool = toolOf(b);
-    if (tool) rows.push([tr('bot2bot tool'), tool.version ?? tr('Older than 0.19'), tool.old ? tr('Old: send it the message below') : tool.current || !tool.latest ? tr('Up to date') : tr('Updates itself to {v} next time it checks messages', { v: tool.latest })]);
+    if (tool) rows.push([tr('bot2bot tool'), tool.version ? (tool.nightly ? `${tool.version} · ${tr('nightly')}` : tool.version) : tr('Older than 0.19'), tool.old ? tr('Old: send it the message below') : tool.current || !tool.latest ? tr('Up to date') : tr('Updates itself to {v} next time it checks messages', { v: tool.latest })]);
     return `<section class="card card--rows"><dl class="facts">${rows.map(([k, v, d]) => `<div class="fact"><dt>${k}</dt><dd><b>${esc(v)}</b><span>${esc(d)}</span></dd></div>`).join('')}</dl></section>`;
   }
   // Which b2b tool a private-mode bot runs, from what it said on its last call (null: quick connect, web inbox, or
   // not heard from yet). An old one can't update itself: one message from its owner fixes that for good.
   const toolOf = (b) => {
     if (b.vendor === 'connector' || b.vendor === 'web' || b.disconnected_at || b.tool_version == null) return null;
-    const { latest } = toolInfo();
-    return { version: b.tool_version || null, latest, old: !b.tool_version || toolTooOld(b.tool_version), current: !!latest && b.tool_version === latest };
+    const { latest } = toolInfo(channelFor(b));
+    return { version: b.tool_version || null, latest, nightly: channelFor(b) === 'nightly', old: !b.tool_version || toolTooOld(b.tool_version), current: !!latest && b.tool_version === latest };
+  };
+  // Nightly updates: every release as soon as it ships, instead of at most one a day. The bot picks the choice
+  // up the next time it checks messages (0.19.12+).
+  const updatesCard = (b, tr) => {
+    const on = (b.wanted_channel || b.tool_channel) === 'nightly';
+    return `<section class="card card--night" id="updates"><form method="post" action="/app/bots/${b.id}/updates" class="setrow setrow--flush"><div><p class="setrow__label" id="updates-l">${tr('Nightly updates')}</p><p class="setrow__desc">${tr('Get every update to the bot2bot tool as soon as it ships. Off: at most one update a day.')}</p></div>
+<label class="switch"><input type="checkbox" role="switch" name="on" value="1" aria-labelledby="updates-l" data-autosave${on ? ' checked' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label><noscript><button class="btn small ghost">${tr('Save')}</button></noscript></form></section>`;
   };
   const updateMessage = () => `Please update your bot2bot tool. Run: node ~/bin/b2b.mjs update
 If that fails, reinstall it with: mkdir -p ~/bin && curl -fsSL ${origin}/cli/b2b.mjs -o ~/bin/b2b.mjs (if node itself is missing, install Node.js first, then reinstall).
@@ -768,7 +1018,8 @@ Then run: node ~/bin/b2b.mjs refresh and do what it says. Your keys and contacts
     const bar = { title: tr('Connect your bot'), sub: tr('Private mode') };
     const opts = { user, bar, width: 'narrow' };
     if (!r || r.denied_at || (!r.approved_at && r.expires_at < clock())) return layout(tr('Connect your bot'), `<section class="card narrow center"><h1>${tr('This link expired')}</h1><p class="muted">${tr('Ask your bot to run its join command again. It makes a new link.')}</p><a class="btn wide" href="/app">${tr('Go to your dashboard')}</a></section>`, opts);
-    if (r.approved_at) return layout(tr('Connect your bot'), `${art('setup', 'small')}<section class="card narrow center"><h1>${tr('Your bot is connected')}</h1><p class="muted">${tr("Go back to your bot's chat. It finishes the setup on its own.")}</p><a class="btn wide" href="/app">${tr('Go to your dashboard')}</a></section>`, opts);
+    // Yes is said here, but the bot is only connected once it has collected its connection (join again, in its chat).
+    if (r.approved_at) return layout(tr('Connect your bot'), `${art('setup', 'small')}<section class="card narrow center"><h1>${r.collected_at ? tr('Your bot is connected') : tr('You said yes')}</h1><p class="muted">${r.collected_at ? tr("Go back to your bot's chat. It finishes the setup on its own.") : tr("Go back to your bot's chat. It finishes on its own. If it stopped waiting, ask it to run its join command again.")}</p><a class="btn wide" href="/app">${tr('Go to your dashboard')}</a></section>`, opts);
     const mine = myBots(user).filter((b) => !(b.disconnected_at && b.vendor === 'web'));
     const label = (b) => `@${b.handle} (${b.vendor === 'connector' ? tr('switch from quick connect') : b.vendor === 'web' ? tr('replace the web inbox') : tr('reconnect')})`;
     const suggested = handle || r.name || suggestHandle(user);
@@ -776,11 +1027,12 @@ Then run: node ~/bin/b2b.mjs refresh and do what it says. Your keys and contacts
     return layout(tr('Connect your bot'), `${art('setup', 'small')}<section class="card narrow"><h1>${tr('Connect your bot')}</h1>
 ${error ? `<p class="error" role="alert">${esc(tr.msg(error))}</p>` : ''}
 <p>${tr('Your bot asked to join {product} in private mode. It made its own keys, so only the bots can read your messages. Not even we can.', { product: esc(product) })}</p>
-<p class="muted small">${tr("Only say yes if your own bot gave you this link just now. Whoever's bot made it would message as you.")} ${tr.n(mins, 'The link works for {n} more minute.|The link works for {n} more minutes.')}</p>
+<p class="muted small">${tr("Only say yes if your own bot gave you this link just now. If someone else's bot made it, they could message as you.")}</p>
+<p class="muted small">${tr.n(mins, 'The link works for {n} more minute.|The link works for {n} more minutes.')}</p>
 <form method="post" action="/app/link/${esc(plain)}" class="stack">
 ${mine.length ? `<label>${tr('Which bot')}<select name="bot"><option value="new">${tr('A new bot')}</option>${mine.map((b) => `<option value="${b.id}">${esc(label(b))}</option>`).join('')}</select></label>` : '<input type="hidden" name="bot" value="new">'}
 <label>${tr('Name for a new bot')}<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
-<button class="btn" name="decision" value="allow">${tr('Yes, connect')}</button><button class="link" name="decision" value="deny">${tr('Cancel')}</button></form></section>`, opts);
+${decide(tr, tr('Yes, connect'))}</form></section>`, opts);
   }
   function approveJoin(user, plain, f) {
     return tx(() => {
@@ -790,9 +1042,11 @@ ${mine.length ? `<label>${tr('Which bot')}<select name="bot"><option value="new"
       let bot;
       if (f.bot && f.bot !== 'new') {
         bot = ownBot(user, f.bot);
-        // Replaces the old connection: its token, app sign-ins and setup codes stop working now.
-        q("UPDATE bots SET token_hash = NULL, vendor = 'grokbot', disconnected_at = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1 WHERE id = ?").run(bot.id);
-        q('UPDATE oauth_tokens SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL').run(clock(), bot.id);
+        // Replaces the old connection: its token, app sign-ins and setup codes stop working now. A dot that stays a
+        // dot keeps its app sign-in and watching, for wake-ups only (connector.mjs wakeOnly).
+        const dot = bot.platform === 'chatgpt' && !r.platform;
+        q(`UPDATE bots SET token_hash = NULL, vendor = 'grokbot', disconnected_at = NULL, ${dot ? '' : 'doorbell_verified_at = NULL, '}doorbell_gen = doorbell_gen + 1 WHERE id = ?`).run(bot.id);
+        if (!dot) q('UPDATE oauth_tokens SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL').run(clock(), bot.id);
         q('UPDATE enroll_codes SET used_at = ?, plain_code = NULL WHERE handle = ? AND used_at IS NULL').run(clock(), bot.handle);
       } else {
         const handle = String(f.handle || '').trim().toLowerCase();
@@ -802,6 +1056,8 @@ ${mine.length ? `<label>${tr('Which bot')}<select name="bot"><option value="new"
         bot = q('SELECT * FROM bots WHERE handle = ?').get(handle);
       }
       setKeys(q('SELECT * FROM bots WHERE id = ?').get(bot.id), { sign: r.sign_pub, box: r.box_pub });
+      // A coding agent, OpenClaw or another assistant said which it is, so it's never given Grok Bot's routine.
+      if (r.platform) q('UPDATE bots SET platform = ? WHERE id = ?').run(r.platform, bot.id);
       q('UPDATE join_requests SET approved_bot = ?, approved_at = ? WHERE code_hash = ?').run(bot.id, clock(), r.code_hash);
       log(bot.id, 'join_approved', { replaced: f.bot && f.bot !== 'new' ? bot.vendor : null });
       return bot;
@@ -809,10 +1065,13 @@ ${mine.length ? `<label>${tr('Which bot')}<select name="bot"><option value="new"
   }
 
   function waitingForBot(tr, code, had = 0) {
-    return `<p>${tr("Copy this message and paste it into your bot's chat in the GrokBot app.")}</p>
-${codeBlock('msg', tr('Message for your bot'), setupMessage(code.plain || 'XXXX-XXXX'), tr)}
+    // Grok Bot's message, in its own row with its logo, so it's clear who it's for; then every other assistant.
+    return `<details class="diy" open><summary>${diyName([MARK.grok], 'Grok Bot')}</summary>
+<p class="muted" style="margin-top:10px">${tr("Copy this message and paste it into your bot's chat in the Grok Bot app.")}</p>
+${codeBlock('msg', tr('Message for {agent}', { agent: 'Grok Bot' }), setupMessage(code.plain || 'XXXX-XXXX'), tr, MARK.grok)}</details>
 <p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for your bot to join…')}</p>
-<form method="post" action="/app/bots/cancel"><button class="link">${tr('Use a different name')}</button></form>
+${otherWays(tr)}
+<form method="post" action="/app/bots/cancel"><button class="link">${tr('Cancel setup')}</button></form>
 <script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>${had}) location.href='/app'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`;
   }
   const addBotForm = (user, { error = '', handle = '' } = {}) => { const tr = T(user); return layout(tr('Add a bot'), `<section class="card"><h1>${tr('Add another bot')}</h1>${error ? alertBox('danger', esc(error), '') : ''}<form method="post" action="/app/bots" class="stack">${field({ label: tr('Bot name'), name: 'handle', value: handle || suggestHandle(user), description: tr('2 to 32 lowercase letters, numbers, - or _.'), attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off"' })}<div><button class="btn">${tr('Continue')}</button></div></form></section>`, { user, tab: 'home', width: 'narrow', bar: { back: '/app' } }); };
@@ -820,15 +1079,34 @@ ${codeBlock('msg', tr('Message for your bot'), setupMessage(code.plain || 'XXXX-
   function botPage(user, b, { error = '' } = {}) {
     const tr = T(user);
     const st = botStatus(b, tr);
-    const step = st.key === 'needs_doorbell' ? 2 : st.key === 'needs_test' ? 3 : null;
+    // A connected app that isn't Grok Bot can't be woken from outside, so it has no doorbell step: the Grok Bot
+    // routine and its video are only for Grok Bot.
+    const app = originOf(b, tr).key === 'app';
+    const step = app ? null : st.key === 'needs_doorbell' ? 2 : st.key === 'needs_test' ? 3 : null;
+    const agent = AGENTS[b.platform];
+    const claw = b.platform === 'openclaw' && b.vendor === 'grokbot'; // OpenClaw in private mode: its own webhook
+    const other = b.platform === 'other' || !!ASSISTANT[b.platform]; // another assistant: its own API or a schedule, if it has one
+    const watcher = !agent && b.doorbell_kind === 'watch'; // OpenClaw or another assistant, started by a command of its own
+    const dot = b.platform === 'chatgpt'; // a dot: woken by watching, in quick connect or private mode
     const mode = b.vendor === 'web' ? tr('Web inbox') : b.vendor === 'connector' ? tr('Quick connect') : tr('Private mode');
     const msgFor = tr('Message for your bot');
     if (b.vendor === 'web' && !b.disconnected_at) {
       const code = q('SELECT plain_code FROM enroll_codes WHERE user_id = ? AND handle = ? AND reissue = 1 AND used_at IS NULL AND expires_at > ?').get(user.id, b.handle, clock());
       return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Connect your AI bot')}</h2>${badge(tr('Web inbox'), 'success')}</div>
 ${code ? `<p>${tr("Paste this into your bot's chat. When it joins, it takes over as @{handle} and keeps all your contacts.", { handle: esc(b.handle) })}</p>${codeBlock('msg', msgFor, setupMessage(code.plain_code), tr)}`
-  : `<p>${tr('Right now you read and answer messages here. If you have GrokBot, it can do that for you and keep all your contacts.')}</p><form method="post" action="/app/bots/${b.id}/reconnect"><button class="btn">${tr('Connect GrokBot')}</button></form>`}</section>`, { user, tab: 'inbox', width: 'read', bar: { back: '/app/inbox', backLabel: tr('Inbox'), title: `@${b.handle}`, sub: tr('Web inbox') } });
+  : `<p>${tr('Right now you read and answer messages here. If you have Grok Bot, it can do that for you and keep all your contacts.')}</p><form method="post" action="/app/bots/${b.id}/reconnect"><button class="btn">${tr('Connect Grok Bot')}</button></form>`}</section>`, { user, tab: 'inbox', width: 'read', bar: { back: '/app/inbox', backLabel: tr('Inbox'), title: `@${b.handle}`, sub: tr('Web inbox') } });
     }
+    // A send-only chat: what it can do, and the way out.
+    if (isSender(b)) return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Sends to your bots')}</h2>${b.disconnected_at ? badge(tr('Disconnected')) : badge(tr('Send only'), 'success')}</div>
+<p>${tr("When you ask, {app} sends briefs, notes and files to your own bots. It can't read your messages, see your account or reach your friends.", { app: esc(b.display_name) })}</p>
+<p class="muted small">${tr('Not end-to-end encrypted: {app} hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.', { app: esc(b.display_name) })}</p>
+${b.disconnected_at ? `<a class="btn wide" href="/connect/send">${tr('Connect again')}</a>` : ''}</section>
+${b.disconnected_at ? '' : disconnectCard(b, tr)}<section class="card">${removeRow(b, tr)}</section>`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: esc(b.display_name), sub: `${tr('Chat app')} · @${esc(b.handle)}` } });
+    // A dot comes back through ChatGPT: the app first, then the switch to private mode, whichever it was in.
+    if (b.disconnected_at && dot) return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Reconnect this bot')}</h2>${badge(tr('Disconnected'))}</div>
+<p>${tr('Connect bot2bot in ChatGPT again and pick @{handle}. Then paste this into your dot:', { handle: esc(b.handle) })}</p>${codeBlock('emsg', msgFor, ENCRYPTION_MESSAGE, tr, MARK.dots)}
+<a class="btn wide" href="/connect/chatgpt">${tr('Connect dots')}</a></section>
+<section class="card">${removeRow(b, tr)}</section>`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: `@${b.handle}`, sub: tr('Disconnected') } });
     if (b.disconnected_at) {
       const code = q('SELECT plain_code FROM enroll_codes WHERE user_id = ? AND handle = ? AND reissue = 1 AND used_at IS NULL AND expires_at > ?').get(user.id, b.handle, clock());
       return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Reconnect this bot')}</h2>${badge(tr('Disconnected'))}</div>
@@ -836,65 +1114,160 @@ ${code ? `<p>${tr("Paste this into your bot's chat to reconnect it.")}</p>${code
   : `<p>${tr("This bot can't send or receive. Reconnecting gives it a new key; the old one stays cancelled.")}</p><form method="post" action="/app/bots/${b.id}/reconnect"><button class="btn">${tr('Reconnect')}</button></form>`}</section>
 <section class="card">${removeRow(b, tr)}</section>`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: `@${b.handle}`, sub: tr('Disconnected') } });
     }
-    const bar = { back: '/app', bot: b.id, title: `@${b.handle}`, sub: `${mode} · ${st.label}` };
-    const err = error ? alertBox('danger', esc(error), '') : '';
-    if (step === 2 && b.vendor === 'connector' && ['chatgpt', 'openclaw'].includes(b.platform)) return layout(`@${b.handle}`, `${err}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<h2>${tr('Turn on the doorbell')}</h2>
-${b.platform === 'chatgpt' ? `<p>${tr('ChatGPT wakes up when bot2bot tells it a message is waiting. In ChatGPT, or to your dot, say:')}</p>
-${codeBlock('wmsg', tr('Say this to ChatGPT'), WATCH_MESSAGE, tr)}
-<p class="muted small">${tr("ChatGPT asks to turn on bot2bot's “message.received” event. Say yes. This works in Work chats and with dots.")}</p>`
+    const bar = { back: '/app', bot: b.id, title: `@${b.handle}`, sub: `${mode} · ${app && st.key === 'needs_doorbell' ? tr('Connected') : st.label}`, rename: { action: `/app/bots/${b.id}/rename`, value: b.handle, error: b.nameError || '' } };
+    // The error, then any messages it hasn't picked up: on every version of this page, setup steps included.
+    const err = `${error ? alertBox('danger', esc(error), '') : ''}${waitingCard(b, tr)}`;
+    if (step === 2 && (dot || (b.vendor === 'connector' && b.platform === 'openclaw'))) return layout(`@${b.handle}`, `${err}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<h2>${tr('Turn on the doorbell')}</h2>
+${dot ? `<p>${tr('Your dot wakes up when bot2bot tells it a message is waiting. Say this to your dot:')}</p>
+${codeBlock('wmsg', tr('Say this to your dot'), wakeOnly(b) ? DOT_WATCH_MESSAGE : WATCH_MESSAGE, tr)}
+<p class="muted small">${tr("Your dot asks to turn on bot2bot's “message.received” event. Say yes.")}</p>`
   : `<p>${tr("OpenClaw wakes up when bot2bot tells it a message is waiting. Turn on OpenClaw's <b>mcp-events</b> plugin with a public callback address, then tell it:")}</p>
 ${codeBlock('wmsg', tr('Say this to OpenClaw'), WATCH_MESSAGE, tr)}`}
 <p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for {platform} to start watching…', { platform: esc(platformName(b, tr)) })}</p>
 <script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
-${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
-    if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell'), tr('Test the doorbell')], 1, 'h', tr)}<h2>${tr('Turn on the doorbell')}</h2>
-<p>${tr("Your bot needs a routine called <b>“b2b doorbell”</b>, so friends can wake it. If it isn't under <b>Routines</b> yet, paste this into your bot's chat:")}</p>
-${codeBlock('dmsg', msgFor, b.vendor === 'connector' ? CONNECTOR_DOORBELL : `Make a routine called "b2b doorbell" with a webhook trigger and this exact instruction: "${privateDoorbell()}" Don't print any keys in this chat.`, tr)}
-<ol class="howto"><li>${tr("In the Grok Bot app on a computer (phones don't show the webhook), open your bot's details and find <b>Routines</b>.")}</li><li>${tr('Right-click <b>b2b doorbell</b> and choose <b>Webhook</b>.')}</li><li>${tr('Copy the address and the key into the boxes below.')}</li></ol>
+${stuckCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+    if (step === 2 && claw) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<h2>${tr('Turn on the doorbell')}</h2>
+<p>${tr('OpenClaw wakes up through its webhook, or a watcher on its computer. Paste this into OpenClaw:')}</p>
+${codeBlock('wmsg', tr('Message for OpenClaw'), prompts.openclawDoorbell, tr)}
+<p class="muted small">${tr('The webhook needs a public https address for its gateway. Without one, the watcher works if that computer stays on.')} <a class="link" href="/docs/openclaw/">${tr('How to')}</a></p>
+<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for OpenClaw…')}</p>
+<script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified||d.configured) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
+${stuckCard(b, tr)}${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+    if (step === 2 && agent) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Start the watcher')], 1, 'h', tr)}<h2>${tr('Start the watcher')}</h2>
+<p>${tr('A small watcher on the computer where {agent} runs wakes it when a message comes in. Paste this into {agent} there:', { agent: esc(agent) })}</p>
+${codeBlock('wmsg', tr('Message for {agent}', { agent }), WATCH_INSTALL, tr)}
+<p class="muted small">${tr('That computer needs to stay on. Each wake-up is one {agent} run.', { agent: esc(agent) })}</p>
+<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for the watcher…')}</p>
+<script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified||d.watching) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
+${stuckCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+    // Grok Bot: its bot already made the routine while joining, so the page leads with the one thing only its owner
+    // can do, on a computer: copy two values across. Saving rings it, so testing isn't a step of its own.
+    if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<div class="card__head"><h2>${tr('Turn on the doorbell')}</h2>${badge(tr('Computer only'), 'info')}</div>
+<p class="phone-only">${tr("You're on a phone. Open this page on a computer to finish, since phones don't show the webhook.")}</p>
+<ol class="howto"><li>${tr("In Grok Bot on a computer, open your bot's <b>b2b doorbell</b> routine.")} <a class="link" href="${GROK_ROUTINES}" target="_blank" rel="noopener">${tr('Open routines')}${ICON.out}</a></li><li>${tr('Copy <b>POST to</b> and <b>key</b> from its <b>Webhook</b> section into these two boxes.')}</li></ol>
 <form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
-<label>${tr('Webhook address')}<input name="url" required placeholder="https://api2.cursor.sh/automations/webhook/…" autocomplete="off"></label>
+<label>${tr('Webhook address (POST to)')}<input name="url" required placeholder="https://api2.cursor.sh/automations/webhook/…" autocomplete="off"></label>
 <label>${tr('Key')}<input name="key" type="password" required autocomplete="off" placeholder="${tr('Paste the key')}"></label>
 <p class="muted small">${tr('The key stays with us, encrypted. Never paste it into a chat.')}</p>
-<div><button class="btn">${tr('Save and test')}</button></div></form></section>
-${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
-    if (step === 3) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell'), tr('Test the doorbell')], 2, 'h', tr)}<h2>${tr('Test the doorbell')}</h2><p>${tr("We ring your bot once. It should wake up on its own and check in. Don't type anything to your bot while this runs.")}</p>
+<div><button class="btn">${tr('Save and test')}</button></div></form>
+<a class="video" href="${DOORBELL_VIDEO}" target="_blank" rel="noopener"><img src="/art/doorbell.jpg" width="1120" height="630" alt=""><span>${tr('Watch how it’s done in Grok Bot (1 min)')}</span></a>
+<details class="diy"><summary>${tr('No b2b doorbell routine?')}</summary>
+<p class="muted" style="margin-top:10px">${tr("Paste this into your bot's chat. It makes the routine.")}</p>
+${codeBlock('dmsg', msgFor, b.vendor === 'connector' ? CONNECTOR_DOORBELL : `Make a routine called "b2b doorbell" with a webhook trigger and this exact instruction: "${privateDoorbell()}" Don't print any keys in this chat.`, tr)}</details></section>
+${stuckCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+    if (step === 3) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), agent ? tr('Start the watcher') : tr('Turn on the doorbell')], 1, 'h', tr)}<h2>${tr('Test the doorbell')}</h2><p>${tr("We ring your bot once. It should wake up on its own and check in. Don't type anything to your bot while this runs.")}</p>
 <button class="btn" id="test">${tr('Ring my bot')}</button><p class="wait hidden" id="wait"><span class="dot dot--live"></span> <span id="waittext">${tr('Ringing…')}</span></p>
 <script>
 const btn=document.getElementById('test'),w=document.getElementById('wait'),t=document.getElementById('waittext');
-btn.addEventListener('click',async()=>{btn.disabled=true;w.classList.remove('hidden');
- const r=await fetch('/app/bots/${b.id}/test',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}).then(r=>r.json());
- if(r.error){t.textContent=r.error;btn.disabled=false;return;}
- t.textContent=r.status===200?${jsq(tr('Rang. Waiting for your bot to wake up…'))}:${jsq(tr('The doorbell answered with '))}+r.status+${jsq(tr('. Check the routine is turned on.'))};
- let n=0;(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified){t.textContent=${jsq(tr('It works. Your bot woke up on its own.'))};setTimeout(()=>location.replace('/app/bots/${b.id}'),1200);} else if(++n<60) setTimeout(poll,2000); else {t.textContent=${jsq(tr('No answer yet. Make sure the routine is on, then try again.'))};btn.disabled=false;} });})();});
+btn.addEventListener('click',async()=>{btn.disabled=true;w.classList.remove('hidden');t.textContent=${jsq(tr('Ringing…'))};
+ const fail=(m)=>{t.textContent=m;btn.disabled=false;};
+ let r;try{r=await fetch('/app/bots/${b.id}/test',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}).then(r=>r.json());}catch{return fail(${jsq(tr("Couldn't reach bot2bot. Check your connection and try again."))});}
+ ${agent || watcher ? "if(r.error&&r.error!=='webhook request failed') return fail(r.error);" : 'if(r.error) return fail(r.error);'}
+ // Anything but 200 means Grok Bot didn't start a run, so there's nothing to wait for.
+ if(r.skipped==='checks on its own schedule'){t.textContent=${jsq(tr('The test message is waiting. Your bot picks it up on its next scheduled check, and this page then shows it works.'))};return;}
+ if(!(r.status>=200&&r.status<300)) return fail(${watcher ? jsq(tr("The watcher isn't running. On that computer, ask your bot to run: {message}", { message: WATCH_INSTALL })) : agent ? jsq(tr("The watcher isn't running. On the computer where {agent} runs, paste this into {agent}: {message}", { agent, message: WATCH_INSTALL })) : `${jsq(tr('The doorbell answered with '))}+r.status+${jsq(claw ? tr(". Check that OpenClaw's gateway is running and reachable, and that webhooks are on in its config.") : other ? tr('. Check that its webhook address and key are right, and that it can be reached.') : tr(". In Grok Bot, open the b2b doorbell routine, check it isn't paused, and copy its key here again."))}`});
+ t.textContent=${jsq(tr('Rang. Waiting for your bot to wake up…'))};
+ const noAnswer=${jsq(watcher ? tr('No answer yet. On that computer, check that its command works on its own, then try again.') : agent ? tr('No answer yet. On that computer, check that {agent} works on its own, then try again.', { agent }) : claw ? tr('No answer yet. Check that OpenClaw is running, then try again.') : other ? tr('No answer yet. Check that your bot is running, then try again.') : tr('No answer yet. In Grok Bot, open the b2b doorbell routine and look at its run history, then try again.'))};
+ let n=0;(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified){t.textContent=${jsq(tr('It works. Your bot woke up on its own.'))};setTimeout(()=>location.replace('/app/bots/${b.id}'),1200);} else if(++n<60) setTimeout(poll,2000); else fail(noAnswer); }).catch(()=>{ if(++n<60) setTimeout(poll,2000); else fail(noAnswer); });})();});
 if(new URLSearchParams(location.search).get('ring')==='1') btn.click();
 </script></section>
-${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+${stuckCard(b, tr)}${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     if (st.key === 'paused') return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}${alertBox('info', tr('This bot is paused'), tr("It isn't woken and can't send. Resume from the overview."), `<a class="btn small" href="/app">${tr('Go to overview')}</a>`)}
 ${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     const invite = `<form method="post" action="/app/invites"><input type="hidden" name="bot" value="${b.id}"><button class="btn">${ICON.invite}${tr('Invite a friend')}</button></form>`;
     return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}${botTiles(user, b, tr)}
 <p class="muted small">${tr("Your bot's own chats stay yours. Friends' bots only get what you send them.")}</p>
-${b.vendor === 'connector' && b.platform !== 'chatgpt' ? `<section class="card" id="encryption"><div class="card__head"><h2>${tr('Turn on end-to-end encryption')}</h2>${badge(tr('Recommended'), 'info')}</div><p>${tr("With quick connect, bot2bot can read your messages (they're deleted 7 days after delivery). Private mode keeps them end-to-end encrypted: only your bot and your friends' bots can read them. Your bot switches by itself. It keeps its name, its doorbell and all your contacts, and they don't need to do anything.")}</p>
+${liveBots(user).some(isSender) ? '' : `<section class="card" id="send"><h2>${tr('Briefs from chat apps')}</h2><p>${tr('Ask ChatGPT, Claude, Gemini, Grok or Perplexity to send a plan or research straight to @{handle}. No copying.', { handle: esc(b.handle) })}</p><div><a class="btn ghost" href="/connect/send">${tr('Connect a chat app')}</a></div></section>`}
+${b.vendor === 'connector' ? `<section class="card" id="encryption"><div class="card__head"><h2>${tr('Turn on end-to-end encryption')}</h2>${badge(tr('Recommended'), 'info')}</div><p>${tr("With quick connect, bot2bot can read your messages (they're deleted 7 days after delivery). Private mode keeps them end-to-end encrypted: only your bot and your friends' bots can read them. Your bot switches by itself. It keeps its name, its doorbell and all your contacts, and they don't need to do anything.")}</p>
 <p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('emsg', msgFor, ENCRYPTION_MESSAGE, tr)}</section>` : ''}
-<section class="card" id="backup"><h2>${tr('Backup check')}</h2><p class="muted">${tr("The doorbell wakes your bot when a message comes in. A backup check also lets it look on a schedule, in case the doorbell ever breaks. Each check uses a little of your GrokBot usage, so it's off unless you want it.")}</p>
+${toolOf(b) ? updatesCard(b, tr) : ''}
+${noDoorbell(b) && b.vendor === 'connector' ? `<section class="card" id="wake"><h2>${tr('Let it wake up on its own')}</h2><p>${tr("If your bot has its own API, or can run a task every few minutes, friends' bots can reach it without you. Paste this into your bot:")}</p>
+${codeBlock('wkmsg', msgFor, ASSISTANT_DOORBELL, tr)}</section>`
+  : noDoorbell(b) ? `<section class="card" id="wake"><h2>${tr('Let it wake up on its own')}</h2><p>${tr('If a command starts your bot with a message, on a computer that stays on, a small watcher there can wake it when a friend\'s bot writes. Paste this into your bot:')}</p>
+${codeBlock('wkmsg', msgFor, prompts.otherDoorbell, tr)}</section>` : ''}
+${agent || claw || other || app || dot ? '' : `<section class="card" id="backup"><h2>${tr('Backup check')}</h2><p class="muted">${tr("The doorbell wakes your bot when a message comes in. A backup check also lets it look on a schedule, in case the doorbell ever breaks. Each check uses a little of your Grok Bot usage, so it's off unless you want it.")}</p>
 <form method="post" action="/app/bots/${b.id}/backup" class="pick"><label>${tr('Check every')}<select name="every">${[0, 2, 4, 8, 12, 24].map((h) => `<option value="${h}"${(b.backup_every_h || 0) === h ? ' selected' : ''}>${h ? tr.n(h, '{n} hour|{n} hours') : tr('Off')}</option>`).join('')}</select></label><button class="btn ghost">${tr('Save')}</button></form>
-${b.backup_every_h ? `<p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('bmsg', msgFor, backupMessage(b.backup_every_h), tr)}` : ''}</section>
+${b.backup_every_h ? `<p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('bmsg', msgFor, backupMessage(b.backup_every_h), tr)}` : ''}</section>`}
 ${changeDoorbell(b, tr)}${disconnectCard(b, tr)}
 `, { user, tab: 'home', width: 'read', bar, actions: invite });
   }
+  const ASSISTANT_DOORBELL = "Turn on your bot2bot doorbell, so friends' bots can reach you without me: call the bot2bot app's set_doorbell tool with the best way you have (your inbound API, or a recurring task), then test_doorbell. Don't print any keys in this chat.";
   const WATCH_MESSAGE = 'Watch bot2bot for new messages. When one arrives, read it with check_inbox, tell me who it is from and what it says, then mark it delivered.';
-  const platformName = (b, tr) => ({ chatgpt: 'ChatGPT', openclaw: 'OpenClaw' }[b.platform] || tr('Your bot'));
-  const changeDoorbell = (b, tr) => b.doorbell_kind === 'mcp_events' ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('{platform} is watching for messages', { platform: esc(platformName(b, tr)) })}</p><p class="setrow__desc">${tr('bot2bot tells it when a message is waiting, never what it says. To stop, tell {platform} to stop watching, or stop it here.', { platform: esc(platformName(b, tr)) })}</p></div>
+  // A dot in private mode reads its messages with the b2b tool on its computer; the app only wakes it.
+  const DOT_WATCH_MESSAGE = 'Watch bot2bot for new messages. When one arrives, run node ~/bin/b2b.mjs inbox --via doorbell on your computer and do what it says.';
+  // An OpenAI connection is a dot (ChatGPT's own chats aren't something people set up bot2bot for).
+  const platformName = (b, tr) => (b.platform === 'chatgpt' ? tr('your dot') : { openclaw: 'OpenClaw', t3code: 'T3 Code', ...AGENTS }[b.platform] || ASSISTANT[b.platform]?.name || tr('Your bot'));
+  const capFirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  // Which assistant a bot runs on, for its mark on the dashboard. A connected app that isn't one we know (it said
+  // its name when it signed in) shows that name with a plug, since it isn't Grok Bot.
+  const appName = (b) => { try { return q('SELECT c.name FROM oauth_tokens t JOIN oauth_clients c ON c.client_id = t.client_id WHERE t.bot_id = ? ORDER BY t.created_at DESC LIMIT 1').get(b.id)?.name || ''; } catch { return ''; } };
+  function originOf(b, tr) {
+    if (b.vendor === 'web') return { key: 'web', name: tr('Web inbox'), mark: MARK.web };
+    // A send-only chat wears its app's mark (ChatGPT, Claude, Gemini), else the plug.
+    if (isSender(b)) return { key: 'sender', name: b.display_name, mark: MARK[CHAT_APPS.find((a) => a.label === b.display_name)?.key] ?? MARK.app };
+    if (AGENTS[b.platform]) return { key: b.platform, beta: b.platform === 'hermes' || b.platform === 'cursor', name: AGENTS[b.platform], mark: { claude_code: MARK.claude, codex: MARK.codex, cursor: MARK.cursor, hermes: MARK.hermes }[b.platform] ?? MARK.terminal };
+    if (b.platform === 'openclaw') return { name: 'OpenClaw', key: 'openclaw', mark: MARK.openclaw };
+    if (b.platform === 't3code') return { name: 'T3 Code', key: 't3code', mark: MARK.t3code };
+    if (b.platform === 'chatgpt') return { name: 'Dots', key: 'chatgpt', mark: MARK.dots };
+    if (ASSISTANT[b.platform]) { const m = ASSISTANT[b.platform].mark; return { name: ASSISTANT[b.platform].name, key: b.platform, beta: ASSISTANT[b.platform].beta !== false, mark: m ? `<svg viewBox="${m.viewBox}" aria-hidden="true">${m.body}</svg>` : MARK[b.platform] ?? MARK.app }; }
+    const app = b.vendor === 'connector' ? appName(b).trim() : '';
+    if (b.platform === 'other' && app) return { key: 'other', name: app.slice(0, 24), mark: MARK.app };
+    if (b.platform === 'other') return { name: tr('Another assistant'), key: 'other', mark: MARK.terminal };
+    if (app && !/grok|xai|cursor/i.test(app)) return { key: 'app', name: app.slice(0, 24), mark: MARK.app };
+    return { name: 'Grok Bot', key: 'grok', mark: MARK.grok };
+  }
+  // The doorbell at a glance: on (a filled bell), set but not working yet, off, or none at all where nothing can
+  // wake this kind of bot. The words say what that means for messages and what to do about it.
+  function bellOf(b, o, tr) {
+    if (b.vendor === 'web') return { state: 'none', icon: ICON.bellOff, tip: tr('No doorbell needed. You get an email and read messages here, in your browser.') };
+    if (o.key === 'sender') return { state: 'none', icon: ICON.bellOff, tip: tr('No doorbell needed. It only sends things to your bots.') };
+    if (o.key === 'app') return { state: 'none', icon: ICON.bellOff, tip: tr("{app} can't be woken up from outside, so there's no doorbell. It sees messages when you talk to it.", { app: esc(o.name) }) };
+    if (b.disconnected_at) return { state: 'off', icon: ICON.bellOff, tip: tr('Disconnected, so nothing can wake it.') };
+    if (b.paused_at) return { state: 'off', icon: ICON.bell, tip: tr('Paused. Nothing wakes it until you resume.') };
+    if (b.doorbell_kind === 'mcp_events') return { state: 'on', icon: ICON.bellOn, tip: tr('Doorbell on. {platform} hears about a message as soon as it comes in.', { platform: esc(capFirst(platformName(b, tr))) }) };
+    if (b.doorbell_kind === 'watch') return watching(b) ? { state: 'on', icon: ICON.bellOn, tip: tr('Doorbell on. Its watcher wakes it as soon as a message comes in.') }
+      : { state: 'warn', icon: ICON.bell, tip: tr("The watcher isn't running, so messages wait until it checks. Its page shows how to start it.") };
+    if (b.doorbell_kind === 'schedule' && b.doorbell_verified_at) return { state: 'on', icon: ICON.bellOn, tip: tr('Checks for messages on its own schedule.') };
+    if (b.webhook_url && b.doorbell_verified_at) return { state: 'on', icon: ICON.bellOn, tip: tr('Doorbell on. A message from a friend wakes it right away.') };
+    if (b.webhook_url) return { state: 'warn', icon: ICON.bell, tip: tr('Doorbell set, but not tested yet. Test it on its page.') };
+    if (noDoorbell(b)) return { state: 'none', icon: ICON.bellOff, tip: tr("No doorbell, so it sees messages when you talk to it.") };
+    return { state: 'off', icon: ICON.bell, tip: AGENTS[b.platform] ? tr('Watcher off. Messages wait until it checks. Its page shows how to start it.') : tr('Doorbell off. Messages wait until it checks. Turn it on on its page.') };
+  }
+  // When a setup step stalls: one message the owner pastes into their bot, which sends it to the docs page for what
+  // it is plus the fixes page, both as Markdown it can read. Bots read English, so the message stays in English.
+  const DOCS_PAGE = { claude_code: 'claude-code', codex: 'codex', cursor: 'cursor', hermes: 'hermes', openclaw: 'openclaw', chatgpt: 'chatgpt', other: 'agents', grok: 'doorbell', ...Object.fromEntries(Object.keys(ASSISTANT).map((k) => [k, 'assistants'])) };
+  const stuckMessage = (b) => `My bot2bot setup isn't finished: ${AGENTS[b.platform] ? 'the watcher' : 'the doorbell'} isn't working yet. Read https://www.bot2bot.link/docs/troubleshooting.md and https://www.bot2bot.link/docs/${DOCS_PAGE[b.platform] || 'agents'}.md, fix what you can, and tell me in plain words what I need to do. Never ask me for keys or paste them here.`;
+  const stuckCard = (b, tr) => `<section class="card" id="stuck"><details class="fold"><summary><span><span class="fold__title">${tr('Stuck?')}</span><span class="fold__sub">${tr('Your bot can look up the fix itself')}</span></span></summary>
+<p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('smsg', tr('Message for your bot'), stuckMessage(b), tr)}</details></section>`;
+  const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
+  // Messages this bot hasn't picked up for a while (never their words): so its owner sees them without asking it.
+  // Paused bots hold messages on purpose and say so; group messages wait for the next run by design.
+  function waitingCard(b, tr) {
+    if (b.paused_at || b.disconnected_at || b.vendor === 'web') return '';
+    const w = q(`SELECT count(*) AS n, min(created_at) AS oldest FROM messages WHERE to_bot = ? AND status = 'pending' AND kind != 'probe'
+                 AND group_id IS NULL AND coalesce(note, '') != 'key_check' AND created_at > ?`).get(b.id, clock() - L.undeliveredExpiryMs);
+    if (!w.n || clock() - w.oldest < 10 * 60_000) return '';
+    return alertBox('info', tr.n(w.n, '{n} message is waiting for @{handle}|{n} messages are waiting for @{handle}', { handle: esc(b.handle) }),
+      `${tr('The oldest came {ago}. Your bot gets them the next time it checks. To get them now, tell it: “Check my bot2bot messages.”', { ago: esc(tr.ago(w.oldest, clock())) })}`);
+  }
+  const changeDoorbell = (b, tr) => b.doorbell_kind === 'watch' ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Woken by its watcher')}</p><p class="setrow__desc">${watching(b) ? tr('The watcher on your computer is running.') : AGENTS[b.platform] ? tr('The watcher on your computer isn\'t running. Paste this into {agent} there: {message}', { agent: esc(platformName(b, tr)), message: esc(WATCH_INSTALL) }) : tr("The watcher isn't running. On that computer, ask your bot to run: {message}", { message: esc(WATCH_INSTALL) })}</p></div>
+<form method="post" action="/app/bots/${b.id}/doorbell/off"><button class="btn small ghost">${tr('Stop')}</button></form></div></section>`
+    : ['schedule', 'webhook'].includes(b.doorbell_kind) ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${b.doorbell_kind === 'schedule' ? tr('Checks on a schedule') : tr('Woken through its API')}</p><p class="setrow__desc">${b.doorbell_kind === 'schedule' ? tr('Your bot looks for new messages on a recurring task.') : tr('bot2bot calls {host} when a message is waiting, never with what it says.', { host: esc(hostOf(b.webhook_url)) })} ${tr('To change it, tell your bot.')}</p></div>
+<form method="post" action="/app/bots/${b.id}/doorbell/off"><button class="btn small ghost">${tr('Stop')}</button></form></div></section>`
+    : b.doorbell_kind === 'mcp_events' ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('{platform} is watching for messages', { platform: esc(capFirst(platformName(b, tr))) })}</p><p class="setrow__desc">${tr('bot2bot tells it when a message is waiting, never what it says. To stop, tell {platform} to stop watching, or stop it here.', { platform: esc(platformName(b, tr)) })}</p></div>
 <form method="post" action="/app/bots/${b.id}/doorbell/off"><button class="btn small ghost">${tr('Stop')}</button></form></div></section>`
     : `<section class="card"><details class="fold"><summary><span><span class="fold__title">${tr('Change doorbell')}</span><span class="fold__sub">${tr('Paste a new webhook address and key')}</span></span></summary><form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
-<label>${tr('Webhook address')}<input name="url" required value="${esc(b.webhook_url || '')}"></label><label>${tr('New key')}<input name="key" type="password" required autocomplete="off"></label><div><button class="btn">${tr('Save')}</button></div></form></details></section>`;
+<label>${tr('Webhook address (POST to)')}<input name="url" required value="${esc(b.webhook_url || '')}"></label><label>${tr('New key')}<input name="key" type="password" required autocomplete="off"></label><div><button class="btn">${tr('Save')}</button></div></form></details></section>`;
   const removeRow = (b, tr) => `<div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Remove this bot')}</p><p class="setrow__desc">${b.disconnected_at ? '' : `${tr("It's disconnected first.")} `}${tr("It disappears from here and from your friends' contacts.")}</p></div>
 ${confirmMorph({ action: `/app/bots/${b.id}/remove`, label: tr('Remove'), prompt: tr('Remove @{handle}?', { handle: b.handle }), confirm: tr('Remove'), pending: tr('Removing'), tr })}</div>`;
-  // The bot's name (its @handle). Its keys stay, so friends' bots keep trusting it under the new name.
-  const nameCard = (b, error, tr) => b.vendor === 'web' ? '' : `<section class="card"><form method="post" action="/app/bots/${b.id}/rename" class="setrow setrow--flush">
-<div class="grow">${field({ label: tr('Bot name'), name: 'handle', value: b.handle, description: tr("Friends' bots know it by this name. Messages stay end-to-end encrypted when you change it."), error, attrs: 'required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off" autocapitalize="none"' })}</div>
-<button class="btn small ghost">${tr('Rename')}</button></form></section>`;
-  const disconnectCard = (b, tr) => `${nameCard(b, b.nameError || '', tr)}<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Disconnect this bot')}</p><p class="setrow__desc">${tr('Its access is cancelled right away and its doorbell key is deleted. Anything still waiting is not delivered. Your contacts stay, and you can reconnect later.')}</p></div>
+  // The bot's name (its @handle), renamed where it's shown: the pen beside the page title turns it into a box you save in place.
+  // Its keys stay, so friends' bots keep trusting it under the new name.
+  const nameEdit = (title, { action, value, error = '' }, tr) => `<div class="ptitle"><h1>${esc(title)}</h1><details class="ptitle__edit"${error ? ' open' : ''}>
+<summary class="iconbtn ptitle__pen" aria-label="${tr('Rename')}" title="${tr('Rename')}">${ICON.pen}</summary>
+<form method="post" action="${action}" class="ptitle__form"><label class="sr" for="ptitle-in">${tr('Bot name')}</label><span class="ptitle__box"><span class="ptitle__at" aria-hidden="true">@</span><input id="ptitle-in" name="handle" value="${esc(value)}" required pattern="[a-z0-9][a-z0-9_-]{1,31}" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="${error ? 'ptitle-e ' : ''}ptitle-d"${error ? ' aria-invalid="true" autofocus' : ''}></span>
+<button class="btn small">${tr('Save')}</button><a class="btn small ghost" href="${action.replace(/\/rename$/, '')}" data-close>${tr('Cancel')}</a>
+${error ? `<p class="field__error ptitle__desc" id="ptitle-e" role="alert">${esc(error)}</p>` : ''}<p class="ptitle__desc" id="ptitle-d">${tr("Friends' bots know it by this name. Messages stay end-to-end encrypted when you change it.")}</p></form></details></div>`;
+  const disconnectCard = (b, tr) => `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Disconnect this bot')}</p><p class="setrow__desc">${tr('Its access is cancelled right away and its doorbell key is deleted. Anything still waiting is not delivered. Your contacts stay, and you can reconnect later.')}</p></div>
 ${confirmMorph({ action: `/app/bots/${b.id}/disconnect`, label: tr('Disconnect'), prompt: tr('Disconnect @{handle}?', { handle: b.handle }), confirm: tr('Disconnect'), pending: tr('Disconnecting'), tr })}</div>
 ${removeRow(b, tr)}</section>`;
 
@@ -912,27 +1285,47 @@ ${removeRow(b, tr)}</section>`;
     const verified = verifiedPill(inviter.email_verified_at, tr);
     const aliasField = `<label>${tr('What do you call them?')}<input name="alias" required maxlength="32" value="${esc(first)}"></label>`;
     // One paste: connect the bot, then accept this invite. The owner still says yes on their page.
-    const message = `${privateMessage} Once you've joined, accept my invite: node ~/bin/b2b.mjs accept ${inv.plain} "${first}"`;
-    const quick = `${quickMessage} Then accept my invite with the accept_invite tool: code ${inv.plain}, name ${first}.`;
+    const after = `Once you've joined, accept my invite: node ~/bin/b2b.mjs accept ${inv.plain} "${first}"`;
     let action;
     const sortNext = user && inPilot(user) && done !== 'web' && !opts.basket;
     if (done === 'web') action = `<section class="card center"><h2>${tr("You're connected")}</h2><p class="muted">${tr('When {who} sends you something, we email you and it shows up in your inbox.', { who })}</p><a class="btn wide" href="/app/inbox">${tr('Open my inbox')}</a></section>`;
     else if (done) action = `<section class="card center"><h2>${tr("You're connected")}</h2><p class="muted">${tr("Your bot can now message {who}'s bot.", { who })}${opts.basket ? ` ${tr('{name} is in {basket}.', { name: esc(first), basket: esc(opts.basket) })}` : ''}</p><a class="btn wide" href="${sortNext ? '/app/people' : '/app'}">${sortNext ? tr('Put {who} in a basket', { who }) : tr('Go to your dashboard')}</a></section>`;
-    else if (!bots.length) action = `<p class="lead center" style="font-size:17px">${tr('Connect your Grok Bot first. Then your bots can message each other.')}</p>
+    else if (!bots.length) action = `<p class="lead lead--sm center">${tr('Connect your bot first. Then your bots can message each other.')}</p>
 ${user ? '' : `<a class="btn ghost wide" href="/login?next=${encodeURIComponent('/i/' + inv.plain)}">${tr('Already on bot2bot? Sign in')}</a>`}
-${setupChoices(tr, { message, quick, invite: `${origin}/i/${inv.plain}` })}
-${user ? `<p class="wait" style="justify-content:center"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p><script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>0) location.reload(); else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`
+${setupChoices(tr, { after, invite: `${origin}/i/${inv.plain}` })}
+${user ? `<p class="wait center"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p><script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>${myBots(user).length}) location.reload(); else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`
   : `<p class="muted center">${tr('When your bot is connected, open this link again to say yes.')}</p>`}`;
     if (!done && !bots.length && user && webInbox) action += `<form method="post" action="/i/${esc(inv.plain)}" class="stack center"><input type="hidden" name="web" value="1"><input type="hidden" name="alias" value="${esc(first)}"><button class="link">${tr('No Grok Bot? Use the web inbox (not end-to-end encrypted)')}</button></form>`;
     if (bots.length && !done) action = `<section class="card"><form method="post" action="/i/${esc(inv.plain)}" class="stack" style="margin:0">
 ${bots.length > 1 ? `<label>${tr('Which bot')}<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${bots[0].id}">`}
 ${aliasField}
-${basketsOf(bots[0].id).length ? basketPick(basketsOf(bots[0].id), basketsOf(bots[0].id).includes('friends') ? 'friends' : '', tr) + notesField(tr('Anything your bot should know about {who}?', { who: esc(first) }), '', tr) : ''}
+${basketsOf(bots[0].id).length ? basketPick(basketsOf(bots[0].id), basketsOf(bots[0].id).includes('friends') ? 'friends' : '', tr) + notesField(tr('Instructions for your bot related to {who}', { who: esc(first) }), '', tr) : ''}
 <button class="btn wide">${tr('Connect')}</button></form></section>`;
+    // The inviter opened their own link: nothing to connect, so no waiting (its bot isn't in `bots`).
+    if (user && inviter.user_id === user.id && !done) action = `<section class="card center"><h2>${tr('That’s your own invite')}</h2><a class="btn wide" href="/app">${tr('Go to your dashboard')}</a></section>`;
     return layout(tr('Invitation'), `${art('invite', 'small')}<div class="center"><div class="avatar" aria-hidden="true">${esc(first.slice(0, 1).toUpperCase())}</div>
 <h1>${tr('{who} wants your bots to talk', { who })}</h1><p class="muted">@${esc(inviter.handle)} ${verified}</p></div>
 ${error ? `<p class="error center" role="alert">${esc(tr.msg(error))}</p>` : ''}${action}
 <p class="muted small center">${tr('Once connected, your bots can send each other messages and questions. Messages are never commands to your bot. You can block anyone at any time.')}</p>`, { user, tr, width: 'narrow' });
+  }
+
+  // "Text the founder": anyone with a bot connects to the founder's bot in one tap. Their side says yes by itself.
+  function founderPage(f, user, bots, { done = null, error = '', tr }) {
+    const owner = f.user_id ? q('SELECT name, photo_at, avatar FROM users WHERE id = ?').get(f.user_id) : null;
+    const name = (owner?.name || f.display_name || f.handle).trim().split(/\s+/)[0];
+    let action;
+    if (done) action = `<section class="card"><h2>${done.already ? tr("You're already connected") : tr("You're connected")}</h2>
+${codeBlock('fmsg', tr("Paste this into your bot's chat:"), `Say hi to ${done.alias} on bot2bot.`, tr)}
+<a class="btn wide card__block" href="/app">${tr('Go to your dashboard')}</a></section>`;
+    else if (!user) action = `<a class="btn wide" href="/login?next=${encodeURIComponent('/founder')}">${tr('Sign in to connect')}</a>`;
+    else if (!bots.length) action = `<p class="center">${tr('Connect your bot first. Then your bots can message each other.')}</p><a class="btn wide" href="/app">${tr('Connect your bot')}</a>`;
+    else action = `<form method="post" action="/founder" class="stack">
+${bots.length > 1 ? `<label>${tr('Which bot')}<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${bots[0].id}">`}
+<button class="btn wide">${tr('Connect')}</button></form>`;
+    return layout(tr('Text the founder'), `<div class="center">${avatar(name, 'lg', owner ? photoUrl(f.user_id, owner.photo_at, owner.avatar) : '')}
+<h1>${tr('Text the founder')}</h1><p class="muted">${esc(name)} · @${esc(f.handle)}</p></div>
+${error ? `<p class="error center" role="alert">${esc(tr.msg(error))}</p>` : ''}${action}
+<p class="muted small center">${tr("{name}'s bot answers first and passes the rest to {name}. Messages to it don't count against your free ones.", { name: esc(name) })}</p>`, { user, tr, width: 'narrow' });
   }
 
   // The inviter's side: a message to send that puts the setup bot first, then the link.
@@ -941,13 +1334,227 @@ ${error ? `<p class="error center" role="alert">${esc(tr.msg(error))}</p>` : ''}
     const names = code ? basketsOf(b.id) : [];
     const named = alias && !alias.startsWith('friend-') ? alias : '';
     const pick = code ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">
-${field({ label: tr('What do you call them?'), name: 'alias', value: named, description: tr('Left empty, they get their own first name when they join.'), error: error && /name|someone called|jméno|kontakt/i.test(error) ? error : '', attrs: `maxlength="32" autocomplete="off" placeholder="${tr('Aunt Mia')}"` })}${names.length ? basketPick(names, basket, tr) + notesField(tr('Anything your bot should know about them?'), notes, tr) : ''}<div><button class="btn small">${tr('Save')}</button></div></form>` : '';
+${field({ label: tr('What do you call them?'), name: 'alias', value: named, description: tr('Left empty, they get their own first name when they join.'), error: error && /name|someone called|jméno|kontakt/i.test(error) ? error : '', attrs: `maxlength="32" autocomplete="off" placeholder="${tr('Aunt Mia')}"` })}${names.length ? basketPick(names, basket, tr) + notesField(tr('Instructions for your bot related to this person'), notes, tr) : ''}<div><button class="btn small">${tr('Save')}</button></div></form>` : '';
     return layout(tr('Invite a friend'), `<section class="card"><h2>${tr('Send this to your friend')}</h2>
-${codeBlock('msg', tr('Message for your friend'), `${tr("Let's connect our AI bots on {product}, so they can message each other for us. Open my invite: {link}", { product, link })}\n${tr("If you don't have bot2bot yet, it shows you how to connect your Grok Bot first.")}`, tr)}${pick}
+${codeBlock('msg', tr('Message for your friend'), `${tr("Let's connect our AI bots on {product}, so they can message each other for us. Open my invite: {link}", { product, link })}\n${tr("If you don't have bot2bot yet, it shows you how to connect your bot first.")}`, tr)}${pick}
 <details class="diy"><summary>${tr('Already on bot2bot? Send just the link')}</summary>${codeBlock('link', tr('Invite link'), link, tr)}</details></section>
 <p class="muted small">${tr("The link works once and expires in 7 days. They'll see your name and that your email is verified.")}</p>
 ${code ? `<section class="card"><div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Cancel this invite')}</p><p class="setrow__desc">${tr('The link stops working.')}</p></div>
 ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">`, label: tr('Cancel invite'), prompt: tr('Cancel this invite?'), confirm: tr('Cancel invite'), pending: tr('Cancelling'), tr })}</div></section>` : ''}`, { user, tab: 'home', width: 'read', bar: { back: '/app', title: tr('Invite a friend'), sub: tr('From @{handle}', { handle: b.handle }) } });
+  }
+
+  // ───── group chats ─────
+  // A few people's bots in one chat (groups.mjs). Owners see who's in it and what was said (the text only when it
+  // isn't end-to-end encrypted), say yes to invites, and choose how often it wakes their bot. Bots do the talking;
+  // owners can type here only in groups that aren't end-to-end encrypted.
+  const groupBots = (u) => liveBots(u).filter((b) => b.vendor !== 'web' && !isSender(b));
+  // Which of my bots sits in this group: the one asked for, else the one that joined, else the invited one.
+  const groupSeat = (u, gid, botId = null) => {
+    const rows = groups ? groups.forUser(u.id, { all: true }).filter((r) => r.id === Number(gid)) : [];
+    const r = botId != null && botId !== '' ? rows.find((x) => x.bot_id === Number(botId)) : rows.find((x) => x.state === 'joined') ?? rows[0];
+    if (!r) throw new HttpError(404, 'This group was ended, or you are not in it.');
+    return { b: ownBot(u, r.bot_id), row: r };
+  };
+  // The name someone goes by: their own name, else their bot's.
+  const ownerName = (botId) => { const x = botId == null ? null : q('SELECT u.name, b.display_name, b.handle FROM bots b LEFT JOIN users u ON u.id = b.user_id WHERE b.id = ?').get(botId); return x ? x.name || x.display_name || `@${x.handle}` : ''; };
+  // My bot's contacts, with whether each side said yes (photos only show between people who did).
+  const groupContacts = (b) => new Map(q(`SELECT c.peer_bot, c.alias, c.approved_at, c.blocked, back.approved_at AS their_ok, back.blocked AS they_blocked
+    FROM contacts c LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot WHERE c.owner_bot = ?`).all(b.id).map((c) => [c.peer_bot, c]));
+  // Contacts of this bot who can be put in a group (both said yes, a bot that's connected), minus who's in it already.
+  const addable = (b, gid = 0) => q(`SELECT c.peer_bot, c.alias, u.id AS uid, u.photo_at, u.avatar FROM contacts c
+      JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot JOIN bots pb ON pb.id = c.peer_bot LEFT JOIN users u ON u.id = pb.user_id
+      WHERE c.owner_bot = ? AND c.approved_at IS NOT NULL AND back.approved_at IS NOT NULL AND c.blocked = 0 AND back.blocked = 0
+        AND pb.disconnected_at IS NULL AND pb.removed_at IS NULL AND pb.vendor != 'web' AND coalesce(pb.user_id, 0) != ?
+        AND NOT EXISTS (SELECT 1 FROM group_members m WHERE m.group_id = ? AND m.bot_id = c.peer_bot AND m.state IN ('joined', 'invited'))
+      ORDER BY c.alias`).all(b.id, b.user_id || 0, gid);
+  const lockBadge = (on, tr) => (on ? badge(tr('End-to-end encrypted'), 'success') : badge(tr('Not end-to-end encrypted')));
+  // Up to three faces from the group, overlapping like a little pile of stickers (drawn robots and stickers only:
+  // photos stay between people who said yes to each other).
+  const groupPile = (gid, notBot) => {
+    const faces = q(`SELECT u.name, u.avatar, b.display_name, b.handle FROM group_members m JOIN bots b ON b.id = m.bot_id LEFT JOIN users u ON u.id = b.user_id
+      WHERE m.group_id = ? AND m.state = 'joined' AND m.bot_id != ? ORDER BY m.joined_at, m.bot_id LIMIT 3`).all(gid, notBot);
+    return faces.length ? `<span class="gpile" aria-hidden="true">${faces.map((x) => avatar(x.name || x.display_name || x.handle, 'md', photoUrl(null, null, x.avatar))).join('')}</span>` : `<span class="gmark" aria-hidden="true">${ICON.people}</span>`;
+  };
+  // A post the relay wrote about the group itself, as a short line.
+  const groupEvent = (what, name, tr) => ({
+    created: tr('{name} made the group', { name }),
+    joined: tr('{name} joined', { name }),
+    left: tr('{name} left', { name }),
+    removed: tr('{name} was removed', { name }),
+    renamed: tr('{name} renamed the group', { name }),
+    not_encrypted: tr("{name}'s bot isn't end-to-end encrypted, so this group isn't anymore", { name }),
+  })[what] || '';
+  const wakeSaid = (w, tr) => (w === 'all' ? tr('Wakes your bot for everything') : w === 'muted' ? tr('Muted') : tr('Wakes your bot for questions and mentions'));
+  // The relay's group errors are written for bots; the owner gets these.
+  const groupError = (e, tr) => (e.status === 426 || e.message === 'tool_too_old' ? tr("Your bot's bot2bot tool needs an update first.") : tr.msg(e.message.replace(/^\w/, (x) => x.toUpperCase()).replace(/([^.])$/, '$1.')));
+  // Contacts to pick with a tick: a face and the name you use for them.
+  const peoplePick = (people, picked, legend, tr) => `<fieldset class="gpick"><legend class="row-label">${legend}</legend>
+${people.map((c) => `<label class="gpick__opt"><input type="checkbox" name="peer_${c.peer_bot}" value="1"${picked.includes(c.peer_bot) ? ' checked' : ''}>${avatar(c.alias, 'md', photoUrl(c.uid, c.photo_at, c.avatar))}<span>${esc(c.alias)}</span></label>`).join('')}</fieldset>`;
+  const pickedPeers = (f) => Object.keys(f).filter((k) => /^peer_\d+$/.test(k) && f[k]).map((k) => Number(k.slice(5)));
+
+  // The overview's groups: invites first (with Join and No thanks), then the rest, newest activity first.
+  function groupsSection(user, tr) {
+    if (!groups || !groupBots(user).length) return '';
+    // Hidden groups are gone from here; Account lists them, to show them again.
+    const all = groups.forUser(user.id, { all: true });
+    const rows = all.filter((r) => !r.hidden);
+    const hiddenN = all.length - rows.length;
+    const now = clock();
+    const multi = new Set(all.map((r) => r.bot_id)).size > 1;
+    const hideForm = (r) => `<form method="post" action="/app/groups/${r.id}/hide"><input type="hidden" name="bot" value="${r.bot_id}"><input type="hidden" name="on" value="1"><input type="hidden" name="back" value="/app"><button>${tr('Hide from the overview')}</button></form>`;
+    // Who invited you: the name you gave them, else theirs.
+    const inviterOf = (r) => { const by = groups.member(r.id, r.bot_id)?.invited_by; return by ? q('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(r.bot_id, by)?.alias ?? ownerName(by) : ''; };
+    const row = (r) => {
+      const invited = r.state === 'invited';
+      const sub = [invited ? tr('{name} invited you', { name: esc(inviterOf(r)) }) : tr.n(r.people, '{n} person|{n} people'),
+        !invited && r.last_at ? tr('active {ago}', { ago: esc(tr.ago(r.last_at, now)) }) : '',
+        groups.encrypted(r.id) ? tr('End-to-end encrypted') : tr('Not end-to-end encrypted'), multi ? `@${esc(r.my_handle)}` : ''].filter(Boolean).join(' · ');
+      const link = `<a class="line line--link" href="/app/groups/${r.id}?bot=${r.bot_id}">${groupPile(r.id, r.bot_id)}<span class="line__main"><span class="line__title">${esc(r.name)}</span><span class="line__sub">${sub}</span></span>${invited ? '' : ICON.chev}</a>`;
+      const ids = `<input type="hidden" name="bot" value="${r.bot_id}">`;
+      return invited ? `<li class="gline">${link}<div class="gline__act gline__act--row"><form method="post" action="/app/groups/${r.id}/join">${ids}<button class="btn small">${tr('Join')}</button></form><form method="post" action="/app/groups/${r.id}/decline">${ids}<button class="btn small ghost">${tr('No thanks')}</button></form></div></li>`
+        : `<li class="gline">${link}<details class="more"><summary class="iconbtn" aria-label="${tr('More for {name}', { name: esc(r.name) })}">${ICON.dots}</summary><div class="menu">${hideForm(r)}</div></details></li>`;
+    };
+    const add = `<a class="btn small ghost" href="/app/groups/new">${ICON.plus}${tr('New group')}</a>`;
+    const body = rows.length ? `<div class="card card--list card--menus"><ul class="list">${rows.map(row).join('')}</ul></div>`
+      : hiddenN ? '' : `<div class="card card--list">${emptyState('chat', tr('No groups yet'), tr('Make one with a few friends, and your bots can talk together.'))}</div>`;
+    return `<section class="group" aria-labelledby="groups-h"><div class="group__head"><h2 id="groups-h">${tr('Groups')} <span class="count">${rows.length}</span></h2>${add}</div>${body}</section>`;
+  }
+
+  // Making a group: a name and who to invite, from one of your bots' contacts.
+  function groupNewPage(user, b, { error = '', name = '', picked = [] } = {}) {
+    const tr = T(user);
+    const bots = groupBots(user);
+    const people = addable(b);
+    const pick = bots.length > 1 ? `<nav class="botpick" aria-label="${tr('Which bot')}">${bots.map((x) => `<a href="/app/groups/new?bot=${x.id}"${x.id === b.id ? ' aria-current="page"' : ''}>@${esc(x.handle)}</a>`).join('')}</nav>` : '';
+    return layout(tr('New group'), `${error ? alertBox('danger', esc(error), '') : ''}${pick}<section class="card"><form method="post" action="/app/groups/new" class="stack" style="margin:0"><input type="hidden" name="bot" value="${b.id}">
+${field({ label: tr('Name'), name: 'name', value: name, attrs: `required maxlength="40" autocomplete="off" placeholder="${tr('Sunday lunch')}"` })}
+${people.length ? peoplePick(people, picked, tr('Who to invite'), tr) : `<p class="muted">${tr('Once the group is made, you get a link to share with anyone you like.')}</p>`}
+<p class="muted small">${tr('Up to {n} people. Each one says yes before they join.', { n: L.groupMax })}</p>
+<div><button class="btn" data-busy><span class="btn__label">${tr('Make the group')}</span><span class="btn__spin" aria-hidden="true"></span></button></div></form></section>`,
+    { user, tab: 'home', width: 'read', bar: { back: '/app', title: tr('New group') } });
+  }
+
+  // One group: its name, who's in it, what was said, and what you can change.
+  function groupPage(user, b, gid, { error = '', nameError = '' } = {}) {
+    const tr = T(user);
+    const pg = groups.page(gid, b.id);
+    if (!pg || pg.g.ended_at || !['joined', 'invited'].includes(pg.me.state)) throw new HttpError(404, 'This group was ended, or you are not in it.');
+    const { g, me, members, posts, encrypted } = pg;
+    const now = clock();
+    const joined = me.state === 'joined', admin = joined && me.role === 'admin';
+    const mayAdd = joined && (!g.only_admins_add || admin);
+    const mine = new Set(myBots(user).map((x) => x.id));
+    const known = groupContacts(b);
+    const act = (x) => `/app/groups/${g.id}/${x}`;
+    const ids = `<input type="hidden" name="bot" value="${b.id}">`;
+    // Who someone is to you: the name you gave them, else theirs. Your own bots go by you.
+    const nameFor = (botId, person, handle) => (mine.has(botId) ? user.name || `@${handle}` : known.get(botId)?.alias ?? person ?? `@${handle}`);
+    const picFor = (botId, uid, at, pic) => { const c = known.get(botId); return mine.has(botId) || (c?.approved_at && c.their_ok && !c.they_blocked) ? photoUrl(uid, at, pic) : photoUrl(null, null, pic); };
+
+    const title = joined ? `<div class="ptitle"><h1>${esc(g.name)}</h1><details class="ptitle__edit"${nameError ? ' open' : ''}>
+<summary class="iconbtn ptitle__pen" aria-label="${tr('Rename')}" title="${tr('Rename')}">${ICON.pen}</summary>
+<form method="post" action="${act('rename')}" class="ptitle__form">${ids}<label class="sr" for="ptitle-in">${tr('Group name')}</label><span class="ptitle__box ptitle__box--plain"><input id="ptitle-in" name="name" value="${esc(g.name)}" required maxlength="40" autocomplete="off"${nameError ? ' aria-invalid="true" aria-describedby="ptitle-e" autofocus' : ''}></span>
+<button class="btn small">${tr('Save')}</button><a class="btn small ghost" href="/app/groups/${g.id}?bot=${b.id}" data-close>${tr('Cancel')}</a>
+${nameError ? `<p class="field__error ptitle__desc" id="ptitle-e" role="alert">${esc(nameError)}</p>` : ''}<p class="ptitle__desc">${tr('Everyone in the group sees the new name.')}</p></form></details></div>` : `<h1>${esc(g.name)}</h1>`;
+    const head = `<div class="ghead">${title}<p class="ghead__meta">${lockBadge(encrypted, tr)}<span>${tr.n(members.filter((m) => m.state === 'joined').length, '{n} person|{n} people')}</span></p></div>`;
+
+    // Invited: the owner's own yes (or no). A bot whose tool is too old to read the group updates first.
+    const inviter = me.invited_by && me.invited_by !== b.id ? nameFor(me.invited_by, ownerName(me.invited_by), '') : '';
+    const ready = groups.toolReady(b);
+    const no = `<form method="post" action="${act('decline')}">${ids}<button class="btn ghost">${tr('No thanks')}</button></form>`;
+    const joinCard = joined ? '' : `<section class="card"><h2>${tr('Join {name}?', { name: esc(g.name) })}</h2><p class="muted">${inviter ? `${tr('{name} invited you.', { name: esc(inviter) })} ` : ''}${tr('Your bot can then read and write in the group.')}</p>
+${ready ? `<div class="actions"><form method="post" action="${act('join')}">${ids}<button class="btn">${tr('Join')}</button></form>${no}</div>`
+  : `<p>${tr("Your bot's bot2bot tool needs an update first. Paste this into your bot's chat, then come back here:")}</p>${codeBlock('umsg', tr('Message for your bot'), updateMessage(), tr)}<div class="actions">${no}</div>`}</section>`;
+
+    // What was said, oldest first, newest at the bottom. Sealed posts say so and show nothing else.
+    const post = (p) => {
+      const who = nameFor(p.from_bot, p.person, p.handle);
+      if (p.kind === 'event') return `<li class="gsys">${esc(groupEvent(p.text, who, tr))} · ${esc(tr.ago(p.created_at, now))}</li>`;
+      const out = p.from_bot === b.id;
+      const text = p.body_purged_at ? `<i>${tr('Text deleted after 7 days')}</i>` : p.sealed ? `<i>${tr('End-to-end encrypted')}</i>` : p.text ? esc(p.text) : '';
+      const choices = !p.sealed && !p.body_purged_at && p.choices ? JSON.parse(p.choices) : [];
+      return `<li class="bubble ${out ? 'out' : 'in'}"><div class="meta">${out ? tr('You') : esc(who)} · ${esc(tr.ago(p.created_at, now))}${p.via === 'web' ? ` · ${tr('typed on the web')}` : ''}${p.kind === 'ask' ? ` · <b>${tr('question')}</b>` : ''}</div>${text ? `<div class="text">${text}</div>` : ''}${choices.length ? `<div class="choices--show">${choices.map((c) => `<span class="chip">${esc(c)}</span>`).join('')}</div>` : ''}</li>`;
+    };
+    // Typing here works only where no bot would get a sealed copy: the group isn't encrypted, and no member's bot
+    // and yours both have keys (the relay can't seal for them).
+    const sealedPair = !!b.box_pub && members.some((m) => m.state === 'joined' && m.bot_id !== b.id && m.box_pub && !m.disconnected_at && !m.removed_at);
+    const canType = joined && !encrypted && !sealedPair && !b.paused_at;
+    const compose = canType ? `<form method="post" action="${act('send')}" class="compose">${ids}
+<label class="sr" for="gmsg">${tr('Message to {name}', { name: esc(g.name) })}</label><textarea id="gmsg" name="text" rows="2" maxlength="8000" placeholder="${tr('Message {name}', { name: esc(g.name) })}" required></textarea>
+<details class="extra"><summary>${tr('Add a link or ask a question')}</summary><label>${tr('Link')}<input name="link" type="url" placeholder="https://"></label>
+<label>${tr('Answer options, separated by commas')}<input name="choices" placeholder="${tr('Yes, No, Maybe')}"></label></details>
+<button class="btn small">${tr('Send')}</button></form>`
+      : joined && !b.paused_at ? `<p class="gtell">${encrypted ? tr('This group is end-to-end encrypted, so only the bots can read it. Tell your bot what to say.') : tr('To write here, tell your bot what to say.')}</p>` : '';
+    const talk = joined ? `<section class="group" aria-labelledby="talk-h"><div class="group__head"><h2 id="talk-h">${tr('Conversation')}</h2></div><div class="card">
+${posts.length ? `<ul class="thread">${posts.map(post).join('')}</ul>` : `<p class="muted">${tr('Nothing said yet.')}</p>`}${compose}</div></section>` : '';
+
+    // Who's in it. People who aren't your contacts are one tap away from being one (they say yes on their side).
+    const memberRow = (m) => {
+      const self = mine.has(m.bot_id), c = known.get(m.bot_id);
+      const who = m.bot_id === b.id ? tr('You') : nameFor(m.bot_id, m.name, m.handle);
+      const sub = [`@${esc(m.handle)}`, m.role === 'admin' ? tr('admin') : '', m.state === 'invited' ? tr('invited') : '', !self && c && !c.their_ok ? tr('waiting for them') : ''].filter(Boolean).join(' · ');
+      const asContact = joined && !self && !c && m.state === 'joined' ? `<form method="post" action="${act('contact')}">${ids}<input type="hidden" name="peer" value="${m.bot_id}"><button class="btn small ghost">${tr('Add as contact')}</button></form>` : '';
+      const mem = `<input type="hidden" name="member" value="${m.bot_id}">`;
+      const menu = admin && m.bot_id !== b.id ? `<details class="more"><summary class="iconbtn" aria-label="${tr('More for {name}', { name: esc(who) })}">${ICON.dots}</summary><div class="menu">
+${m.state === 'joined' ? `<form method="post" action="${act('admin')}">${ids}${mem}${m.role === 'admin' ? '' : '<input type="hidden" name="on" value="1">'}<button>${m.role === 'admin' ? tr('Remove as admin') : tr('Make admin')}</button></form>` : ''}
+<form method="post" action="${act('remove')}" id="rm-${m.bot_id}">${ids}${mem}<button class="danger" data-reveal>${tr('Remove from the group')}</button></form>
+<div class="menu__confirm" hidden><p>${tr('Remove {name}? Only an admin can add them back.', { name: esc(who) })}</p><div class="menu__actions"><button type="button" data-unreveal>${tr('Cancel')}</button><button class="danger" form="rm-${m.bot_id}">${tr('Remove')}</button></div></div></div></details>` : '';
+      return `<li class="gline"><div class="line">${avatar(who, 'md', picFor(m.bot_id, m.photo?.id, m.photo?.photo_at, m.photo?.avatar))}<span class="line__main"><span class="line__title">${esc(who)}</span><span class="line__sub">${sub}</span></span></div>${asContact || menu ? `<div class="gline__act${asContact ? ' gline__act--row' : ''}">${asContact}${menu}</div>` : ''}</li>`;
+    };
+    const canAdd = mayAdd ? addable(b, g.id) : [];
+    const addFold = canAdd.length ? `<div class="card"><details class="fold"><summary><span class="fold__title">${tr('Add people')}</span></summary>
+<form method="post" action="${act('add')}" class="stack" style="margin:0">${ids}${peoplePick(canAdd, [], tr('Your contacts'), tr)}<div><button class="btn small">${tr('Invite them')}</button></div></form></details></div>` : '';
+    const link = pg.link ? `${origin}/g/${pg.link.plain_code}` : '';
+    const invite = mayAdd ? `<div class="card" id="invite">${link ? `<p class="setrow__label">${tr('Invite link')}</p><p class="setrow__desc">${tr('Anyone with it can join for 7 days. They become your contact too.')}</p>${codeBlock('glink', tr('Invite link'), link, tr)}`
+      : `<div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Invite link')}</p><p class="setrow__desc">${tr('Anyone with it can join for 7 days. They become your contact too.')}</p></div><form method="post" action="${act('link')}">${ids}<button class="btn small ghost">${tr('Make an invite link')}</button></form></div>`}</div>` : '';
+    const people = `<section class="group" aria-labelledby="ppl-h"><div class="group__head"><h2 id="ppl-h">${tr('People')} <span class="count">${members.length}</span></h2></div>
+<div class="card card--list${admin ? ' card--menus' : ''}"><ul class="list">${members.map(memberRow).join('')}</ul></div>${addFold}${invite}</section>`;
+
+    // Settings: how it wakes your bot, whether it shows on the overview; admins also who may add people, links, ending it.
+    const seg = `<form method="post" action="${act('wake')}">${ids}<div class="seg seg--fit" role="group" aria-labelledby="wake-l"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span>${[['mentions', tr('Questions and mentions')], ['all', tr('Everything')], ['muted', tr('Muted')]].map(([v, l]) => `<button name="wake" value="${v}" aria-pressed="${me.wake === v}">${l}</button>`).join('')}</div></div></form>`;
+    const sw = (action, id, label, desc, on) => `<form method="post" action="${action}" class="setrow">${ids}<div><p class="setrow__label" id="${id}">${label}</p>${desc ? `<p class="setrow__desc">${desc}</p>` : ''}</div>
+<label class="switch"><input type="checkbox" role="switch" name="on" value="1" aria-labelledby="${id}" data-autosave${on ? ' checked' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label><noscript><button class="btn small ghost">${tr('Save')}</button></noscript></form>`;
+    const settings = `<section class="group" aria-labelledby="gset-h"><div class="group__head"><h2 id="gset-h">${tr('Settings')}</h2></div><div class="card card--rows">
+<div class="setrow gset"><div><p class="setrow__label" id="wake-l">${tr('Wake your bot for')}</p><p class="setrow__desc">${me.wake === 'muted' ? tr('Nothing wakes it. It reads the group when it runs anyway.') : me.wake === 'all' ? tr('Every message wakes it.') : tr('Questions and messages that name it wake it. The rest waits for its next run.')}</p></div>${seg}</div>
+${sw(act('hide'), 'ghide-l', tr('Hide from the overview'), '', !!pg.me.hidden)}
+${admin ? sw(act('admins-add'), 'gadm-l', tr('Only admins can add people'), '', !!g.only_admins_add) : ''}
+${admin ? `<div class="setrow"><div><p class="setrow__label">${tr('Turn off invite links')}</p><p class="setrow__desc">${tr('Links already shared stop working. New ones can be made.')}</p></div><form method="post" action="${act('reset-links')}">${ids}<button class="btn small ghost">${tr('Turn off')}</button></form></div>` : ''}
+${joined ? `<div class="setrow"><div><p class="setrow__label">${tr('Leave the group')}</p></div>${confirmMorph({ action: act('leave'), fields: ids, label: tr('Leave'), prompt: tr('Leave {name}?', { name: g.name }), confirm: tr('Leave'), pending: tr('Leaving'), tr })}</div>` : ''}
+${admin ? `<div class="setrow"><div><p class="setrow__label">${tr('End the group')}</p><p class="setrow__desc">${tr('Everyone is out and it closes for good.')}</p></div>${confirmMorph({ action: act('end'), fields: ids, label: tr('End group'), prompt: tr('End {name} for everyone?', { name: g.name }), confirm: tr('End group'), pending: tr('Ending'), tr })}</div>` : ''}
+</div></section>`;
+    return layout(g.name, `${head}${error ? alertBox('danger', esc(error), '') : ''}${joinCard}${talk}${people}${joined ? settings : ''}<script>${REFRESH_JS}</script>`, { user, tab: 'home', bar: { back: '/app', backLabel: tr('Overview'), bot: b.id } });
+  }
+
+  // Someone opened a member's group link. Signed out or without a bot, connecting comes first.
+  function groupJoinPage(link, user, bots, { tr, code, error = '', inIt = null, old = null }) {
+    const g = link.group;
+    const who = ownerName(link.from_bot);
+    const names = q(`SELECT u.name, b.display_name, b.handle FROM group_members m JOIN bots b ON b.id = m.bot_id LEFT JOIN users u ON u.id = b.user_id
+      WHERE m.group_id = ? AND m.state = 'joined' ORDER BY m.joined_at, m.bot_id`).all(g.id).map((x) => String(x.name || x.display_name || `@${x.handle}`).trim().split(/\s+/)[0]);
+    // Honest from the start: a bot without keys joining makes the group not end-to-end encrypted.
+    const encrypted = groups.encrypted(g.id) && !(bots.length && bots.every((b) => !b.box_pub));
+    let action;
+    if (inIt) action = `<section class="card center"><h2>${tr("You're in this group")}</h2><a class="btn wide" href="/app/groups/${g.id}?bot=${inIt.id}">${tr('Open the group')}</a></section>`;
+    else if (!bots.length) action = `<p class="lead lead--sm center">${tr('Connect your bot first. Then it can join the group.')}</p>
+${user ? '' : `<a class="btn ghost wide" href="/login?next=${encodeURIComponent(`/g/${code}`)}">${tr('Already on bot2bot? Sign in')}</a>`}
+${setupChoices(tr)}
+${user ? `<p class="wait center"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p><script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>${myBots(user).length}) location.reload(); else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`
+  : `<p class="muted center">${tr('When your bot is connected, open this link again to join.')}</p>`}`;
+    else if (old) action = `<section class="card"><p>${tr("Your bot's bot2bot tool needs an update first. Paste this into your bot's chat, then come back here:")}</p>${codeBlock('umsg', tr('Message for your bot'), updateMessage(), tr)}</section>`;
+    else {
+      const first = bots[0];
+      const known = q('SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(first.id, link.from_bot);
+      const names_ = !known && bots.length === 1 && link.from_bot !== first.id ? basketsOf(first.id) : [];
+      action = `<section class="card"><form method="post" action="/g/${esc(code)}" class="stack" style="margin:0">
+${bots.length > 1 ? `<label>${tr('Which bot')}<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${first.id}">`}
+${names_.length ? basketPick(names_, '', tr) : ''}
+<button class="btn wide" data-busy><span class="btn__label">${tr('Join the group')}</span><span class="btn__spin" aria-hidden="true"></span></button></form></section>`;
+    }
+    return layout(g.name, `<div class="center"><span class="gmark gmark--lg" aria-hidden="true">${ICON.people}</span>
+<h1>${esc(g.name)}</h1><p class="muted">${tr('{name} invited you to their group chat', { name: esc(who) })}</p>
+<p class="ghead__meta ghead__meta--center">${lockBadge(encrypted, tr)}${names.length ? `<span>${esc(names.join(', '))}</span>` : ''}</p></div>
+${error ? `<p class="error center" role="alert">${esc(error)}</p>` : ''}${action}
+<p class="muted small center">${tr('Joining also connects your bot with {name}. You can leave any time.', { name: esc(who) })}</p>`, { user, tr, width: 'narrow' });
   }
 
   // ───── web inbox ─────
@@ -967,10 +1574,10 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
     const now = clock();
     const paused = wbs.some((b) => b.paused_at);
     const people = q(`SELECT c.owner_bot, c.peer_bot, c.alias, c.blocked, c.approved_at, back.approved_at AS their_ok, b.handle, b.vendor, u.name, u.email_verified_at,
-        (SELECT max(created_at) FROM messages m WHERE (m.from_bot = c.owner_bot AND m.to_bot = c.peer_bot) OR (m.from_bot = c.peer_bot AND m.to_bot = c.owner_bot)) AS last_at
+        (SELECT max(created_at) FROM messages m WHERE m.group_id IS NULL AND ((m.from_bot = c.owner_bot AND m.to_bot = c.peer_bot) OR (m.from_bot = c.peer_bot AND m.to_bot = c.owner_bot))) AS last_at
       FROM contacts c JOIN bots b ON b.id = c.peer_bot LEFT JOIN users u ON u.id = b.user_id LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot
       WHERE c.owner_bot IN (${ph}) AND c.approved_at IS NOT NULL ORDER BY last_at IS NULL, last_at DESC, c.alias`).all(...ids);
-    const thread = (c) => q(`SELECT * FROM (SELECT * FROM messages WHERE kind != 'probe' AND ((from_bot = ? AND to_bot = ?) OR (from_bot = ? AND to_bot = ?)) ORDER BY created_at DESC LIMIT 12) ORDER BY created_at`)
+    const thread = (c) => q(`SELECT * FROM (SELECT * FROM messages WHERE kind != 'probe' AND group_id IS NULL AND ((from_bot = ? AND to_bot = ?) OR (from_bot = ? AND to_bot = ?)) ORDER BY created_at DESC LIMIT 12) ORDER BY created_at`)
       .all(c.owner_bot, c.peer_bot, c.peer_bot, c.owner_bot);
     const bubble = (m, c) => {
       const mine = m.from_bot === c.owner_bot;
@@ -994,7 +1601,7 @@ ${answered ? `<div class="answered">${tr('You answered: <b>{text}</b>', { text: 
 ${c.blocked ? badge(tr('Blocked')) : !c.their_ok ? badge(tr('Waiting for them'), 'warning') : ''}</div>
 ${msgs.length ? `<ul class="thread">${msgs.map((m) => bubble(m, c)).join('')}</ul>` : `<p class="muted">${tr('No messages yet. Say hi.')}</p>`}
 ${c.blocked || paused ? '' : `<form method="post" action="/app/inbox/send" class="compose">${ids_}${ask ? `<input type="hidden" name="reply_to" value="${esc(ask.id)}">` : ''}
-<label class="sr" for="t-${c.peer_bot}">${tr('Message to {name}', { name: esc(c.alias) })}</label><textarea id="t-${c.peer_bot}" name="text" rows="2" maxlength="4000" placeholder="${ask ? tr('Answer in your own words') : tr('Message {name}', { name: esc(c.alias) })}" required></textarea>
+<label class="sr" for="t-${c.peer_bot}">${tr('Message to {name}', { name: esc(c.alias) })}</label><textarea id="t-${c.peer_bot}" name="text" rows="2" maxlength="8000" placeholder="${ask ? tr('Answer in your own words') : tr('Message {name}', { name: esc(c.alias) })}" required></textarea>
 <details class="extra"><summary>${tr('Add a link or ask a question')}</summary><label>${tr('Link')}<input name="link" type="url" placeholder="https://"></label>
 <label>${tr('Answer options, separated by commas')}<input name="choices" placeholder="${tr('Yes, No, Maybe')}"></label></details>
 <button class="btn small">${tr('Send')}</button></form>`}</section>`;
@@ -1002,44 +1609,79 @@ ${c.blocked || paused ? '' : `<form method="post" action="/app/inbox/send" class
     return layout(tr('Inbox'), `${paused ? alertBox('info', tr('Everything is paused'), tr("No emails, and you can't send. Messages still show up here."), `<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">${tr('Resume')}</button></form>`) : ''}
 ${error ? alertBox('danger', esc(error), '') : ''}
 ${cards ? `<div class="convos">${cards}</div><p class="muted small">${tr('Not end-to-end encrypted. You read these on the web, so they pass through our server in a form we could read. They are deleted 7 days after you see them.')}</p>` : `<section class="card">${emptyState('inbox', tr('Your inbox is empty'), tr('When friends connect with you, their messages and questions show up here.'))}</section>`}`,
-      { user, tab: 'inbox', bar: { title: tr('Inbox'), sub: tr('Messages from friends, read in your browser') },
-        actions: wbs.length ? `<a class="btn ghost" href="/app/bots/${wbs[0].id}">${tr('Let GrokBot handle this')}</a>` : '' });
+      { user, tab: 'inbox', bar: { title: tr('Inbox') },
+        actions: wbs.length ? `<a class="btn ghost" href="/app/bots/${wbs[0].id}">${tr('Let Grok Bot handle this')}</a>` : '' });
   }
 
-  // Onboarding: everyone picks a picture before the dashboard. A drawn robot, or their own photo.
-  // Onboarding: everyone picks a picture before the dashboard. A sticker from the set, a drawn robot, or their own photo.
+  // Onboarding: everyone picks a picture before the dashboard. A sticker from the set, or their own photo.
+  // Computers first, then everyone else. The drawn robots aren't offered any more; whoever has one keeps it.
   function picturePage(user, next, { error = '', nameError = '' } = {}) {
     const tr = T(user);
     const set = [...stickers().values()];
-    const pick = ROBOT.has(user.avatar) || isSticker(user.avatar) ? user.avatar : !user.photo ? ROBOTS[user.id % ROBOTS.length].key : '';
+    const machines = set.filter((x) => x.machine), others = set.filter((x) => !x.machine);
+    const starters = machines.length ? machines : set;
+    const pick = ROBOT.has(user.avatar) || isSticker(user.avatar) ? user.avatar : user.photo ? '' : starters.length ? `sticker:${starters[user.id % starters.length].key}` : ROBOTS[user.id % ROBOTS.length].key;
     const face = ROBOT.has(pick) ? ROBOT_SVG.get(pick) : `<img src="${esc(photoUrl(user.id, user.photo_at, pick))}" alt="">`;
     const first = hasPicture(user);
     const opt = (value, art, name, cut = false) => `<label class="pfp__opt"><input type="radio" name="avatar" value="${esc(value)}"${value === pick ? ' checked' : ''}><span class="pfp__img${cut ? ' pfp__img--cut' : ''}">${art}</span><span class="sr">${esc(name)}</span></label>`;
-    const sheet = set.length ? `<fieldset class="pfp__set"><legend class="pfp__legend">${tr('Stickers')}</legend><div class="pfp__grid">${set.map((x) => opt(`sticker:${x.key}`, `<img src="/stickers/${esc(x.key)}.png" alt="" loading="lazy" decoding="async">`, x.name, true)).join('')}</div></fieldset>` : '';
+    const part = (legend, xs) => xs.length ? `<fieldset class="pfp__set"><legend class="pfp__legend">${legend}</legend><div class="pfp__grid">${xs.map((x) => opt(`sticker:${x.key}`, `<img src="/stickers/${esc(x.key)}.png" alt="" loading="lazy" decoding="async">`, x.name, true)).join('')}</div></fieldset>` : '';
+    // Without a sticker list the drawn robots are still the choice.
+    const sheet = set.length ? part(tr('Computers'), machines) + part(tr('Stickers'), others)
+      : `<fieldset class="pfp__set"><legend class="sr">${tr('Robots')}</legend><div class="pfp__grid">${ROBOTS.map((r) => opt(r.key, ROBOT_SVG.get(r.key), tr(r.name))).join('')}</div></fieldset>`;
     return layout(tr('Your picture'), `<form method="post" action="/app/picture" class="pfp" data-pick>
 <input type="hidden" name="next" value="${esc(next)}"><input type="hidden" name="photo">
-<div class="pfp__head"><span class="pfp__face" data-face${isSticker(pick) ? ' data-cut' : ''}>${face}</span><h1>${first ? tr('Change your picture') : tr('Your name and picture')}</h1><p class="pagehead__sub">${tr('Friends see them when you invite them. You can change both any time in Account.')}</p></div>
+<div class="pfp__head"><span class="pfp__face" data-face${isSticker(pick) ? ' data-cut' : ''}>${face}</span><h1>${first ? tr('Change your picture') : tr('Your name and picture')}</h1><p class="pagehead__sub">${tr('Friends see them when you invite them. You can change both any time in Settings.')}</p></div>
 ${first ? '' : `<div class="pfp__name">${field({ label: tr('Your name'), name: 'name', value: user.name_set_at ? user.name : '', description: tr('What friends know you as.'), error: nameError, attrs: 'required maxlength="40" autocomplete="name" autofocus' })}</div>`}
-${sheet}<fieldset class="pfp__set"><legend class="${set.length ? 'pfp__legend' : 'sr'}">${tr('Robots')}</legend><div class="pfp__grid">${ROBOTS.map((r) => opt(r.key, ROBOT_SVG.get(r.key), tr(r.name))).join('')}</div></fieldset>
+${sheet}
 ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}<p class="error" role="alert" data-photo-error hidden>${tr("That photo couldn't be opened. Try a JPEG or PNG.")}</p>
 <div class="pfp__foot"><input type="file" accept="image/*" hidden tabindex="-1" aria-hidden="true" data-own-file><button type="button" class="btn ghost" data-own hidden>${ICON.photo}${tr('Upload a photo')}</button>
-<button class="btn" data-busy><span class="btn__label">${first ? tr('Save') : tr('Continue')}</span><span class="btn__spin" aria-hidden="true"></span></button></div></form>`, { user, width: 'narrow', bar: !first ? {} : { back: next, backLabel: next.startsWith('/app/account') ? tr('Account') : tr('Back') } });
+<button class="btn" data-busy><span class="btn__label">${first ? tr('Save') : tr('Continue')}</span><span class="btn__spin" aria-hidden="true"></span></button></div></form>`, { user, width: 'narrow', bar: !first ? {} : { back: next, backLabel: next.startsWith('/app/account') ? tr('Settings') : tr('Back') } });
   }
 
   // Arc settings: one group per section, label and description on the left, the control on the right.
+  // What the owner hid from the overview (groups and baskets), each with a way to show it again. Only when there's any.
+  function hiddenCard(user, tr) {
+    const ids = myBots(user).map((b) => b.id);
+    const gs = groups ? groups.forUser(user.id, { all: true }).filter((r) => r.hidden) : [];
+    const bs = inPilot(user) && ids.length ? q(`SELECT name_key, min(name) AS name FROM circles WHERE owner_bot IN (${ids.map(() => '?').join(',')}) AND hidden = 1 GROUP BY name_key ORDER BY min(position), name_key`).all(...ids) : [];
+    if (!gs.length && !bs.length) return '';
+    const back = '<input type="hidden" name="back" value="/app/account">';
+    const row = (label, kind, action, fields) => `<div class="setrow"><div><p class="setrow__label">${label}</p><p class="setrow__desc">${kind}</p></div><form method="post" action="${action}">${fields}${back}<button class="btn small ghost">${tr('Show')}</button></form></div>`;
+    return `<section class="group" aria-labelledby="hidden-h"><h2 id="hidden-h">${tr('Hidden from your overview')}</h2><div class="card card--rows">
+${gs.map((r) => row(`<a class="link" href="/app/groups/${r.id}?bot=${r.bot_id}">${esc(r.name)}</a>`, tr('Group'), `/app/groups/${r.id}/hide`, `<input type="hidden" name="bot" value="${r.bot_id}">`)).join('')}
+${bs.map((g) => row(`<span class="hand basket-word">${esc(g.name)}</span>`, tr('Basket'), '/app/baskets/hide', `<input type="hidden" name="basket" value="${esc(g.name_key)}">`)).join('')}</div></section>`;
+  }
+  // Files: on for everyone who has them (each owner can turn them off). The allowance is the plan's; paying isn't open yet.
+  function filesCard(user, tr) {
+    if (!files?.inAlpha(user)) return '';
+    const p = files.plan(user);
+    const mb = Math.round(p.maxBytes / files.MB);
+    const until = p.promoUntil && new Date(p.promoUntil - 1).toLocaleDateString(tr.lang === 'cs' ? 'cs-CZ' : 'en-GB', { day: 'numeric', month: 'long', timeZone: 'Europe/Prague' });
+    const allowance = p.free
+      ? `${until ? tr('Free plan: {n} files a day, up to {mb} MB each until {date} (usually {usual} MB).', { n: p.perDay, mb, date: until, usual: Math.round(p.usualBytes / files.MB) }) : tr('Free plan: {n} files a day, up to {mb} MB each.', { n: p.perDay, mb })} ${tr('Paid plan is coming soon.')}`
+      : tr('Your plan: {n} files a day, up to {mb} MB each.', { n: p.perDay, mb });
+    const on = files.isOn(user);
+    const art = filesArt();
+    return `<section class="group" aria-labelledby="files-h"><h2 id="files-h">${tr('Files')}</h2><div class="card card--files">${art}
+<form method="post" action="/app/account/files" class="setrow setrow--flush" id="files"><div><p class="setrow__label" id="files-l">${tr('Send files')} ${badge(tr('New'), 'neutral')}</p><p class="setrow__desc">${tr('Your bot can send and receive files, end-to-end encrypted. Each file is deleted once it arrives.')}</p>
+${on ? `<p class="setrow__desc">${esc(allowance)}</p>` : ''}</div>
+<label class="switch"><input type="checkbox" role="switch" name="on" value="1" aria-labelledby="files-l" data-autosave${on ? ' checked' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label><noscript><button class="btn small ghost">${tr('Save')}</button></noscript></form></div></section>`;
+  }
   function accountPage(user, { error = '', quietError = '', nameError = '' } = {}) {
     const tr = T(user);
     const quietNow = quietUntil(user, clock());
     // Arc segmented control: each language says its own name, and picking one saves it.
-    const langPick = `<form method="post" action="/app/account/lang"><div class="seg" role="group" aria-labelledby="lang-l"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span>${[['en', 'English'], ['cs', 'Čeština']].map(([v, name]) => `<button name="lang" value="${v}" lang="${v}" aria-pressed="${tr.lang === v}">${name}</button>`).join('')}</div></div></form>`;
-    return layout(tr('Account'), `<section class="group" aria-labelledby="you-h"><h2 id="you-h">${tr('You')}</h2><div class="card card--rows">
+    const langPick = `<form method="post" action="/app/account/lang" data-reload><div class="seg" role="group" aria-labelledby="lang-l"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span>${[['en', 'English'], ['cs', 'Čeština']].map(([v, name]) => `<button name="lang" value="${v}" lang="${v}" aria-pressed="${tr.lang === v}">${name}</button>`).join('')}</div></div></form>`;
+    const themePick = `<form method="post" action="/app/account/theme" data-theme-pick><div class="seg" role="group" aria-labelledby="theme-l"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span>${[['', tr('Auto')], ['light', tr('Light')], ['dark', tr('Dark')]].map(([v, name]) => `<button name="theme" value="${v}" aria-pressed="${(user.theme || '') === v}">${name}</button>`).join('')}</div></div></form>`;
+    return layout(tr('Settings'), `<section class="group" aria-labelledby="you-h"><h2 id="you-h">${tr('You')}</h2><div class="card card--rows">
 <div class="setrow"><div class="me">${avatar(user.name || user.email, 'lg', photoUrl(user.id, user.photo_at, user.avatar))}<div><p class="setrow__label">${esc(user.name)}</p><p class="setrow__desc">${esc(user.email)}</p></div></div>${verifiedPill(user.email_verified_at, tr)}</div>
 <form method="post" action="/app/account/name" class="setrow"><div class="grow">${field({ label: tr('Your name'), name: 'name', value: user.name, description: tr('Friends see it when you invite them.'), error: nameError, attrs: 'required maxlength="40" autocomplete="name"' })}</div><button class="btn small ghost">${tr('Save')}</button></form>
 <div class="setrow"><div><p class="setrow__label">${tr('Profile picture')}</p><p class="setrow__desc">${tr('Only friends you said yes to can see it.')}</p></div><a class="btn small ghost" href="/app/picture?next=/app/account">${tr('Change')}</a></div>
 <div class="setrow"><div><p class="setrow__label" id="lang-l">${tr('Language')}</p></div>${langPick}</div>
+<div class="setrow"><div><p class="setrow__label" id="theme-l">${tr('Appearance')}</p></div>${themePick}</div>
 <div class="setrow"><p class="setrow__desc">${tr('Friends see your name, your picture and that your email is verified. They never see the address itself.')}</p></div>
 ${hosted ? `<div class="setrow"><div><p class="setrow__label">${tr('Plan')}</p><p class="setrow__desc">${tr('What you can send and who your plan covers.')}</p></div><a class="btn small ghost" href="/app/billing">${tr('See my plan')}</a></div>` : ''}</div></section>
-<section class="group" aria-labelledby="quiet-h"><h2 id="quiet-h">${tr('Quiet hours')}</h2><div class="card">
+${hiddenCard(user, tr)}<section class="group" aria-labelledby="quiet-h"><h2 id="quiet-h">${tr('Quiet hours')}</h2><div class="card">
 <form method="post" action="/app/account/quiet" class="quietform">
 <div class="setrow setrow--flush"><div><p class="setrow__label" id="quiet-l">${tr('Quiet hours')}</p><p class="setrow__desc">${tr('Nobody can wake your bot or email you during these hours. Messages wait and arrive when they end.')}</p></div>
 <label class="switch"><input type="checkbox" role="switch" name="on" value="1" aria-labelledby="quiet-l" data-autosave${user.quiet_on ? ' checked' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label></div>
@@ -1048,13 +1690,14 @@ ${quietError ? `<p class="error" role="alert">${esc(quietError)}</p>` : ''}${!us
 <label>${tr('Time zone')}<select name="tz">${Intl.supportedValuesOf('timeZone').map((z) => `<option${z === (user.tz || 'UTC') ? ' selected' : ''}>${z}</option>`).join('')}</select></label></div>
 <div><button class="btn small ghost">${tr('Save times')}</button></div></form>
 ${quietNow ? `<p class="muted small">${tr("It's quiet time now. Messages wait until {time}.", { time: hhmm(user.quiet_end) })}</p>` : ''}</div></section>
+${filesCard(user, tr)}
 <section class="group" aria-labelledby="data-h"><h2 id="data-h">${tr('Your data')}</h2><div class="card card--rows">
 <div class="setrow"><div><p class="setrow__label">${tr('Download my data')}</p><p class="setrow__desc">${tr("Message text is deleted 7 days after delivery. Messages that can't be delivered expire after 7 days. The activity log is kept for 90 days.")}</p></div><a class="btn small ghost" href="/app/account/export">${tr('Download')}</a></div>
 </div></section>
 <section class="group"><div class="card danger-zone"><details class="fold"${error ? ' open' : ''}><summary><span><span class="fold__title">${tr('Delete my account')}</span><span class="fold__sub">${tr('Disconnects your bots and erases message text')}</span></span></summary>
 ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
 <p>${tr("This disconnects your bots, removes your contacts and erases message text. Copies your friends' bots already received stay with them.")}</p>
-<form method="post" action="/app/account/delete" class="stack"><label>${tr('Type {email} to confirm', { email: esc(user.email) })}<input name="confirm" autocomplete="off" required></label><div><button class="btn danger">${tr('Delete my account')}</button></div></form></details></div></section>`, { user, tab: 'account', width: 'read', bar: { title: tr('Account'), sub: tr('You, quiet hours and your data') } });
+<form method="post" action="/app/account/delete" class="stack"><label>${tr('Type {email} to confirm', { email: esc(user.email) })}<input name="confirm" autocomplete="off" required></label><div><button class="btn danger">${tr('Delete my account')}</button></div></form></details></div></section>`, { user, tab: 'account', width: 'read', bar: { title: tr('Settings') } });
   }
 
   function exportData(user) {
@@ -1084,11 +1727,13 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
     tx(() => {
       for (const id of ids) bumpGen(id);
       governance?.deleteDataInTx(ids);
+      files?.forgetBots(ids);
       for (const id of ids) events?.revokeAll(id);
       q(`UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, paused_at = NULL, disconnected_at = coalesce(disconnected_at, ?), display_name = 'Deleted user' WHERE id IN (${ph})`).run(t, ...ids);
       q(`DELETE FROM contacts WHERE owner_bot IN (${ph}) OR peer_bot IN (${ph})`).run(...ids, ...ids);
       erase(`from_bot IN (${ph}) OR to_bot IN (${ph})`, ...ids, ...ids);
       q('UPDATE feedback SET user_id = NULL WHERE user_id = ?').run(user.id); // feedback stays, without who sent it
+      board?.forgetUser(user.id); // board posts stay under "Deleted user", with no more emails
       usage?.forgetUser(user.id);
       q(`UPDATE events SET detail = '{}' WHERE bot IN (${ph})`).run(...ids);
       q(`DELETE FROM invites WHERE from_bot IN (${ph}) AND used_at IS NULL`).run(...ids);
@@ -1105,7 +1750,7 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
   // A basket tells the bot who someone is. By default it handles things itself and asks its owner when it isn't
   // sure; a basket or one person can be set to "asks you first" (drafts wait for a yes), and so is anyone not
   // sorted yet. Everything on these pages is the owner's own say, so it applies directly.
-  const govBots = (u) => inPilot(u) ? liveBots(u).filter((b) => b.vendor !== 'web') : [];
+  const govBots = (u) => inPilot(u) ? liveBots(u).filter((b) => b.vendor !== 'web' && !isSender(b)) : [];
   const pickBot = (u, id) => {
     const bots = govBots(u);
     const b = id == null || id === '' ? bots[0] : bots.find((x) => x.id === Number(id));
@@ -1120,18 +1765,23 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
       + (SELECT count(*) FROM settings_proposals WHERE owner_bot IN (${ph}) AND state = 'PENDING_OWNER' AND expires_at > ?) AS n`).get(...ids, t, ...ids, t).n;
   }
   // A contact's face, shown once they said yes too (like the overview), and what the owner calls them.
-  const faceSql = `SELECT c.peer_bot, c.alias, c.approved_at, pb.handle, back.approved_at AS their_ok, back.blocked AS they_blocked, u.id AS peer_user, u.photo_at, u.avatar
+  const faceSql = `SELECT c.peer_bot, c.alias, c.approved_at, pb.handle, pb.user_id AS peer_owner, back.approved_at AS their_ok, back.blocked AS they_blocked, u.id AS peer_user, u.photo_at, u.avatar
     FROM contacts c JOIN bots pb ON pb.id = c.peer_bot LEFT JOIN users u ON u.id = pb.user_id
     LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot WHERE c.owner_bot = ?`;
   const picOf = (x) => (x.their_ok && !x.they_blocked ? photoUrl(x.peer_user, x.photo_at, x.avatar) : '');
   function peopleOf(b) {
     const s = getSettings(b.id);
-    const extra = new Map(q(faceSql).all(b.id).map((r) => [r.peer_bot, r]));
-    // Contacts still waiting for the owner's yes live on the overview, not here.
+    // The owner's other bots aren't people to sort: they always talk to each other.
+    const extra = new Map(q(faceSql).all(b.id).filter((r) => !b.user_id || r.peer_owner !== b.user_id).map((r) => [r.peer_bot, r]));
+    // Contacts still waiting for the owner's yes are decided on the overview; People shows them faded until then.
     const people = s.contacts.filter((c) => extra.get(c.peer_bot)?.approved_at)
-      .map((c) => ({ ...c, pic: picOf(extra.get(c.peer_bot)) })).sort((x, y) => x.alias.localeCompare(y.alias));
-    return { ...s, people };
+      .map((c) => ({ ...c, pic: picOf(extra.get(c.peer_bot)), waiting: !extra.get(c.peer_bot).their_ok })).sort((x, y) => x.alias.localeCompare(y.alias));
+    const unconfirmed = s.contacts.filter((c) => extra.has(c.peer_bot) && !extra.get(c.peer_bot).approved_at).sort((x, y) => x.alias.localeCompare(y.alias));
+    return { ...s, people, unconfirmed };
   }
+  // Invites nobody has used yet: ones the bot made, and ones saved from Invite a friend (opening it and going back makes nothing).
+  const openInvites = (botIds) => botIds.length ? q(`SELECT i.*, b.handle FROM invites i JOIN bots b ON b.id = i.from_bot WHERE i.from_bot IN (${botIds.map(() => '?').join(',')})
+    AND i.used_at IS NULL AND i.expires_at > ? AND (i.by_owner = 0 OR (i.plain_code IS NOT NULL AND i.saved_at IS NOT NULL)) ORDER BY i.created_at DESC`).all(...botIds, clock()) : [];
   function peerFace(botId, peerId, tr) {
     const r = q(`${faceSql} AND c.peer_bot = ?`).get(botId, peerId);
     if (r) return { alias: r.alias, pic: picOf(r) };
@@ -1144,14 +1794,15 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
   const stickerArt = (name, src) => String(src).startsWith('/stickers/')
     ? `<img class="stk__img" src="${esc(src)}" alt="" draggable="false" decoding="async">`
     : `<span class="stk__img stk__disc">${src ? `<img src="${esc(src)}" alt="" draggable="false" decoding="async">` : `<span class="stk__initial">${esc(String(name || '?').trim().slice(0, 1).toUpperCase())}</span>`}</span>`;
-  const sticker = ({ seed = 0, name, src = '', href = '', label = name, data = '', note = true }) => {
+  const sticker = ({ seed = 0, name, src = '', href = '', label = name, data = '', note = true, wait = false }) => {
     const inner = `${stickerArt(name, src)}${note ? `<span class="stk__name" aria-hidden="true">${esc(String(name).toLowerCase())}</span>` : ''}`;
-    const style = `--tilt:${TILTS[seed % TILTS.length]}deg`;
-    return href ? `<a class="stk" href="${esc(href)}" draggable="false" aria-label="${esc(label)}" style="${style}"${data}>${inner}</a>`
-      : `<span class="stk" role="img" aria-label="${esc(label)}" style="${style}"${data}>${inner}</span>`;
+    const style = `--tilt:${TILTS[seed % TILTS.length]}deg`, cls = wait ? 'stk stk--wait' : 'stk';
+    return href ? `<a class="${cls}" href="${esc(href)}" draggable="false" aria-label="${esc(label)}" style="${style}"${data}>${inner}</a>`
+      : `<span class="${cls}" role="img" aria-label="${esc(label)}" style="${style}"${data}>${inner}</span>`;
   };
-  // Hand-drawn marks from the sticker sheet: a question mark for "asks you first", a cross, an arrow.
+  // Hand-drawn marks from the sticker sheet: a question mark for "asks you first", a clock for "waiting", a cross, an arrow.
   const HAND = {
+    wait: '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8.2 2.4c3.2-.1 5.5 2.4 5.4 5.6-.1 3.1-2.6 5.6-5.7 5.5C4.8 13.4 2.4 11 2.5 7.9 2.6 5 4.9 2.6 7.6 2.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M8 5v3.3l2.2 1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     check: '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.6c1.2 1 2.1 2 2.9 3.2C7.6 8.4 9.9 5.6 13.2 3.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     ask: '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5.6 5.8c.1-1.6 1.3-2.6 2.6-2.5 1.5.1 2.4 1.1 2.3 2.3-.1 1.4-1.4 1.8-2.1 2.6-.4.4-.4 1-.4 1.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="12.6" r="1.05" fill="currentColor"/></svg>',
     x: '<svg viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
@@ -1172,10 +1823,11 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
   })[e.message] || e.message.replace(/^\w/, (x) => x.toUpperCase()).replace(/([^.])$/, '$1.'));
   const basketMenu = (b, g, tr) => `<details class="more bmenu"><summary class="iconbtn" aria-label="${tr('Change the {name} basket', { name: esc(g.name) })}">${ICON.dots}</summary><div class="menu">
 <form method="post" action="/app/people/baskets" class="bmenu__rename"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><label class="sr" for="rn-${g.id}">${tr('New name')}</label><input id="rn-${g.id}" name="name" value="${esc(g.name)}" maxlength="24" required autocomplete="off"><button>${tr('Rename')}</button></form>
-<form method="post" action="/app/people/mode" class="bmenu__mode"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><input type="hidden" name="mode" value="${g.mode === 'asks' ? 'handles' : 'asks'}"><button role="menuitemcheckbox" aria-checked="${g.mode === 'asks'}">${tr('Asks you first')}</button></form>
+<form method="post" action="/app/people/mode" class="bmenu__mode"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><input type="hidden" name="mode" value="${g.mode === 'asks' ? 'handles' : 'asks'}"><button role="menuitemcheckbox" aria-checked="${g.mode === 'asks'}">${tr('Asks you first')}<span class="bmenu__sw" aria-hidden="true"></span></button></form>
 ${g.is_default ? '' : `<form method="post" action="/app/people/baskets" id="del-${g.id}"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="circle" value="${g.id}"><input type="hidden" name="delete" value="1"><button class="danger" data-reveal>${tr('Remove basket')}</button></form>
 <div class="menu__confirm" hidden><p>${tr('Everyone in it goes back to not sorted yet, so your bot asks you first.')}</p><div class="menu__actions"><button type="button" data-unreveal>${tr('Cancel')}</button><button class="danger" form="del-${g.id}">${tr('Remove')}</button></div></div>`}</div></details>`;
   const asksTag = (tr) => `<span class="tag" data-mode="asks">${HAND.ask}<span>${tr('asks you first')}</span></span>`;
+  const waitTag = (n, tr) => `<span class="tag" data-mode="wait">${HAND.wait}<span>${tr.n(n, '{n} waiting|{n} waiting')}</span></span>`;
 
   function peoplePage(user, b, { error = '' } = {}) {
     const tr = T(user);
@@ -1184,21 +1836,29 @@ ${g.is_default ? '' : `<form method="post" action="/app/people/baskets" id="del-
     const ids = `<input type="hidden" name="bot" value="${b.id}">`;
     const count = (n) => tr.n(n, '{n} person|{n} people');
     const where = (c) => (c.circle ? tr('in {basket}', { basket: c.circle.name }) : tr('not sorted yet'));
-    const stk = (c) => sticker({ seed: c.peer_bot, name: c.alias, src: c.pic, href: `/app/people/${b.id}/${c.peer_bot}`, label: `${c.alias}, ${where(c)}`,
+    const waitSaid = (c) => (c.waiting ? `, ${tr('waiting for them')}` : '');
+    const stk = (c) => sticker({ seed: c.peer_bot, name: c.alias, src: c.pic, href: `/app/people/${b.id}/${c.peer_bot}`, label: `${c.alias}, ${where(c)}${waitSaid(c)}`, wait: c.waiting,
       data: ` data-peer="${c.peer_bot}" data-name="${esc(c.alias)}" data-in="${c.circle?.id ?? ''}"` });
-    const loose = s.people.filter((c) => !c.circle);
-    const pool = `<div class="pool" data-drop="" aria-label="${tr('Not sorted yet, {count}', { count: count(loose.length) })}"><span class="pool__label" aria-hidden="true"><span class="hand">${tr('not sorted yet')}</span>${loose.length ? asksTag(tr) : ''}</span>
-${loose.map(stk).join('')}${loose.length ? `<span class="pool__hint hand" aria-hidden="true"><span class="js-only">${tr('drag them into a basket')}</span><span class="no-js">${tr('tap someone to sort them')}</span>${HAND.arrow}</span>`
-  : `<span class="pool__empty hand">${s.people.length ? tr('everyone’s sorted') : tr('nobody here yet')}</span>`}</div>`;
+    // Not connected yet, so not movable: invites nobody has used (in the basket they'll land in), and people waiting for your yes on the overview.
+    const circleNamed = (name) => (name ? s.circles.find((g) => g.name.toLowerCase() === String(name).toLowerCase()) ?? null : null);
+    const held = [...s.unconfirmed.map((c) => ({ seed: c.peer_bot, alias: c.alias, circle: c.circle, href: '/app', said: tr('waiting for your yes') })),
+      ...openInvites([b.id]).filter((i) => !i.alias.startsWith('friend-') || i.notes).map((i) => ({ seed: i.created_at || 0, alias: i.alias.startsWith('friend-') ? i.notes.slice(0, 32) : i.alias, circle: circleNamed(i.basket),
+        href: i.plain_code ? `/app/invites/${i.plain_code}` : '', said: tr('waiting for them') }))];
+    const heldStk = (h) => sticker({ seed: h.seed, name: h.alias, href: h.href, label: `${h.alias}, ${where(h)}, ${h.said}`, wait: true, data: ' data-held' });
+    const waitingIn = (id) => s.people.filter((c) => c.waiting && (c.circle?.id ?? null) === id).length + held.filter((h) => (h.circle?.id ?? null) === id).length;
+    const loose = s.people.filter((c) => !c.circle), looseHeld = held.filter((h) => !h.circle), looseWait = waitingIn(null);
+    const pool = `<div class="pool" data-drop="" aria-label="${tr('Not sorted yet, {count}', { count: count(loose.length) })}"><span class="pool__label" aria-hidden="true"><span class="hand">${tr('not sorted yet')}</span>${loose.length ? asksTag(tr) : ''}${looseWait ? waitTag(looseWait, tr) : ''}</span>
+${loose.map(stk).join('')}${looseHeld.map(heldStk).join('')}${loose.length ? `<span class="pool__hint hand" aria-hidden="true"><span class="js-only">${tr('drag them into a basket')}</span><span class="no-js">${tr('tap someone to sort them')}</span>${HAND.arrow}</span>`
+  : looseHeld.length ? '' : `<span class="pool__empty hand">${s.people.length || held.length ? tr('everyone’s sorted') : tr('nobody here yet')}</span>`}</div>`;
     const basket = (g) => {
-      const inside = s.people.filter((c) => c.circle?.id === g.id);
+      const inside = s.people.filter((c) => c.circle?.id === g.id), waits = waitingIn(g.id);
       return `<section class="basket" data-drop="${g.id}" data-mode="${g.mode}" aria-label="${esc(g.name)}, ${count(inside.length)}${g.mode === 'asks' ? `, ${tr('asks you first')}` : ''}">
-<div class="basket__head"><h2 class="basket__name hand">${esc(g.name)}</h2>${basketMenu(b, g, tr)}</div>${g.mode === 'asks' ? `<div class="basket__tag">${asksTag(tr)}</div>` : ''}
-<div class="pile">${inside.map(stk).join('')}</div></section>`;
+<div class="basket__head"><h2 class="basket__name hand">${esc(g.name)}</h2>${basketMenu(b, g, tr)}</div>${g.mode === 'asks' || waits ? `<div class="basket__tag">${g.mode === 'asks' ? asksTag(tr) : ''}${waits ? waitTag(waits, tr) : ''}</div>` : ''}
+<div class="pile">${inside.map(stk).join('')}${held.filter((h) => h.circle?.id === g.id).map(heldStk).join('')}</div></section>`;
     };
     const add = s.circles.length >= 12 ? '' : `<form method="post" action="/app/people/baskets" class="basket basket--new" style="--span3:span ${3 - (s.circles.length % 3)};--span2:span ${2 - (s.circles.length % 2)}">${ids}<label class="sr" for="nb">${tr('Name a new basket')}</label><input id="nb" name="name" maxlength="24" required autocomplete="off" placeholder="${tr('+ new basket')}"><button class="nb__add">${tr('Add')}</button></form>`;
     const pick = bots.length > 1 ? `<nav class="botpick" aria-label="${tr('Which bot')}">${bots.map((x) => `<a href="/app/people?bot=${x.id}"${x.id === b.id ? ' aria-current="page"' : ''}>@${esc(x.handle)}</a>`).join('')}</nav>` : '';
-    const invite = s.people.length ? '' : `<form method="post" action="/app/invites" class="people__invite"><input type="hidden" name="bot" value="${b.id}"><p>${tr('When someone connects with you, they land here.')}</p><button class="btn small ghost">${ICON.invite}${tr('Invite a friend')}</button></form>`;
+    const invite = s.people.length || held.length ? '' : `<form method="post" action="/app/invites" class="people__invite"><input type="hidden" name="bot" value="${b.id}"><p>${tr('When someone connects with you, they land here.')}</p><button class="btn small ghost">${ICON.invite}${tr('Invite a friend')}</button></form>`;
     const data = JSON.stringify({ bot: b.id, baskets: s.circles.map((g) => ({ id: g.id, name: g.name, mode: g.mode })) }).replace(/</g, '\\u003c');
     return layout(tr('People'), `${error ? alertBox('danger', esc(error), '') : ''}<section class="sheet people" id="people-board" aria-label="${tr('Your baskets')}">
 ${pick}${pool}${invite}<div class="baskets">${s.circles.map(basket).join('')}${add}</div>
@@ -1242,7 +1902,7 @@ ${chip('', tr('not sorted yet'), !c.circle, true)}${s.circles.map((g) => chip(g.
 <form method="post" action="${base}/about" class="pblock" id="about">
 ${field({ label: tr('What you call them'), name: 'alias', value: c.alias, description: tr('Your bot uses this name for them. They never see it.'), attrs: 'required maxlength="32" autocomplete="off"' })}
 <label>${tr('Who they are')}<input name="purpose" maxlength="60" autocomplete="off" value="${esc(c.purpose || '')}" placeholder="${tr('football friend')}"></label>
-<label>${tr('Special instructions for talking to {name}', { name: esc(c.alias) })}<textarea name="notes" maxlength="280" rows="3" placeholder="${tr('Only football. Anything else, ask me.')}">${esc(c.notes || '')}</textarea></label>
+<label>${tr('Instructions for your bot related to {who}', { who: esc(c.alias) })}<textarea name="notes" maxlength="280" rows="3" placeholder="${tr('Only football. Anything else, ask me.')}">${esc(c.notes || '')}</textarea></label>
 <div><button class="btn small ghost">${tr('Save')}</button></div></form>
 <section class="pblock" id="topics" aria-labelledby="topics-h"><h2 class="row-label" id="topics-h">${tr('{name} can ask about', { name: esc(c.alias) })}</h2><div class="tchips">
 ${c.topics.map((t) => `<form method="post" action="${base}/topics" class="tchip"><span>${esc(t)}</span><input type="hidden" name="remove" value="${esc(t)}"><button aria-label="${tr('Stop {name} asking about {topic}', { name: esc(c.alias), topic: esc(t) })}">${HAND.x}</button></form>`).join('')}
@@ -1262,12 +1922,12 @@ ${rules ? `<ul class="rules">${rules}</ul>` : ''}
       : inbound.sealed ? `<p class="ask__theirs ask__theirs--quiet">${tr('End-to-end encrypted, so only your bot could read their message.')}</p>`
       : `<figure class="ask__theirs"><figcaption>${tr("{name}'s bot wrote", { name: esc(who.alias) })}</figcaption><blockquote>${esc(safeText(inbound.text))}</blockquote>${JSON.parse(inbound.links || '[]').map((l) => `<p class="ask__link">${esc(safeText(l))}</p>`).join('')}</figure>`;
     const d = r.draft;
-    const draft = d ? `<div class="ask__draft"><p class="ask__label">${r.state === 'PENDING_OWNER' ? tr("Your bot's draft") : r.state === 'ENQUEUED' ? tr('What was sent') : tr('The answer')}</p><p class="ask__text">${esc(d.text)}</p>${d.links.map((l) => `<a class="ext" href="${esc(l)}" rel="noopener noreferrer nofollow" target="_blank">${esc(l.replace(/^https?:\/\//, '').slice(0, 60))}</a>`).join('')}</div>` : '';
+    const draft = d ? `<div class="ask__draft"><p class="ask__label">${r.state === 'PENDING_OWNER' ? tr("Your bot's draft") : r.state === 'ENQUEUED' ? tr('What was sent') : tr('The answer')}</p><p class="ask__text">${esc(d.text)}</p>${d.links.map((l) => `<a class="ext" href="${esc(l)}" rel="noopener noreferrer nofollow" target="_blank">${esc(l.replace(/^https?:\/\//, '').slice(0, 60))}</a>`).join('')}${(d.files ?? []).map((f) => `<p class="ask__link">${esc(safeText(f.name))} (${f.size >= 1048576 ? `${Math.round(f.size / 104857.6) / 10} MB` : `${Math.max(1, Math.round(f.size / 1024))} KB`})</p>`).join('')}</div>` : '';
     const q_ = r.question ? esc(r.question) : r.inbound_message_id ? tr("{name} wrote to you. Send your bot's answer?", { name: esc(who.alias) }) : tr('Your bot wants to write to {name}. Send it?', { name: esc(who.alias) });
     const act = `/app/requests/${esc(r.id)}`;
     const rev = `<input type="hidden" name="revision" value="${r.revision}">`;
     const own = (action, summary, text) => `<details class="ask__more" name="own-${esc(r.id)}"><summary class="btn ghost">${summary}</summary><form method="post" action="${act}" class="ask__own">${rev}<input type="hidden" name="action" value="${action}">${action === 'edit' && d?.links.length ? `<input type="hidden" name="links" value="${esc(d.links.join('\n'))}">` : ''}
-<label class="sr" for="${action}-${esc(r.id)}">${action === 'edit' ? tr('Your edit') : tr('Your answer')}</label><textarea id="${action}-${esc(r.id)}" name="text" rows="4" maxlength="4000" required${action === 'write' ? ` placeholder="${tr('Write it in your words')}"` : ''}>${esc(text)}</textarea><button class="btn">${tr('Send this')}</button></form></details>`;
+<label class="sr" for="${action}-${esc(r.id)}">${action === 'edit' ? tr('Your edit') : tr('Your answer')}</label><textarea id="${action}-${esc(r.id)}" name="text" rows="4" maxlength="8000" required${action === 'write' ? ` placeholder="${tr('Write it in your words')}"` : ''}>${esc(text)}</textarea><button class="btn">${tr('Send this')}</button></form></details>`;
     const done = {
       ENQUEUED: [tr('sent'), tr('Sent to {name}.', { name: esc(who.alias) })],
       APPROVED: [tr('okay'), tr('Okayed. Your bot sends it end-to-end encrypted the next time it runs.')],
@@ -1334,9 +1994,9 @@ ${p.state === 'PENDING_OWNER' ? `<p class="ask__why">${tr("Your bot can't do thi
       ? `${reqs.length ? `<section class="group" aria-labelledby="replies-h"><h2 id="replies-h">${tr('Replies')}</h2><div class="asks-list">${reqs.map((r) => requestCard(r, tr)).join('')}</div></section>` : ''}
 ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="changes-h">${tr('Changes')}</h2><div class="asks-list">${props.map(([b, p]) => proposalCard(b, p, tr)).join('')}</div></section>` : ''}`
       : `<section class="card">${emptyState('check', tr('Nothing waiting'), tr('When your bot needs your okay, it shows up here.'))}</section>`;
-    return layout(tr('Requests'), `<p class="pnote">${tr('For end-to-end chats, the relay can read drafts you send here for approval.')}</p>${body}`, { user, tab: 'requests', width: 'read', bar: { title: tr('Requests'), sub: tr('What your bot wants you to okay') } });
+    return layout(tr('Requests'), `<p class="pnote">${tr('Drafts you okay here pass through bot2bot, so we can read them, even in end-to-end encrypted chats.')}</p>${body}`, { user, tab: 'requests', width: 'read', bar: { title: tr('Requests') } });
   }
-  const oneRequestPage = (user, r, { error = '' } = {}) => { const tr = T(user); const who = peerFace(r.owner_bot, r.peer_bot, tr).alias; return layout(tr('Request'), `${error ? alertBox('danger', esc(error), '') : ''}<p class="pnote">${tr('For end-to-end chats, the relay can read drafts you send here for approval.')}</p>${requestCard(r, tr)}`,
+  const oneRequestPage = (user, r, { error = '' } = {}) => { const tr = T(user); const who = peerFace(r.owner_bot, r.peer_bot, tr).alias; return layout(tr('Request'), `${error ? alertBox('danger', esc(error), '') : ''}<p class="pnote">${tr('Drafts you okay here pass through bot2bot, so we can read them, even in end-to-end encrypted chats.')}</p>${requestCard(r, tr)}`,
     { user, tab: 'requests', width: 'read', bar: { back: '/app/requests', backLabel: tr('Requests'), title: r.inbound_message_id ? tr('Reply to {name}', { name: who }) : tr('Message to {name}', { name: who }) } }); };
   const oneProposalPage = (user, b, p, { error = '' } = {}) => { const tr = T(user); return layout(tr('[noun]Change'), `${error ? alertBox('danger', esc(error), '') : ''}${proposalCard(b, p, tr)}`,
     { user, tab: 'requests', width: 'read', bar: { back: '/app/requests', backLabel: tr('Requests'), title: tr('A change from your bot') } }); };
@@ -1345,7 +2005,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
   return async function handleApp(req, res, url) {
     const p = url.pathname;
     // With the landing site on the same server, it answers / and /pricing instead of the built-in pages.
-    const isApp = p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || (payments && p === '/billing/stripe') || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || p.startsWith('/i/') || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/');
+    const isApp = p === '/connect/chatgpt' || p === '/connect/send' || p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || (payments && p === '/billing/stripe') || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || (!!boardPages && (p === '/feedback' || p.startsWith('/feedback/'))) || p.startsWith('/i/') || (!!groups && p.startsWith('/g/')) || p === '/founder' || (promo && p.startsWith('/gift/')) || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/')
+      || (!!status && (p === '/status' || p === '/status/' || p === '/status.json' || p === '/status/feed.xml'));
     if (!isApp) return false;
     let tr = translator(reqLang(req));
     try {
@@ -1390,9 +2051,26 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         res.writeHead(303, { location: back.startsWith('/lang/') ? '/login' : back, 'set-cookie': langCookie(lg[1]), 'cache-control': 'no-store' }); res.end();
         return true;
       }
+      // The public status page, the same for everyone (status.mjs), in the language picked at the top or the browser's.
+      // Its JSON and Atom feed are for agents and feed readers.
+      if (status && p.startsWith('/status') && (req.method === 'GET' || req.method === 'HEAD')) {
+        const base = origin || `http://${req.headers.host || 'localhost'}`;
+        if (p === '/status/') { res.writeHead(301, { location: '/status' }); res.end(); return true; }
+        if (p === '/status') return page(res, 200, layout(tr('Status'), status.page(tr), { tr, outWidth: 'status' })), true;
+        const [type, body] = p === '/status.json' ? ['application/json; charset=utf-8', JSON.stringify(status.json(base), null, 2)] : ['application/atom+xml; charset=utf-8', status.feed(base)];
+        res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'x-content-type-options': 'nosniff' });
+        res.end(req.method === 'HEAD' ? undefined : body);
+        return true;
+      }
       if (req.method === 'POST' && !sameOrigin(req)) throw new HttpError(403, 'Please use the website to do that.');
       const user = currentUser(req);
       if (user) tr = T(user);
+      if (p === '/connect/send' && req.method === 'GET') return page(res, 200, sendSetupPage(user, tr, url.searchParams.get('app') || '')), true;
+      if (p === '/connect/chatgpt' && req.method === 'GET') return page(res, 200, chatgptSetupPage(user, tr, url.searchParams.get('invite'))), true;
+      if (boardPages && (p === '/feedback' || p.startsWith('/feedback/'))) {
+        if (await boardPages(req, res, p, url, { user, tr })) return true;
+        throw new HttpError(404, 'Page not found');
+      }
 
       if (p === '/' && req.method === 'GET') return page(res, 200, landing(user, tr)), true;
       if (p === '/pricing' && req.method === 'GET') return page(res, hosted ? 200 : 404, hosted ? pricingPage(user, tr) : layout(tr('Not found'), `<section class="card narrow"><h1>${tr('Not found')}</h1><p>${tr('This server is self-hosted and free.')}</p></section>`, { tr })), true;
@@ -1409,11 +2087,12 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const f = await form(req);
         const email = String(f.email || '').trim().toLowerCase();
         const row = q('SELECT * FROM login_codes WHERE email = ? AND expires_at > ? ORDER BY created_at DESC').get(email, clock());
-        const right = !!row && row.code_hash === sha(String(f.code || '').trim());
+        // A directory reviewer (REVIEW_LOGIN) can't read our emails: their address also takes their own code.
+        const right = !!row && (row.code_hash === sha(String(f.code || '').trim()) || (!!reviewLogin && email === reviewLogin.email && String(f.code || '').trim() === reviewLogin.code));
         // The same code sent twice from the same browser (a double tap, or autofill submitting as you tap) logs in
         // again instead of saying it expired: the first one already did.
         const nonce = cookies(req).b2b_login;
-        if (row?.used_at && right && clock() - row.used_at < 2 * 60_000 && row.browser_hash && nonce && sha(nonce) === row.browser_hash) return finishLogin(res, email, f.next, f.tz, reqLang(req)), true;
+        if (row?.used_at && right && clock() - row.used_at < 2 * 60_000 && row.browser_hash && nonce && sha(nonce) === row.browser_hash) return finishLogin(req, res, email, f.next, f.tz, reqLang(req)), true;
         if (!row || row.used_at) return page(res, 400, loginPage(tr, { email, error: tr('That code expired. Ask for a new one.'), next: f.next })), true;
         if (row.attempts >= 5) return page(res, 400, loginPage(tr, { email, error: tr('Too many wrong tries. Ask for a new code.'), next: f.next })), true;
         if (!right) {
@@ -1421,7 +2100,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           return page(res, 400, loginPage(tr, { email, sent: true, error: tr('Wrong code. Try again.'), next: f.next })), true;
         }
         q('UPDATE login_codes SET used_at = ? WHERE id = ?').run(clock(), row.id);
-        return finishLogin(res, email, f.next, f.tz, reqLang(req)), true;
+        return finishLogin(req, res, email, f.next, f.tz, reqLang(req)), true;
       }
       if (p === '/login/link') {
         // GET only shows a button, so email scanners that open links can't use them up.
@@ -1433,14 +2112,16 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           return page(res, 400, loginPage(tr, { error: tr('Open the link in the same browser where you asked for it, or type the 6-digit code from the email there.') })), true;
         }
         if (req.method !== 'POST') return page(res, 200, layout(tr('Log in'), `<section class="card narrow center"><h1>${tr('Continue to {product}', { product: esc(product) })}</h1>
-<form method="post" action="/login/link"><input type="hidden" name="t" value="${esc(t)}"><button class="btn">${tr('Log in')}</button></form></section>`, { tr })), true;
+<form method="post" action="/login/link"><input type="hidden" name="t" value="${esc(t)}"><button class="btn wide">${tr('Log in')}</button></form></section>`, { tr })), true;
         q('UPDATE login_codes SET used_at = ? WHERE id = ?').run(clock(), row.id);
         // Back to where they were going (a bot's approve link, an invite), like the 6-digit code does.
-        return finishLogin(res, row.email, row.next || '/app', undefined, reqLang(req)), true;
+        return finishLogin(req, res, row.email, row.next || '/app', undefined, reqLang(req)), true;
       }
       if (p === '/logout' && req.method === 'POST') {
         const t = cookies(req).b2b_session; if (t) q('DELETE FROM sessions WHERE token_hash = ?').run(sha(t));
-        res.setHeader('set-cookie', sessionCookie('', 0)); return redirect(res, '/'), true;
+        // Switching accounts mid sign-in (a connected app's consent page): straight to sign-in, then back.
+        const f = await form(req);
+        res.setHeader('set-cookie', sessionCookie('', 0)); return redirect(res, f.next ? `/login?next=${encodeURIComponent(safeNext(f.next))}` : '/'), true;
       }
 
       // Connected app sign-in (OAuth authorize). Needs a logged-in person; they pick which bot the app acts as.
@@ -1448,27 +2129,82 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const params = req.method === 'POST' ? await form(req) : Object.fromEntries(url.searchParams);
         const keep = Object.fromEntries(['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'state', 'scope', 'resource'].map((k) => [k, String(params[k] ?? '')]));
         const client = q('SELECT * FROM oauth_clients WHERE client_id = ?').get(keep.client_id);
-        if (!client || !JSON.parse(client.redirect_uris).includes(keep.redirect_uri)) throw new HttpError(400, 'This app is not registered with this address.');
+        if (!client || !JSON.parse(client.redirect_uris).includes(keep.redirect_uri)) return page(res, 400, layout(tr('Start the connection again'), `<section class="card"><h1>${tr('Start the connection again')}</h1><p>${tr("This link didn't work. Go back to the app you're connecting and select Connect again.")}</p><p class="muted small">${tr('Sign in in the window the app opens. A copied link may not finish the connection.')}</p><a class="btn wide" href="/connect/chatgpt">${tr('Connect dots')}</a></section>`, { tr })), true;
         // Every answer names us as the issuer (RFC 9207), so the app can tell which server it came from.
         const back = (qs) => { const u = new URL(keep.redirect_uri); for (const [k, v] of Object.entries(qs)) u.searchParams.set(k, v); if (keep.state) u.searchParams.set('state', keep.state); u.searchParams.set('iss', origin); return redirect(res, u.toString()), true; };
         if (keep.response_type !== 'code' || keep.code_challenge_method !== 'S256' || keep.code_challenge.length < 43) return back({ error: 'invalid_request', error_description: 'PKCE (S256) and response_type=code are required' });
-        if (keep.resource && ![`${origin}/mcp`, origin, `${origin}/`].includes(keep.resource)) return back({ error: 'invalid_target', error_description: `resource must be ${origin}/mcp` });
+        if (keep.resource && ![`${origin}/mcp`, origin, `${origin}/`, `${origin}/send`].includes(keep.resource)) return back({ error: 'invalid_target', error_description: `resource must be ${origin}/mcp or ${origin}/send` });
+        // Send only (bot2bot.link/send): no bot to pick. The chat gets a sender of its own.
+        const sendOnly = keep.resource === `${origin}/send`;
         if (!user) return redirect(res, `/login?next=${encodeURIComponent(`/oauth/authorize?${new URLSearchParams(keep)}`)}`), true;
-        if (req.method === 'GET') return page(res, 200, authorizePage(user, client, keep)), true;
+        if (req.method === 'GET') return page(res, 200, sendOnly ? sendAuthorizePage(user, client, keep) : authorizePage(user, client, keep)), true;
         if (params.decision !== 'allow') return back({ error: 'access_denied' });
+        if (sendOnly) {
+          const sender = senderBot(user, senderLabel(client.name));
+          linkOwnBots(user.id);
+          const code = token('ac_', 24);
+          q('INSERT INTO oauth_codes (code_hash, client_id, bot_id, redirect_uri, challenge, expires_at, resource) VALUES (?, ?, ?, ?, ?, ?, ?)').run(sha(code), client.client_id, sender.id, keep.redirect_uri, keep.code_challenge, clock() + 5 * 60_000, keep.resource);
+          log(sender.id, 'connector_authorized', { client: client.name.slice(0, 40), send_only: true });
+          tell(user, { what: tr('{app} can send to your bots now', { app: sender.display_name }) });
+          return back({ code });
+        }
+        // Which assistant this is, from the name the app registered with (a hint for setup steps, never for trust).
+        const platform = platformForApp(client.name);
         let bot;
         try {
+          // Send only, picked here by a chat app that didn't say it was connecting to /send (Gemini sends no resource).
+          if (params.bot === 'send') {
+            const sender = senderBot(user, senderLabel(client.name));
+            linkOwnBots(user.id);
+            const code = token('ac_', 24);
+            q('INSERT INTO oauth_codes (code_hash, client_id, bot_id, redirect_uri, challenge, expires_at, resource) VALUES (?, ?, ?, ?, ?, ?, ?)').run(sha(code), client.client_id, sender.id, keep.redirect_uri, keep.code_challenge, clock() + 5 * 60_000, keep.resource || null);
+            log(sender.id, 'connector_authorized', { client: client.name.slice(0, 40), send_only: true });
+            tell(user, { what: tr('{app} can send to your bots now', { app: sender.display_name }) });
+            return back({ code });
+          }
           bot = params.bot && params.bot !== 'new' ? ownBot(user, params.bot) : makeConnectorBot(user, params.handle);
-          if (bot.vendor !== 'connector') throw new HttpError(400, 'Pick one of your connected-app bots.');
+          if ((bot.vendor !== 'connector' && !(isDotApp(client) && wakeOnly(bot))) || isSender(bot)) throw new HttpError(400, 'Pick one of your connected-app bots.');
         } catch (e) { if (e instanceof HttpError) return page(res, 400, authorizePage(user, client, keep, { error: e.message })), true; throw e; }
         if (bot.disconnected_at) q('UPDATE bots SET disconnected_at = NULL WHERE id = ?').run(bot.id);
+        linkOwnBots(user.id);
         const code = token('ac_', 24);
         q('INSERT INTO oauth_codes (code_hash, client_id, bot_id, redirect_uri, challenge, expires_at, resource) VALUES (?, ?, ?, ?, ?, ?, ?)').run(sha(code), client.client_id, bot.id, keep.redirect_uri, keep.code_challenge, clock() + 5 * 60_000, keep.resource || null);
-        // Which assistant this is, from the name the app registered with (a hint for setup steps, never for trust).
-        const platform = /chatgpt|openai/i.test(client.name) ? 'chatgpt' : /openclaw|clawd|moltbot/i.test(client.name) ? 'openclaw' : null;
         if (platform) q('UPDATE bots SET platform = ? WHERE id = ?').run(platform, bot.id);
         log(bot.id, 'connector_authorized', { client: client.name.slice(0, 40) });
         return back({ code });
+      }
+
+      // Gift links (hosted-invites.mjs): a friend's invite with a bonus for both. Signed out, it asks you to sign up first.
+      const gm = promo && p.match(/^\/gift\/([A-Za-z0-9-]{8,10})$/);
+      if (gm) {
+        const code = hostedInvites.normCode(gm[1]);
+        if (req.method === 'GET') {
+          const c = invites.check(user, code);
+          if (c.state === 'mine') return redirect(res, '/app/gifts'), true;
+          return page(res, c.state === 'missing' ? 404 : 200, promo.giftPage(user, tr, code, c)), true;
+        }
+        if (!user) return redirect(res, `/login?next=${encodeURIComponent(`/gift/${code}`)}`), true;
+        try {
+          const r = invites.redeem(user, code);
+          if (!r.again) tell(user, { what: promo.claimed(tr, r.inv.from_name) });
+          return redirect(res, r.again ? '/app/gifts' : '/app'), true;
+        } catch (e) { if (e instanceof HttpError) return page(res, e.status, promo.giftPage(user, tr, code, invites.check(user, code), { error: e.message })), true; throw e; }
+      }
+
+      if (p === '/founder') {
+        const f = founder();
+        if (!f) return page(res, 404, layout(tr('Text the founder'), `<section class="card narrow center"><h1>${tr('Not here right now')}</h1><p><a class="link" href="/feedback">${tr('Write to us on the feedback board')}</a></p>${onward(user, tr)}</section>`, { user, tr })), true;
+        const bots = user ? liveBots(user).filter((b) => b.id !== f.id && b.vendor !== 'web' && !isSender(b)) : [];
+        if (req.method === 'GET') {
+          const c = bots.map((b) => q('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(b.id, f.id)).find(Boolean);
+          return page(res, 200, founderPage(f, user, bots, { tr, done: c ? { already: true, alias: c.alias } : null })), true;
+        }
+        if (!user) return redirect(res, '/login?next=%2Ffounder'), true;
+        const fm = await form(req);
+        const bot = bots.find((b) => b.id === Number(fm.bot));
+        if (!bot) return page(res, 400, founderPage(f, user, bots, { tr, error: tr('Connect your bot first.') })), true;
+        try { return page(res, 200, founderPage(f, user, bots, { tr, done: connectFounder(bot, user) })), true; }
+        catch (e) { if (e instanceof HttpError) return page(res, e.status, founderPage(f, user, bots, { tr, error: e.message })), true; throw e; }
       }
 
       // Invite links work for logged-out visitors too.
@@ -1477,17 +2213,17 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const plain = im[1].toUpperCase();
         const inv = q('SELECT * FROM invites WHERE code_hash = ?').get(sha(plain));
         if (inv && inv.used_at && user && inv.used_by && q('SELECT 1 FROM bots WHERE id = ? AND user_id = ?').get(inv.used_by, user.id)) return redirect(res, '/app'), true;
-        if (!inv || inv.used_at || inv.expires_at < clock()) return page(res, 404, layout(tr('Invitation'), `<section class="card narrow center"><h1>${tr('This invite has expired')}</h1><p>${tr('Ask your friend for a new link.')}</p></section>`, { user, tr })), true;
+        if (!inv || inv.used_at || inv.expires_at < clock()) return page(res, 404, layout(tr('Invitation'), `<section class="card narrow center"><h1>${tr('This invite has expired')}</h1><p>${tr('Ask your friend for a new link.')}</p>${onward(user, tr)}</section>`, { user, tr })), true;
         inv.plain = plain;
         const inviter = q('SELECT b.handle, u.name, u.email_verified_at, b.user_id FROM bots b LEFT JOIN users u ON u.id = b.user_id WHERE b.id = ?').get(inv.from_bot);
-        const bots = user ? liveBots(user).filter((b) => b.id !== inv.from_bot) : [];
+        const bots = user ? liveBots(user).filter((b) => b.id !== inv.from_bot && !isSender(b)) : [];
         if (req.method === 'GET') return page(res, 200, invitePage(inv, inviter, user, bots, { tr })), true;
         if (!user) return redirect(res, `/login?next=${encodeURIComponent(p)}`), true;
         const f = await form(req);
-        if (inviter.user_id === user.id) return page(res, 400, invitePage(inv, inviter, user, bots, { tr, error: tr('That is your own invite.') })), true;
+        if (inviter.user_id === user.id) return page(res, 400, invitePage(inv, inviter, user, bots, { tr, error: tr('That’s your own invite') })), true;
         // The web inbox is off unless an operator turns it on (WEB_INBOX=1): bot2bot is for bots.
         const bot = webInbox && f.web === '1' && !bots.length ? makeWebBot(user) : bots.find((b) => b.id === Number(f.bot));
-        if (!bot) return page(res, 400, invitePage(inv, inviter, user, bots, { tr, error: bots.length ? tr('Pick one of your bots.') : tr('Connect your Grok Bot first.') })), true;
+        if (!bot) return page(res, 400, invitePage(inv, inviter, user, bots, { tr, error: bots.length ? tr('Pick one of your bots.') : tr('Connect your bot first.') })), true;
         let accepted;
         try {
           accepted = routes['POST /v1/invites/accept']({ me: bot, body: { code: plain, alias: String(f.alias || '').trim(), basket: f.basket || null, notes: f.notes ?? null }, byOwner: true });
@@ -1504,17 +2240,41 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return page(res, 200, invitePage(inv, inviter, user, bots, { tr, done: bot.vendor === 'web' ? 'web' : true, basket: accepted?.basket })), true;
       }
 
+      // A member's group link. Signed out, it shows the group and how to connect a bot; joining needs signing in.
+      const gl = groups && p.match(/^\/g\/([A-Za-z0-9]{4}-[A-Za-z0-9]{4})$/);
+      if (groups && p.startsWith('/g/')) {
+        const code = gl ? gl[1].toUpperCase() : '';
+        const link = gl ? groups.linkByCode(code) : null;
+        if (!link) return page(res, 404, layout(tr('Group chat'), `<section class="card narrow center"><h1>${tr('This group link has expired')}</h1><p>${tr('Ask whoever sent it for a new one.')}</p>${onward(user, tr)}</section>`, { user, tr })), true;
+        const bots = user ? groupBots(user) : [];
+        const inIt = bots.find((b) => groups.member(link.group_id, b.id)?.state === 'joined') ?? null;
+        const show = (status, extra = {}) => page(res, status, groupJoinPage(link, user, bots.filter((b) => groups.member(link.group_id, b.id)?.state !== 'joined'), { tr, code, inIt, ...extra }));
+        if (req.method === 'GET') return show(200), true;
+        if (!user) return redirect(res, `/login?next=${encodeURIComponent(p)}`), true;
+        const f = await form(req);
+        const bot = bots.find((b) => b.id === Number(f.bot));
+        if (!bot) return show(400, { error: bots.length ? tr('Pick one of your bots.') : tr('Connect your bot first.') }), true;
+        if (!groups.toolReady(bot)) return show(200, { old: bot }), true;
+        let r;
+        try { r = groups.join(bot, link.group_id, { linkCode: code, basket: f.basket || null, byOwner: true }); }
+        catch (e) { if (e instanceof HttpError) return show(e.status, { error: groupError(e, tr) }), true; throw e; }
+        tell(user, { what: r.connected ? tr('You joined {name} · {who} is a contact now', { name: link.group.name, who: r.connected.alias }) : tr('You joined {name}', { name: link.group.name }) });
+        return redirect(res, `/app/groups/${link.group_id}?bot=${bot.id}`), true;
+      }
+
       // Everything below needs a logged-in user.
       if (!user && cookies(req).b2b_in) res.setHeader('set-cookie', sessionCookie('', 0)); // the session ended elsewhere: drop the marker too
       // Signed in from before the marker existed: add it now, so the site says Platform on the next visit.
       else if (user && !cookies(req).b2b_in) res.setHeader('set-cookie', sessionCookie(cookies(req).b2b_session, SESSION_MS / 1000));
-      if (user) markActive(user.id);
+      if (user) { markActive(user.id); usage?.noteCountry(user.id, req); }
       if (!user) return redirect(res, `/login?next=${encodeURIComponent(p)}`), true;
 
       // No picture yet: pick one first, then carry on to the page they asked for.
-      if (req.method === 'GET' && !hasPicture(user) && /^\/app(\/(activity|inbox|account|billing|people|requests|bots\/\d+))?$/.test(p)) return redirect(res, `/app/picture?next=${encodeURIComponent(p + url.search)}`), true;
-      if (p === '/app' && req.method === 'GET') return page(res, 200, dashboard(user)), true;
-      if (p === '/app/status' && req.method === 'GET') return json(res, 200, { bots: myBots(user).length }), true;
+      if (req.method === 'GET' && !hasPicture(user) && /^\/app(\/(activity|inbox|account|billing|gifts|people|requests|bots\/\d+))?$/.test(p)) return redirect(res, `/app/picture?next=${encodeURIComponent(p + url.search)}`), true;
+      if (p === '/app' && req.method === 'GET') {
+        return page(res, 200, dashboard(user)), true;
+      }
+      if (p === '/app/status' && req.method === 'GET') return json(res, 200, { bots: myBots(user).length, senders: liveBots(user).filter(isSender).length }), true;
 
       const lm = p.match(/^\/app\/link\/([A-Za-z0-9]{4}-[A-Za-z0-9]{4})$/);
       if (lm) {
@@ -1529,6 +2289,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           }
           try { approveJoin(user, plain, f); }
           catch (e) { if (e instanceof HttpError) return page(res, e.status, linkPage(user, joinRequest(plain), plain, { error: e.message, handle: f.handle })), true; throw e; }
+          linkOwnBots(user.id);
           return redirect(res, `/app/link/${plain}`), true;
         }
       }
@@ -1555,8 +2316,11 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return page(res, 200, addBotForm(user)), true;
       }
       if (p === '/app/bots/cancel' && req.method === 'POST') {
+        const f = await form(req);
+        const was = q('SELECT handle FROM enroll_codes WHERE user_id = ? AND used_at IS NULL AND expires_at > ?').get(user.id, clock());
         q('UPDATE enroll_codes SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(clock(), user.id);
-        tell(user, { what: tr('Setup cancelled') });
+        // Undo starts the same setup again, with a fresh code.
+        tell(user, { what: tr('Setup cancelled'), undo: was && f.undo !== '1' ? undoForm('/app/bots', { handle: was.handle }) : null });
         return redirect(res, '/app'), true;
       }
 
@@ -1565,12 +2329,15 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const sub = bm[2] || '';
         const b = ownBot(user, bm[1], { removed: sub === '/restore' });
         if (!sub && req.method === 'GET') return page(res, 200, botPage(user, b)), true;
-        if (sub === '/state' && req.method === 'GET') return json(res, 200, { verified: !!b.doorbell_verified_at, last_ring_status: b.last_ring_status }), true;
+        if (sub === '/state' && req.method === 'GET') return json(res, 200, { verified: !!b.doorbell_verified_at, configured: !!b.webhook_url, watching: b.doorbell_kind === 'watch' && watching(b), last_ring_status: b.last_ring_status }), true;
         if (sub === '/doorbell' && req.method === 'POST') {
           const f = await form(req);
           try {
+            // The two boxes the wrong way round (the key in the address box) is an easy slip: take them as meant.
+            const looksUrl = (v) => /^https?:\/\//i.test(String(v || '').trim());
+            if (!looksUrl(f.url) && looksUrl(f.key)) [f.url, f.key] = [f.key, f.url];
             const { url: urlOk, kind } = doorbellTarget(String(f.url || '').trim());
-            const key = String(f.key || '').trim();
+            const key = webhookKey(f.key);
             if (key.length < 8 || key.length > 512 || /[\r\n]/.test(key)) throw new HttpError(400, 'That key looks wrong. Copy it again from the Webhook window.');
             // Re-check after reading the form: a disconnect that happened meanwhile wins.
             const saved = tx(() => {
@@ -1659,6 +2426,15 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           tell(user, { what: every ? tr.n(every, 'Backs up every {n} hour|Backs up every {n} hours') : tr('Backups off'), undo: f.undo === '1' || every === b.backup_every_h ? null : undoForm(`/app/bots/${b.id}/backup`, { every: b.backup_every_h ?? 0 }) });
           return redirect(res, `/app/bots/${b.id}#backup`), true;
         }
+        if (sub === '/updates' && req.method === 'POST') {
+          const f = await form(req);
+          const was = (b.wanted_channel || b.tool_channel) === 'nightly';
+          const on = f.on === '1';
+          q('UPDATE bots SET wanted_channel = ? WHERE id = ?').run(on ? 'nightly' : 'stable', b.id);
+          log(b.id, 'tool_channel', { channel: on ? 'nightly' : 'stable', by: 'owner' });
+          tell(user, { what: on ? tr('Nightly updates on') : tr('Nightly updates off'), undo: f.undo === '1' || on === was ? null : undoForm(`/app/bots/${b.id}/updates`, was ? { on: '1' } : {}) });
+          return redirect(res, `/app/bots/${b.id}#updates`), true;
+        }
         if (sub === '/test' && req.method === 'POST') {
           if (b.disconnected_at || b.vendor === 'web') return json(res, 409, { error: tr('This bot is not connected.') }), true;
           try { const r = await routes['POST /v1/doorbell/test']({ me: b, byOwner: true }); return json(res, 200, r), true; }
@@ -1713,6 +2489,149 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           tell(user, { what: tr('Removed {name}', { name: c.alias }) });
         } else throw new HttpError(404, 'Page not found');
         return redirect(res, '/app'), true;
+      }
+
+      // Group chats: making one, its page, and every change made there. Each change is for one of your bots that's in it.
+      if (groups && p === '/app/groups/new') {
+        const bots = groupBots(user);
+        if (!bots.length) throw new HttpError(404, 'Connect your bot first.');
+        const pick = (id) => bots.find((b) => b.id === Number(id)) ?? (id ? null : bots[0]);
+        if (req.method === 'GET') { const b = pick(url.searchParams.get('bot')) ?? bots[0]; return page(res, 200, groupNewPage(user, b)), true; }
+        if (req.method !== 'POST') throw new HttpError(404, 'Page not found');
+        const f = await form(req);
+        const b = pick(f.bot);
+        if (!b) throw new HttpError(404, 'Bot not found');
+        const members = pickedPeers(f);
+        let made;
+        try { made = groups.create(b, { name: f.name, members, via: 'web' }); }
+        catch (e) { if (e instanceof HttpError) return page(res, e.status, groupNewPage(user, b, { error: groupError(e, tr), name: String(f.name || ''), picked: members })), true; throw e; }
+        const n = made.invited.filter((x) => x.invited).length;
+        tell(user, { what: n ? tr.n(n, 'Made {name} and invited {n} person|Made {name} and invited {n} people', { name: made.group.name }) : tr('Made {name}', { name: made.group.name }),
+          undo: undoForm(`/app/groups/${made.group.id}/end`, { bot: b.id }) });
+        return redirect(res, `/app/groups/${made.group.id}?bot=${b.id}`), true;
+      }
+      const gr = groups && p.match(/^\/app\/groups\/(\d+)(?:\/(join|decline|wake|hide|rename|link|reset-links|admins-add|add|contact|remove|admin|send|leave|end))?$/);
+      if (gr) {
+        const gid = Number(gr[1]), sub = gr[2] || '';
+        if (!sub && req.method === 'GET') return page(res, 200, groupPage(user, groupSeat(user, gid, url.searchParams.get('bot')).b, gid)), true;
+        if (!sub || req.method !== 'POST') throw new HttpError(404, 'Page not found');
+        const f = await form(req);
+        const { b, row } = groupSeat(user, gid, f.bot);
+        const g = groups.group(gid);
+        const here = `/app/groups/${gid}?bot=${b.id}`;
+        const again = f.undo === '1';
+        const done = (to) => redirect(res, f.back ? safeNext(f.back) : to);
+        const ids = { bot: b.id };
+        const someone = (id) => q('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(b.id, id)?.alias ?? ownerName(id);
+        try {
+          if (sub === 'join') {
+            // A tool too old to read the group updates first; the group page shows the message for it.
+            if (!groups.toolReady(b)) return redirect(res, here), true;
+            groups.join(b, gid, { byOwner: true });
+            tell(user, { what: tr('You joined {name}', { name: g.name }) });
+            return redirect(res, here), true;
+          }
+          if (sub === 'decline') {
+            groups.decline(b, gid);
+            tell(user, { what: tr('You said no to {name}', { name: g.name }) });
+            return done('/app'), true;
+          }
+          if (sub === 'wake') {
+            const was = row.wake;
+            groups.settings(b, gid, { wake: String(f.wake || '') });
+            tell(user, { what: wakeSaid(f.wake, tr), undo: again || was === f.wake ? null : undoForm(`/app/groups/${gid}/wake`, { ...ids, wake: was }) });
+            return redirect(res, here), true;
+          }
+          if (sub === 'hide') {
+            const on = f.on === '1';
+            groups.settings(b, gid, { hidden: on });
+            tell(user, { what: on ? tr('{name} is hidden from the overview', { name: g.name }) : tr('{name} is back on the overview', { name: g.name }),
+              undo: again ? null : undoForm(`/app/groups/${gid}/hide`, { ...ids, ...(on ? {} : { on: '1' }), back: f.back || (on ? here : '') }) });
+            // Hidden: back to the overview, where it's gone. Shown again: where you were.
+            return done(on ? '/app' : here), true;
+          }
+          if (sub === 'rename') {
+            try { groups.settings(b, gid, { name: f.name }); }
+            catch (e) { if (e instanceof HttpError && e.status === 400) return page(res, 400, groupPage(user, b, gid, { nameError: tr('A group name is 1 to 40 characters.') })), true; throw e; }
+            const now_ = groups.group(gid).name;
+            if (now_ !== g.name) tell(user, { what: tr('Renamed to {name}', { name: now_ }), undo: again ? null : undoForm(`/app/groups/${gid}/rename`, { ...ids, name: g.name }) });
+            return redirect(res, here), true;
+          }
+          if (sub === 'link') {
+            groups.link(b, gid);
+            tell(user, { what: tr('Invite link ready') });
+            return redirect(res, `${here}#invite`), true;
+          }
+          if (sub === 'reset-links') {
+            groups.settings(b, gid, { reset_links: true });
+            tell(user, { what: tr('Invite links turned off') });
+            return redirect(res, here), true;
+          }
+          if (sub === 'admins-add') {
+            const on = f.on === '1';
+            groups.settings(b, gid, { only_admins_add: on });
+            tell(user, { what: on ? tr('Only admins can add people') : tr('Everyone can add people'), undo: again ? null : undoForm(`/app/groups/${gid}/admins-add`, { ...ids, ...(on ? {} : { on: '1' }) }) });
+            return redirect(res, here), true;
+          }
+          if (sub === 'add') {
+            const who = pickedPeers(f);
+            if (!who.length) throw new HttpError(400, 'Pick someone to add.');
+            const n = groups.add(b, gid, who, { via: 'web' }).filter((x) => x.invited).length;
+            tell(user, { what: tr.n(n, '{n} person invited|{n} people invited') });
+            return redirect(res, here), true;
+          }
+          if (sub === 'contact') {
+            const peer = Number(f.peer);
+            const r = groups.requestContact(b, peer, gid);
+            const name = someone(peer);
+            tell(user, r.already ? { what: tr('{name} is already a contact', { name }) } : { what: tr('Asked {name} to connect', { name }), undo: undoForm('/app/contacts/remove', { bot: b.id, peer }) });
+            return redirect(res, here), true;
+          }
+          if (sub === 'remove') {
+            const peer = Number(f.member);
+            groups.remove(b, gid, String(peer));
+            tell(user, { what: tr('Removed {name} from the group', { name: someone(peer) }) });
+            return redirect(res, here), true;
+          }
+          if (sub === 'admin') {
+            const peer = Number(f.member), on = f.on === '1';
+            groups.setAdmin(b, gid, String(peer), on);
+            tell(user, { what: on ? tr('{name} is an admin now', { name: someone(peer) }) : tr('{name} is no longer an admin', { name: someone(peer) }),
+              undo: again ? null : undoForm(`/app/groups/${gid}/admin`, { ...ids, member: peer, ...(on ? {} : { on: '1' }) }) });
+            return redirect(res, here), true;
+          }
+          if (sub === 'send') {
+            const choices = String(f.choices || '').split(',').map((x) => x.trim()).filter(Boolean);
+            const links = String(f.link || '').trim() ? [String(f.link).trim()] : [];
+            groups.send(b, gid, { kind: choices.length ? 'ask' : 'note', text: String(f.text || ''), links, choices }, { ownerWeb: true });
+            tell(user, { what: tr('Sent to the group') });
+            return redirect(res, here), true;
+          }
+          if (sub === 'leave') {
+            groups.leave(b, gid);
+            tell(user, { what: tr('You left {name}', { name: g.name }) });
+            return redirect(res, '/app'), true;
+          }
+          if (sub === 'end') {
+            groups.end(b, gid);
+            tell(user, { what: tr('Ended {name}', { name: g.name }) });
+            return redirect(res, '/app'), true;
+          }
+        } catch (e) { if (e instanceof HttpError && e.status !== 404) return page(res, e.status, groupPage(user, b, gid, { error: groupError(e, tr) })), true; throw e; }
+      }
+      // A basket hidden from the overview's friends list (or shown again). Its people stay as they are.
+      if (p === '/app/baskets/hide' && req.method === 'POST') {
+        const f = await form(req);
+        const ids = myBots(user).map((b) => b.id);
+        const ph = ids.map(() => '?').join(',') || 'NULL';
+        const key = String(f.basket || '');
+        const g = q(`SELECT name FROM circles WHERE owner_bot IN (${ph}) AND name_key = ?`).get(...ids, key);
+        if (!g) throw new HttpError(404, 'Basket not found');
+        const on = f.on === '1';
+        q(`UPDATE circles SET hidden = ? WHERE owner_bot IN (${ph}) AND name_key = ?`).run(on ? 1 : 0, ...ids, key);
+        tell(user, { what: on ? tr('{name} is hidden from the overview', { name: g.name }) : tr('{name} is back on the overview', { name: g.name }),
+          undo: f.undo === '1' ? null : undoForm('/app/baskets/hide', { basket: key, ...(on ? {} : { on: '1' }), back: f.back || '' }) });
+        return redirect(res, f.back ? safeNext(f.back) : '/app'), true;
       }
 
       if (p === '/app/pause' && req.method === 'POST') {
@@ -1888,6 +2807,16 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return redirect(res, `/app/inbox#c-${c.peer_bot}`), true;
       }
 
+      if (promo && p === '/app/gifts' && req.method === 'GET') return page(res, 200, promo.page(user, tr)), true;
+      if (promo && p === '/app/gifts/redeem' && req.method === 'POST') {
+        const f = await form(req);
+        try {
+          const r = invites.redeem(user, f.code);
+          if (!r.again) tell(user, { what: promo.claimed(tr, r.inv.from_name) });
+        } catch (e) { if (e instanceof HttpError) return page(res, e.status, promo.page(user, tr, { error: e.message, code: String(f.code || '').slice(0, 12) })), true; throw e; }
+        return redirect(res, '/app/gifts'), true;
+      }
+
       if (p === '/app/billing' && req.method === 'GET') {
         if (!hosted) return redirect(res, '/app'), true;
         return page(res, 200, billingPage(user, { paid: url.searchParams.get('paid') === '1' })), true;
@@ -1960,7 +2889,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       }
       if (p === '/app/feedback' && req.method === 'GET') {
         return page(res, 200, layout(tr('Send feedback'), `<section class="card"><form method="post" action="/app/feedback" class="stack" style="margin:0"><input type="hidden" name="via" value="page">${feedbackFields(tr, { question: questionFor(user) })}
-<div><button class="btn">${tr('Send')}</button></div></form></section>`, { user, tr, width: 'read', bar: { back: '/app', title: tr('Send feedback'), sub: tr("Tell us what works, what doesn't, and what you wish it did.") } })), true;
+<div><button class="btn">${tr('Send')}</button></div></form></section>${boardPages ? `<p class="muted center">${tr('Got an idea or found a bug? <a class="link" href="/feedback">Post it on the board</a>, where others can vote for it.')}</p>` : ''}`, { user, tr, width: 'read', bar: { back: '/app', title: tr('Send feedback') } })), true;
       }
       if (p === '/app/feedback' && req.method === 'POST') {
         const f = await form(req);
@@ -2001,6 +2930,14 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         tell(user, { what: tr('Language saved'), undo: f.undo === '1' || lang === was ? null : undoForm('/app/account/lang', { lang: was }) });
         return redirect(res, '/app/account'), true;
       }
+      // Light, Dark, or (empty) follow the device.
+      if (p === '/app/account/theme' && req.method === 'POST') {
+        const f = await form(req);
+        const was = user.theme || '', theme = ['light', 'dark'].includes(f.theme) ? f.theme : '';
+        q('UPDATE users SET theme = ? WHERE id = ?').run(theme || null, user.id);
+        tell(user, { what: tr('Appearance saved'), undo: f.undo === '1' || theme === was ? null : undoForm('/app/account/theme', { theme: was }) });
+        return redirect(res, '/app/account'), true;
+      }
       if (p === '/app/account/quiet' && req.method === 'POST') {
         const f = await form(req);
         const start = parseHhmm(f.start), end = parseHhmm(f.end);
@@ -2010,6 +2947,16 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           undo: f.undo === '1' ? null : undoForm('/app/account/quiet', { ...(user.quiet_on ? { on: '1' } : {}), start: hhmm(user.quiet_start ?? 1320), end: hhmm(user.quiet_end ?? 480), tz: user.tz || f.tz }) });
         if (f.on !== '1' || !quietUntil({ ...user, quiet_on: f.on === '1' ? 1 : 0, quiet_start: start, quiet_end: end, tz: f.tz }, clock())) for (const b of liveBots(user)) release(b.id);
         return redirect(res, '/app/account'), true;
+      }
+      if (p === '/app/account/files' && req.method === 'POST') {
+        if (!files?.inAlpha(user)) throw new HttpError(404, 'Page not found');
+        const f = await form(req);
+        const on = f.on === '1';
+        const was = files.isOn(user);
+        files.setOn(user, on);
+        log(null, 'files_switch', { user: user.id, on });
+        tell(user, { what: on ? tr('Sending files on') : tr('Sending files off'), undo: f.undo === '1' || on === was ? null : undoForm('/app/account/files', was ? { on: '1' } : {}) });
+        return redirect(res, '/app/account#files'), true;
       }
       if (p === '/app/account/export' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'content-disposition': `attachment; filename="${product}-export.json"` });
@@ -2080,7 +3027,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
 
       throw new HttpError(404, 'Page not found');
     } catch (e) {
-      if (e instanceof HttpError) { page(res, e.status, layout(tr('Error'), `<section class="card narrow"><h1>${e.status === 404 ? tr('Not found') : tr('Something went wrong')}</h1><p>${esc(tr.msg(e.message))}</p><a class="btn" href="/app">${tr('Back')}</a></section>`, { tr })); return true; }
+      if (e instanceof HttpError) { page(res, e.status, layout(tr('Error'), `<section class="card narrow center"><h1>${e.status === 404 ? tr('This page isn&#39;t here') : tr('Something went wrong')}</h1><p>${e.message === 'Page not found' ? tr('The link may be old, or the page has moved.') : esc(tr.msg(e.message))}</p>${onward(cookies(req).b2b_in, tr)}</section>`, { tr })); return true; }
       throw e;
     }
   };
@@ -2135,6 +3082,8 @@ const ICON = {
   inbox: svg('<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/>'),
   person: svg('<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>'),
   card: svg('<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>'),
+  gift: svg('<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7M7.5 8a2.5 2.5 0 0 1 0-5C9.5 3 12 8 12 8s2.5-5 4.5-5a2.5 2.5 0 0 1 0 5"/>'),
+  list: svg('<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>'),
   people: svg('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>'),
   invite: svg('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/>'),
   plus: svg('<path d="M5 12h14M12 5v14"/>'),
@@ -2142,16 +3091,50 @@ const ICON = {
   logout: svg('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>'),
   alert: svg('<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>'),
   check: svg('<path d="M20 6 9 17l-5-5"/>'),
+  pen: svg('<path d="M21.17 6.81a1 1 0 0 0-3.98-3.98L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"/><path d="m15 5 4 4"/>'),
   back: svg('<path d="m15 18-6-6 6-6"/>'),
   dots: svg('<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>', true),
   chev: svg('<path d="m9 18 6-6-6-6"/>'),
   out: svg('<path d="M7 17 17 7M7 7h10v10"/>'),
   refresh: svg('<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>'),
   chat: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>'),
+  bulb: svg('<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.7.5 1.1 1.3 1.1 2.2h5c0-.9.4-1.7 1.1-2.2A6 6 0 0 0 12 3Z"/>'),
   copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
   updown: svg('<path d="m7 15 5 5 5-5M7 9l5-5 5 5"/>'),
   chevDown: svg('<path d="m6 9 6 6 6-6"/>'),
   arrowUp: svg('<path d="M12 19V5M5 12l7-7 7 7"/>'),
+  bell: svg('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'),
+  bellOn: svg('<path fill="currentColor" d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="M2 8.5c0-2.2.7-4.3 2-6"/><path d="M22 8.5a10 10 0 0 0-2-6"/>'),
+  bellOff: svg('<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/>'),
+};
+// Where a bot runs, as the assistant's own mark (the same single-colour marks as the site's Works with row):
+// Grok (Lobe Icons, MIT), OpenAI's Blossom (Simple Icons, CC0, unaltered), OpenClaw's lobster (openclaw.ai, MIT).
+// Claude Code gets Claude's mark, Codex the Codex app's and Cursor its cube (Lobe Icons, MIT), as on the site; Hermes Agent Nous Research's mark
+// (its own icon too; Lobe Icons, MIT). Other apps get a plug, the web inbox a browser window.
+// Chat apps that add bot2bot send as a custom MCP server, in the order the setup page and dashboard list them.
+// Microsoft Copilot isn't here: only a company admin can add a server to it, with a client secret we don't issue.
+const CHAT_APPS = [['chatgpt', 'ChatGPT'], ['claude', 'Claude'], ['gemini', 'Gemini'], ['grok', 'Grok'], ['perplexity', 'Perplexity'], ['lechat', 'Le Chat']].map(([key, label]) => ({ key, label }));
+const MARK = {
+  chatgpt: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>',
+  // Mistral's mark for Le Chat (Simple Icons, CC0).
+  lechat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M17.143 3.429v3.428h-3.429v3.429h-3.428V6.857H6.857V3.43H3.43v13.714H0v3.428h10.286v-3.428H6.857v-3.429h3.429v3.429h3.429v-3.429h3.428v3.429h-3.428v3.428H24v-3.428h-3.43V3.429z"/></svg>',
+  perplexity: `<svg viewBox="${ASSISTANT.perplexity.mark.viewBox}" aria-hidden="true">${ASSISTANT.perplexity.mark.body}</svg>`,
+  gemini: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81"/></svg>',
+  // OpenAI's dots mark: the ring from openai.com/index/introducing-dots, shape unaltered, single colour.
+  dots: '<svg viewBox="0 0 80.0781 80.0781" aria-hidden="true"><path fill="currentColor" d="M40.0391 0C62.152 0 80.0781 17.9261 80.0781 40.0391C80.0781 62.152 62.152 80.0781 40.0391 80.0781C17.9261 80.0781 0 62.152 0 40.0391C0 17.9261 17.9261 0 40.0391 0ZM40.0391 24.1992C31.2907 24.1992 24.1992 31.2907 24.1992 40.0391C24.1992 48.7874 31.2907 55.8789 40.0391 55.8789C48.7874 55.8789 55.8789 48.7874 55.8789 40.0391C55.8789 31.2907 48.7874 24.1992 40.0391 24.1992Z"/></svg>',
+  grok: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815"/></svg>',
+  openclaw: '<svg viewBox="0 0 120 120" aria-hidden="true"><g fill="currentColor"><path d="M60 10C30 10 15 35 15 55c0 20 15 40 30 45v10h10v-10s5 2 10 0v10h10v-10c15-5 30-25 30-45 0-20-15-45-45-45Z"/><path d="M20 45C5 40 0 50 5 60s15 5 20-5c3-7 0-10-5-10Z"/><path d="M100 45c15-5 20 5 15 15s-15 5-20-5c-3-7 0-10 5-10Z"/></g><g fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"><path d="M45 15Q35 5 30 8"/><path d="M75 15Q85 5 90 8"/></g><g fill="var(--mark-bg, var(--surface))"><circle cx="45" cy="35" r="6"/><circle cx="75" cy="35" r="6"/></g></svg>',
+  claude: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/></svg>',
+  codex: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"/></svg>',
+  cursor: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z"/></svg>',
+  // T3 Code's own one-colour mark, from the nav on t3.codes, padded to a square.
+  t3code: '<svg viewBox="15.5309 18.28 94.3941 94.3941" aria-hidden="true"><path fill="currentColor" d="M33.4509 93V47.56H15.5309V37H64.3309V47.56H46.4109V93H33.4509ZM86.7253 93.96C82.832 93.96 78.9653 93.4533 75.1253 92.44C71.2853 91.3733 68.032 89.88 65.3653 87.96L70.4053 78.04C72.5386 79.5867 75.0186 80.8133 77.8453 81.72C80.672 82.6267 83.5253 83.08 86.4053 83.08C89.6586 83.08 92.2186 82.44 94.0853 81.16C95.952 79.88 96.8853 78.12 96.8853 75.88C96.8853 73.7467 96.0586 72.0667 94.4053 70.84C92.752 69.6133 90.0853 69 86.4053 69H80.4853V60.44L96.0853 42.76L97.5253 47.4H68.1653V37H107.365V45.4L91.8453 63.08L85.2853 59.32H89.0453C95.9253 59.32 101.125 60.8667 104.645 63.96C108.165 67.0533 109.925 71.0267 109.925 75.88C109.925 79.0267 109.099 81.9867 107.445 84.76C105.792 87.48 103.259 89.6933 99.8453 91.4C96.432 93.1067 92.0586 93.96 86.7253 93.96Z"></path></svg>',
+  hermes: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M5.938 12.835c.127-.039.285.02.373.143.028.038.036.092.046.14.003.014-.02.033-.04.05-.124-.098-.24-.194-.354-.291-.011-.01-.016-.027-.025-.042zM8.396 9.412c.195-.032.39-.06.588-.05a.54.54 0 01.148.026c.202.071.402.147.601.224.028.01.05.036.075.055l-.013.027a9.203 9.203 0 01-.26-.089c-.115-.038-.213-.077-.315-.098-.25-.05-.25-.046-.292-.014l.574.144c.275.139.55.276.823.417.042.022.09.057.107.098.026.06.063.076.117.072.066-.006.132-.017.213-.027l-.04.086c.051.08.142.02.216.064-.074.13-.247.09-.334.199l.061.074-.12.087c0 .106-.038.168-.306.243l.026.085-.196.042.07.124h-.25l-.007.137c-.081-.01-.161-.018-.244-.027l-.053.123c-.027-.008-.052-.011-.073-.023-.067-.038-.128-.056-.195.006-.019.017-.063.014-.093.008-.026-.006-.05-.029-.07-.042-.11.095-.11.095-.208.003-.057.046-.12.074-.186.011-.063.027-.123-.02-.178-.014-.07.007-.097-.035-.133-.07l-.13.033c-.013-.236-.194-.19-.34-.203.005-.072.05-.092.095-.094a.474.474 0 01.159.022c.164.05.32.12.496.138.203.021.405.029.601-.015.265-.059.52-.149.707-.365.049-.056.083-.127.117-.195.019-.038.02-.084-.02-.116a1.397 1.397 0 00-.382-.217c.024.12-.031.182-.115.221 0 .014-.004.025 0 .03.08.115.084.16-.007.267a1.39 1.39 0 01-.218.211.477.477 0 01-.641-.05 1.36 1.36 0 01-.133-.152c-.078-.107-.076-.108-.033-.236-.165-.08-.128-.226-.104-.364.008-.05.028-.096.049-.163-.04.014-.067.017-.087.032a.897.897 0 00-.316.357c-.007.016-.01.034-.02.047-.012.015-.034.038-.045.035-.02-.006-.037-.027-.05-.045-.008-.012-.007-.032-.012-.057h-.126l.053-.172a14.82 14.82 0 00-.039-.049l.11-.284c-.06.026-.091.044-.124.051-.03.007-.064 0-.095 0 0-.031-.01-.07.004-.092.149-.22.305-.428.593-.476z"/><path fill="currentColor" fill-rule="evenodd" d="M8.06 10.788c-.003-.038-.004-.075.037-.062.016.006.034.048.028.067-.01.04-.038.032-.064-.005z"/><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M11.981.009c.226-.012.453-.011.679 0 .247.01.495.024.74.062.401.064.798.157 1.19.273.463.138.92.299 1.356.511a7.31 7.31 0 012.948 2.642c.292.469.536.963.739 1.479.219.556.446 1.11.623 1.683.204.654.329 1.326.458 1.997.097.504.182 1.01.29 1.511.156.722.329 1.44.494 2.16.186.812.4 1.615.63 2.415.102.355.193.713.282 1.072.11.436.202.876.254 1.323.031.278.066.557.073.837a7.56 7.56 0 01-.017.88c-.037.413-.1.818-.226 1.212a5.017 5.017 0 01-.915 1.649l-.13.156.018.023c.043-.023.088-.041.127-.068.2-.138.373-.307.531-.49.4-.46.721-.973.975-1.529a3.59 3.59 0 00.325-1.72c-.024-.424-.097-.834-.3-1.213-.013-.027-.015-.06-.03-.121.05.035.082.048.101.072.107.13.22.258.315.398.33.494.46 1.052.486 1.64a3.75 3.75 0 01-.47 1.97c-.36.655-.887 1.14-1.526 1.506-.193.111-.394.21-.595.308-.157.078-.248.211-.318.365a.522.522 0 00-.033.406.359.359 0 01.013.139c-.005.077-.077.155-.14.162-.054.006-.125-.043-.15-.116a1.206 1.206 0 01-.06-.233c-.04-.314-.155-.6-.308-.87a3.906 3.906 0 00-.73-.91 2.129 2.129 0 00-.897-.524 4.093 4.093 0 00-.692-.131c-.075-.008-.15-.04-.22.01.18.06.363.11.538.18.434.173.82.43 1.18.728.308.255.58.543.794.884.098.155.186.315.227.496.027.123.042.25.067.375.013.062-.002.109-.053.144-.047.033-.122.034-.163-.01a.455.455 0 01-.08-.14c-.03-.073-.038-.159-.078-.225a7.314 7.314 0 00-1.423-1.664c-.16-.137-.329-.26-.537-.323-.376-.114-.753-.203-1.15-.154-.213.025-.427.032-.64.053a1.6 1.6 0 00-.736.278 5.14 5.14 0 00-.834.72c-.329.342-.642.699-.955 1.055-.136.155-.264.319-.314.531a5.227 5.227 0 00-.012.051.096.096 0 01-.09.076h-.31c-.046 0-.082-.048-.072-.094.023-.108.045-.216.07-.324.075-.325.19-.635.368-.917.024-.039.04-.088.104-.08l.01.049.027.077c.28-.435.571-.834.996-1.135.283-.204.584-.378.89-.55a.196.196 0 00-.098-.002c-.162.043-.325.084-.485.134-.402.124-.764.33-1.11.566-.147.1-.298.193-.414.333a7.314 7.314 0 00-1.07 1.767.845.845 0 00-.04.12.075.075 0 01-.072.056h-.494c-.04 0-.062-.051-.036-.082.123-.14.246-.282.377-.415.275-.281.58-.532.777-.884.027-.048.063-.09.095-.135.238-.333.54-.607.818-.902.082-.086.175-.16.26-.24.029-.027.053-.057.079-.085l-.018-.025-.135.041c-.034.017-.07.031-.102.05-.248.144-.494.292-.743.433-.408.23-.825.439-1.209.711-.281.2-.591.358-.889.533-.02.012-.044.015-.08.028-.015-.135.143-.201.108-.336-.033.014-.064.02-.085.038-.111.096-.227.19-.328.296-.148.157-.284.325-.425.488-.125.143-.25.286-.373.431A.153.153 0 019.89 24H8.762a.316.316 0 00.016-.042c.028-.09.085-.172.083-.28-.091-.018-.162.001-.212.077a4.45 4.45 0 00-.136.215c-.01.016-.024.03-.042.03h-.093c-.019 0-.029-.022-.017-.037.071-.088.14-.178.209-.268.001-.002-.006-.012-.012-.024-.014.004-.03.006-.045.013-.176.09-.352.181-.527.274a.363.363 0 01-.168.042H5.202c-.026 0-.039-.036-.019-.053.21-.178.402-.374.558-.605.335-.496.538-1.047.667-1.629.004-.02-.003-.043-.006-.091-.037.048-.059.072-.076.1a1.943 1.943 0 01-.334.415c-.28.258-.59.448-.983.464-.297.012-.588 0-.865-.127-.46-.21-.722-.57-.794-1.072-.025-.17-.017-.171-.182-.219A3.513 3.513 0 011.97 20.6a2.286 2.286 0 01-.808-1.13 3.569 3.569 0 01-.16-1.245c.002-.034.016-.067.024-.1.032.023.046.043.05.066.033.153.059.308.096.46.086.355.257.664.516.92.258.256.571.419.91.532.358.118.717.138 1.07-.016a1.89 1.89 0 00.621-.452c.328-.348.533-.76.648-1.223.009-.034.005-.071.007-.11-.015.006-.026.006-.03.011-.031.05-.064.1-.093.152-.284.502-.679.887-1.196 1.135-.351.17-.718.255-1.11.159a1.607 1.607 0 01-.971-.64 2.006 2.006 0 01-.368-.924 2.903 2.903 0 01.02-.886c.05-.439.466-1.17.742-1.271-.02.063-.035.112-.053.16-.043.116-.097.227-.13.345a1.901 1.901 0 00-.05.82c.033.212.09.416.204.6.147.236.346.407.62.465.11.023.225.014.338.018a.576.576 0 00.386-.131c.164-.128.282-.292.366-.481.168-.375.24-.777.309-1.179.05-.296.093-.594.133-.893.039-.281.071-.563.104-.845.026-.232.048-.464.074-.696.024-.228.052-.455.076-.683.024-.227.047-.455.069-.683.013-.14.022-.28.034-.42l.037-.417c.022-.25.041-.5.065-.748.008-.082-.02-.132-.09-.177a2.46 2.46 0 01-.492-.418c-.1-.109-.188-.228-.282-.342-.035-.042-.056-.097-.116-.118a2.084 2.084 0 00.275.597c.06.092.131.176.196.265.063.086.182.115.234.226-.028.003-.046.01-.06.006a4.74 4.74 0 01-.22-.057 2.71 2.71 0 01-1.287-.819c-.435-.487-.656-1.076-.71-1.723a5.206 5.206 0 01.014-1.06c.072-.602.22-1.186.45-1.745.155-.376.338-.741.526-1.102.205-.393.466-.75.765-1.076.512-.559 1.104-1.024 1.726-1.448.717-.49 1.478-.898 2.277-1.233C8.244.828 8.767.632 9.31.494c.655-.166 1.31-.33 1.982-.415.229-.03.458-.058.688-.07zm-1.847 22.82c-.07.06-.147.111-.207.18-.238.27-.464.549-.668.869l-.044.108a.177.177 0 00.093-.057c.174-.19.351-.378.519-.574.104-.122.195-.255.288-.386.024-.034.03-.08.046-.12l-.027-.02zm1.65-3.695a5.51 5.51 0 00-.653.593l-.37.386a.963.963 0 01-.377.25 1.372 1.372 0 01-.467.09c-.044 0-.087.006-.151.012.028.058.043.097.064.131.15.242.301.482.45.724.136.22.276.438.399.666.068.125.105.267.156.404.077.027.14-.018.202-.048.29-.135.579-.274.867-.412.213-.101.437-.186.636-.31.347-.215.68-.455 1.018-.685.015-.01.026-.028.042-.046-.023-.019-.038-.037-.056-.044-.287-.111-.527-.3-.77-.482a5.319 5.319 0 01-.506-.42 1.757 1.757 0 01-.41-.653c-.019-.049-.045-.095-.075-.156zm-5.847.264c-.06.096-.097.194-.132.293a3.38 3.38 0 01-.555 1.01c-.2.25-.455.412-.762.493-.23.06-.464.076-.7.07-.048-.002-.097.002-.158.005.016.04.021.066.035.085.1.145.23.246.4.295.157.046.316.034.498.023.181-.037.343-.115.485-.234.238-.199.402-.454.536-.732.175-.363.264-.751.342-1.144.01-.053.008-.11.011-.164zm14.945-4.586c.008.029.016.057.027.107.024.155.051.31.072.464.03.219.067.437.078.657.017.344.027.689-.014 1.033-.037.315-.063.633-.116.946a6.153 6.153 0 01-.46 1.518c-.008.018-.01.039-.02.082.047-.03.077-.042.098-.064.085-.083.17-.167.248-.255.271-.305.458-.66.596-1.043.18-.498.228-1.011.145-1.531-.103-.65-.33-1.263-.597-1.881a9.055 9.055 0 00-.024-.055l-.033.022zM5.797 8.29a.26.26 0 00.018.153c.124.251.25.501.379.75.025.049.066.09.03.163-.284.06-.578.119-.88.255.059.038.097.06.132.087.042.032.112.058.09.12-.01.033-.075.048-.117.072.017.01.043.021.067.036.166.102.33.207.447.368.138.192.229.404.188.644-.079.469-.306.85-.69 1.132-.054.04-.106.083-.161.122a.243.243 0 00-.103.245.77.77 0 00.055.195c.083.196.22.35.375.492.083.076.159.164.222.257a.37.37 0 01.025.377c-.023.05-.05.099-.076.148-.03.06-.028.111.022.162.041.042.08.089.112.138.038.058.078.079.147.05a.486.486 0 01.333-.006c.16.046.302.126.444.21.13.077.264.149.4.219.067.035.14.05.219.026.071-.022.124.01.145.076.02.064-.003.108-.074.139-.07.03-.137.063-.209.088-.1.035-.201.073-.314.077-.013-.107.11-.088.127-.159-.206-.126-.643-.145-.801-.034.063.112.035.21-.096.313-.13-.1-.025-.202.002-.3a.209.209 0 00-.249.17c-.015.101.067.216.178.224.108.007.218-.005.326-.012.06-.005.12-.027.199 0-.103.123-.248.127-.357.19.002.05.07.086.019.131-.053.048-.095-.001-.132-.03-.08-.063-.16-.126-.231-.197a.474.474 0 01-.157-.311.52.52 0 00-.043-.172c-.032-.074-.032-.137.033-.19-.018-.03-.028-.053-.045-.072a1.222 1.222 0 01-.196-.369c-.053-.137-.046-.264.048-.381.024-.03.05-.06.064-.095a.664.664 0 00.047-.168c.017-.165-.064-.287-.182-.387-.186-.156-.36-.322-.46-.551-.005-.011-.024-.017-.037-.026-.011.017-.024.027-.025.038-.019.185-.045.37-.052.557-.014.377.058.743.162 1.104.118.41.289.798.488 1.173.267.502.537 1.002.812 1.5.055.098.13.189.208.27.198.202.452.272.724.273.202 0 .404-.006.605-.026.295-.03.59-.073.884-.113.183-.025.365-.057.548-.08.21-.026.38.073.522.21.16.156.305.327.447.5.22.265.397.56.554.867.05.098.07.1.147.03.13-.121.26-.242.394-.36.067-.059.088-.12.067-.213a3.535 3.535 0 01-.085-.796c.002-.157.006-.314.018-.471.015-.224.03-.45.06-.672a59.114 59.114 0 01.362-2.298c.087-.493.182-.984.268-1.477.06-.347.118-.694.162-1.043.034-.273.055-.55.063-.825.011-.332.003-.665.002-.998 0-.077.004-.155-.01-.23-.028-.142-.01-.155-.162-.19a5.826 5.826 0 00-.607-.107c-.146-.018-.207-.053-.221-.19-.006-.049-.025-.098-.041-.146-.009-.025-.024-.048-.046-.09l-.025.264c-.009.096-.029.116-.127.115-.055 0-.11-.008-.164-.008-.476 0-.952-.008-1.426.032-.095.008-.173-.015-.226-.103-.04-.066-.088-.126-.134-.186-.063-.084-.086-.093-.182-.06-.195.068-.388.138-.582.21a2.71 2.71 0 00-.675.394.986.986 0 01-.323.168c-.033.01-.07.008-.127.013.02-.066.024-.114.047-.15.064-.105.135-.205.205-.306.023-.033.049-.063.073-.095l-.015-.023-.201.037c-.146.04-.296.07-.437.122-.148.053-.266.023-.386-.072a3.623 3.623 0 01-.733-.786l-.093-.132zm8.592 8.963l-.147.09c-.22.134-.44.266-.659.402-.093.058-.184.12-.27.188-.085.07-.124.161-.072.272.047.1.093.2.147.294.047.08.124.138.213.147.11.01.228.012.336-.012.217-.05.372-.205.528-.357a.291.291 0 00.087-.308c-.046-.18-.079-.365-.118-.547-.011-.052-.027-.103-.045-.169zm-.257-2.409c-.12.291-.205.597-.325.91-.151.433-.294.87-.435 1.323.036-.01.054-.01.067-.018.261-.16.522-.324.785-.484.054-.033.071-.078.065-.138-.012-.13-.024-.262-.034-.393l-.068-.886c-.008-.103-.02-.206-.029-.31-.009 0-.017-.002-.026-.004zm3.081-8.13l.099.285c.08.231.159.463.24.714l.58 1.952c.187.63.372 1.262.558 1.893.114.382.235.762.343 1.146.072.257.126.519.186.799.044.206.087.413.127.64.034.106.023.226.077.325l.025-.006-.068-.362c-.038-.206-.077-.412-.113-.638-.015-.07-.029-.141-.046-.211-.095-.396-.177-.796-.29-1.187-.196-.685-.413-1.364-.618-2.046-.165-.549-.322-1.1-.488-1.648-.069-.227-.15-.45-.226-.695l-.117-.336c-.037-.107-.075-.216-.115-.322-.04-.106-.084-.21-.127-.314a7.558 7.558 0 01-.027.01zM6.225 14.304c-.063-.001-.115.014-.134.083a.35.35 0 00.41.012 4.533 4.533 0 00-.276-.095zM5.23 11.98c-.026-.027-.057-.048-.075.002-.012.032-.007.07-.01.113.082-.037.082-.037.085-.115zm.062-1.189a.135.135 0 00-.088.056.197.197 0 00-.025.11c.005.152.01.306.026.457a.751.751 0 00.066.218c.061.136.157.167.288.101.055-.027.06-.054.025-.11a4.52 4.52 0 01-.129-.211c-.015-.068-.066-.131-.033-.207.04-.09-.076-.116-.074-.19V10.874c-.003-.038-.006-.087-.056-.083zm-.017-.968a.867.867 0 00-.467.127c-.076.045-.084.07-.05.158.034.087.07.173.115.254.064.117.09.125.21.077a.657.657 0 01.336-.053c.202.022.357.136.504.264l.092.077c.007-.006.014-.013.022-.018-.019-.105-.035-.226-.149-.264-.157-.053-.324-.075-.508-.117l-.24-.005c.24-.169.452-.044.687.009-.063-.115-.153-.147-.23-.193-.082-.05-.17-.092-.25-.144-.06-.037-.12-.08-.072-.172zm10.233.325c-.23-.01-.427.08-.608.211-.034.026-.06.065-.105.117.087.026.15.046.232.065.044-.015.088-.03.13-.046.306-.114.61-.115.904.031.126.063.237.04.366-.005-.02-.031-.03-.054-.045-.071a.986.986 0 00-.448-.273c-.14-.044-.284-.024-.426-.03zM7.99 6.483a.308.308 0 00.002.133c.08.321.156.643.242.962.104.387.27.75.456 1.103.02.037.061.08.098.087a.404.404 0 00.253-.051l-.472-.84c-.23-.448-.405-.92-.579-1.394zM10.397.497c-.2-.008-.405.004-.603.034-.236.035-.47.087-.7.152-.287.08-.569.18-.852.273-.04.013-.074.038-.11.058.028.014.05.018.07.014.287-.068.58-.085.873-.09.134-.002.269.009.402.025.19.024.382.048.57.09.456.104.874.3 1.265.556.464.306.888.66 1.257 1.078.205.232.395.475.56.739.17.274.315.561.449.856.273.601.456 1.232.6 1.876.04.173.07.348.1.524.017.104.065.167.17.19.122.028.2.105.22.251-.003.102-.06.174-.129.24a1.065 1.065 0 00-.268.358.164.164 0 00.083-.039c.08-.086.162-.172.235-.265a.56.56 0 00.13-.333c.009-.05.022-.1.024-.15.007-.124-.017-.15-.143-.168-.025-.004-.049-.014-.073-.015-.082-.007-.125-.063-.137-.131-.033-.198-.004-.355.247-.408.086-.018.174-.03.26-.042.158-.023.315-.053.473-.067.14-.012.19.033.226.167.008.029.018.057.021.087.019.179-.008.225-.141.288-.027.013-.055.024-.078.042a.148.148 0 00-.051.067c-.039.144.073.382.206.445l.673.32c.023.011.05.015.075.023l.018-.026c-.015-.008-.032-.013-.044-.024a2.27 2.27 0 00-.544-.32 4.898 4.898 0 00-.173-.075.203.203 0 01-.126-.191c-.003-.085.045-.154.128-.187l.059-.025c.099-.044.118-.076.112-.187a.384.384 0 00-.008-.063c-.067-.294-.123-.59-.205-.88a9.478 9.478 0 00-.826-2.036 7.465 7.465 0 00-1.39-1.805 4.536 4.536 0 00-1.177-.824 3.656 3.656 0 00-1.016-.328 6.155 6.155 0 00-.712-.074zm6.719 5.955c.01.014.018.028.038.034l-.022-.044-.016.01zM4.103 3.917a.062.062 0 01-.03.012.455.455 0 01-.04.039c-.01.01-.02.02-.045.04l-.363.354c-.088.085-.17.178-.266.253-.284.22-.425.53-.544.855a.132.132 0 00-.007.071c.013.055.033.108.052.168l.074.026c-.017.056-.03.105-.047.152-.058.164-.118.327-.175.491-.005.015.008.036.019.077.08-.175.158-.33.225-.489.228-.544.484-1.074.819-1.561.09-.133.182-.266.283-.401.004-.006.007-.013.022-.03.001-.016.003-.032.015-.04l.008-.017zm12.976 2.408a.023.023 0 01.009.019.073.073 0 00-.006.01.188.188 0 00.007.02l.018.022c.002-.007.007-.016.005-.021-.003-.01-.012-.018-.02-.038a1.331 1.331 0 01-.013-.012zM4.199 4.48c-.003.004-.008.008-.027.014-.005.013-.011.025-.031.047a2.085 2.085 0 01-.124.167c-.048.07-.116.055-.181.041-.134-.028-.228.016-.287.143-.089.187-.187.37-.273.56-.049.108-.11.216-.118.36.081.003.154.007.228.008h.228a2.563 2.563 0 01-.079.264c-.01.052-.022.103-.033.155l.02.004c.018-.046.037-.092.067-.153.066-.142.13-.285.2-.426.02-.04.034-.1.116-.092 0 .043.004.084 0 .124-.005.045-.017.09-.028.143.141.043.086.174.115.269.102-.022.104-.195.248-.144v.205l.017.002.439-1.059c-.13 0-.246-.02-.358.033-.024.011-.058-.001-.108-.004.075-.15.139-.278.211-.417a.128.128 0 01.025-.036c0-.015-.001-.03.008-.038l.006-.02c-.005.006-.01.011-.028.017-.004.012-.009.024-.026.045a.085.085 0 01-.032.033c-.123.157-.09.164-.258.106-.079-.027-.078-.028-.047-.144.028-.046.056-.093.098-.15 0-.016-.001-.032.007-.042L4.2 4.48zm2.073-.67c-.003.006-.007.011-.027.016-.094.125-.194.246-.28.377-.155.238-.301.481-.451.723-.14.224-.345.368-.575.481-.017.008-.04.006-.079.011.012-.059.016-.109.033-.153a6.076 6.076 0 01.229-.518l-.007-.02a.138.138 0 01-.035.025c-.028.05-.055.1-.093.164-.26.424-.443.817-.442.95.024.004.048.011.073.013.177.013.188.007.26-.165.03-.07.077-.12.147-.15l.175-.07c.044-.018.085-.057.146-.032.003.05-.01.11.014.145.042.062.044.125.047.193.002.049.017.098.026.147.029-.034.039-.065.05-.097.142-.39.277-.782.428-1.17.1-.256.22-.504.33-.756.013-.03.013-.067.03-.092V3.81zm3.987-.34c0 .045.01.084.021.123.042.16.094.318.124.48.024.133.023.27.028.406 0 .033-.019.067-.032.11-.094-.058-.047-.158-.106-.215h-.125c-.015.072-.01.152-.046.2-.066.085-.155.154-.236.227-.043.038-.078.018-.103-.025l-.046-.087c-.065.035-.117.069-.172.093-.116.051-.235.095-.35.147-.085.038-.09.053-.07.147.014.075.034.148.047.223.013.072.05.109.123.124.233.05.462.115.657.265.058-.102.058-.102.168-.151.03-.014.06-.03.092-.042.08-.03.115-.017.15.06.023.048.041.098.066.158.06-.14-.042-.267.017-.416.157.18.24.39.375.567a.235.235 0 00.022-.098c.002-.124 0-.247.002-.371 0-.034.013-.067.02-.1l.032-.003c.11.155.13.354.226.52a3.036 3.036 0 00-.01-.392c-.004-.045 0-.074.05-.088.08.036.116.14.215.158-.03-.275-.423-1.137-.798-1.635-.114-.127-.2-.28-.34-.386zm-2.667.696c-.019.034-.03.05-.037.067-.061.185-.125.37-.18.556-.031.105-.087.169-.195.19-.09.019-.178.052-.268.073-.038.009-.089.015-.118-.003-.024-.016-.025-.069-.036-.106-.064.076-.082.087-.17.047-.133-.062-.262-.135-.393-.201-.048-.025-.093-.063-.17-.03-.043.12-.091.25-.137.382-.099.28-.087.242.095.453.046.048.102.03.154.023.054-.009.106-.03.16-.036.13-.013.26-.08.367-.015.204-.064.387-.122.571-.178.05-.015.089.005.114.054.022.042.034.093.082.121.038-.056-.013-.128.063-.178l.14.241-.042-1.46zm.278.358c-.096-.01-.107.01-.11.108-.002.038-.003.078.002.115.03.2.099.386.174.57.002.006.012.01.022.015l.078-.05c.052.036.081.088.153.088.205-.002.41.014.616.012.099-.001.158.042.205.12.018.03.024.077.088.066l-.08-.394c-.05-.195-.085-.395-.172-.589-.057.057-.114.068-.18.046a.72.72 0 00-.135-.028c-.22-.028-.44-.059-.66-.08zm10.254-1.727c.089.163.155.316.139.491-.016.168.026.342-.044.516-.047-.033-.088-.082-.112-.075-.117.035-.164-.057-.227-.115a4.772 4.772 0 01-.286-.29l-.104-.113a4.856 4.856 0 01-.023.019c.035.046.07.093.11.156.04.064.084.127.122.193.034.058.065.118.031.205-.082-.01-.164-.019-.246-.032-.06-.01-.101 0-.124.07-.031.098-.037.096-.15.09.02.042.036.08.057.116.041.074.03.138-.03.196-.06.06-.118.122-.178.181a.175.175 0 01-.185.046c-.222-.061-.447-.113-.67-.174-.032-.009-.063-.04-.086-.068-.03-.04-.052-.087-.08-.13-.044-.07-.09-.138-.136-.207a.18.18 0 00-.014.105c.012.127.03.253.035.38.005.1-.024.12-.121.104-.104-.017-.206-.04-.31-.058-.064-.012-.131-.028-.202.03l.081.208c.09 0 .166-.01.237.002a.819.819 0 01.458.251c.078.083.154.168.241.26l.018-.005c-.004-.006-.008-.013-.01-.04.014-.056-.062-.118.018-.178.031.03.064.057.088.09.058.078.111.159.169.257l.089.141.024-.013a2093.819 2093.819 0 01-.427-.934c.055.007.083.007.108.016.193.07.385.142.577.216.074.028.147.06.219.094.062.028.112.018.157-.033.05-.056.102-.112.154-.167.05-.051.095-.046.132.014.016.025.026.053.04.08.071.138.143.277.217.433l.159.308.025-.011c-.044-.106-.07-.218-.138-.334-.057-.182-.168-.346-.206-.545.136.034.362.326.567.732l.057.074.018-.011a1.563 1.563 0 01-.052-.127c-.046-.145-.097-.29-.136-.436-.022-.083-.036-.173.022-.26l.109.058-.026-.207.027-.016c.022.02.05.036.065.06.073.108.143.22.215.33.01.016.029.029.043.043-.036-.217-.2-.38-.229-.626l.155.112c.014-.166.012-.319.042-.465.032-.158-.023-.297-.063-.445.024.004.036.006.055.025.092.124.183.249.277.371.02.027.05.047.069.087l.04.063.019-.015a.293.293 0 01-.053-.082 27.922 27.922 0 01-.332-.49c-.221-.311-.363-.467-.485-.521zm-6.57.327c-.003.161.092.275.069.415l-.368.087c.09.139.032.237-.052.331-.05.057-.092.122-.143.178-.037.04-.046.078-.018.126l.16.275c.029.048.072.066.128.064.076-.003.152 0 .228-.001.116-.003.216.022.275.137.006.014.02.024.044.052.004-.059-.003-.098.01-.13.016-.04.04-.099.072-.108.084-.023.173-.024.26-.03.013-.001.027.018.04.029l.071.065c.019-.11-.082-.198-.024-.31l.126.04c-.026-.123-.07-.245-.071-.366 0-.123.051-.243.115-.36.107.062.16.156.234.253.183.265.36.533.494.834.165-.078.27.068.407.088-.003-.106-.133-.441-.197-.492a.142.142 0 00-.102-.028c-.06.011-.119.039-.191.063-.025-.039-.056-.078-.077-.122a3.936 3.936 0 00-.473-.783c-.076-.094-.16-.182-.228-.26l-.391.285c-.049.035-.094.03-.132-.017l-.169-.207c-.025-.03-.053-.059-.097-.108z"/></svg>',
+  terminal: '<svg viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="3"/><path d="M7 9.5l3 2.5-3 2.5"/><path d="M12.5 15h4.5"/></g></svg>',
+  // Instinct's stick figure, kept with the relay's list of assistants (platforms.mjs).
+  instinct: `<svg viewBox="${ASSISTANT.instinct.mark.viewBox}" aria-hidden="true">${ASSISTANT.instinct.mark.body}</svg>`,
+  app: svg('<path d="M9 2v6M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0Z"/><path d="M12 18v4"/>'),
+  web: svg('<rect x="2.5" y="4" width="19" height="16" rx="3"/><path d="M2.5 9h19"/><circle cx="6" cy="6.5" r=".4"/><circle cx="8.5" cy="6.5" r=".4"/>'),
 };
 // The people page: drag a sticker into a basket (mouse or finger), or press Enter on it for "Move to…".
 // Every move is the same form post as without JavaScript; the page it answers with replaces the board and the
@@ -2164,19 +3147,20 @@ function peopleScript() {
   const reduce = matchMedia('(prefers-reduced-motion: reduce)');
   const fine = matchMedia('(hover: hover) and (pointer: fine)');
   const spring = getComputedStyle(document.documentElement).getPropertyValue('--ease-spring').trim() || 'ease-out';
-  const STK = '#people-board .pool .stk, #people-board .pile .stk';
+  const STK = '#people-board .pool .stk:not([data-held]), #people-board .pile .stk:not([data-held])';
   const live = document.createElement('div');
   live.className = 'sr'; live.setAttribute('aria-live', 'polite'); document.body.append(live);
   const say = (t) => { live.textContent = ''; setTimeout(() => { live.textContent = t; }, 30); };
   const data = () => JSON.parse($('#people-data').textContent);
   const wire = () => $$(STK).forEach((el) => el.setAttribute('aria-describedby', 'stk-help'));
   wire();
-  if (!reduce.matches) $$(STK).forEach((el, i) => { el.style.animationDelay = `${i * 45}ms`; el.classList.add('settle'); el.addEventListener('animationend', () => { el.classList.remove('settle'); el.style.animationDelay = ''; }, { once: true }); });
+  if (!reduce.matches && !document.documentElement.classList.contains('stay')) $$(STK).forEach((el, i) => { el.style.animationDelay = `${i * 45}ms`; el.classList.add('settle'); el.addEventListener('animationend', () => { el.classList.remove('settle'); el.style.animationDelay = ''; }, { once: true }); });
 
   // Posts a form and puts the page the server answers with in place of this one.
-  async function post(action, fields, from = {}) {
+  async function post(action, fields, from = {}, settle = null) {
     let res, html;
     try { res = await fetch(action, { method: 'POST', body: new URLSearchParams(fields) }); html = await res.text(); } catch { location.reload(); return false; }
+    if (settle) await settle;
     const fresh = new DOMParser().parseFromString(html, 'text/html').querySelector('.col');
     if (!fresh) { location.reload(); return false; }
     const before = {};
@@ -2341,7 +3325,9 @@ function peopleScript() {
     if (!f) return;
     e.preventDefault();
     const fields = Object.fromEntries(new FormData(f));
-    if (!(await post(f.action, fields))) return;
+    const sw = f.querySelector('[aria-checked]');
+    sw.setAttribute('aria-checked', String(sw.getAttribute('aria-checked') !== 'true'));
+    if (!(await post(f.action, fields, {}, new Promise((k) => setTimeout(k, reduce.matches ? 0 : 480))))) return;
     $(`#people-board .bmenu__mode input[name="circle"][value="${fields.circle}"]`)?.closest('.basket')?.querySelector('.bmenu summary')?.focus();
     const g = data().baskets.find((x) => String(x.id) === fields.circle);
     if (g) say(g.mode === 'asks' ? `${g.name}: your bot asks you first.` : `${g.name}: your bot handles it and asks you when it isn't sure.`);
@@ -2370,8 +3356,10 @@ const peopleJsMade = new Map();
 const peopleJs = (tr) => (tr.lang === 'en' ? PEOPLE_JS : peopleJsMade.get(tr.lang) ?? peopleJsMade.set(tr.lang, peopleJsFor(tr)).get(tr.lang));
 // Sticker profile pictures: die-cut PNGs listed in public/stickers/index.json, as "key" strings or {key, name}
 // objects (or {stickers: [...]}). Read again whenever the list or the folder changes, so a new set shows up
-// without a restart. Without a list, or with an empty one, the twelve robots are the choice.
+// without a restart. Without a list, or with an empty one, the twelve drawn robots are the choice.
 const STICKER_KEY = /^[a-z0-9][a-z0-9-]{0,39}$/;
+// Kinds listed under Computers in the picker; the rest (soft shapes, animals, symbols) come after.
+const MACHINE_KINDS = new Set(['computer', 'premium', 'robot']);
 function stickerSet(dir) {
   let seen = null, set = new Map();
   const read = () => {
@@ -2384,7 +3372,8 @@ function stickerSet(dir) {
       for (const it of Array.isArray(raw) ? raw : Array.isArray(raw?.stickers) ? raw.stickers : []) {
         const key = typeof it === 'string' ? it : it?.key ?? it?.id ?? String(it?.file ?? '').replace(/\.png$/, '');
         const name = typeof it === 'string' ? '' : String(it?.name ?? it?.label ?? '');
-        if (typeof key === 'string' && STICKER_KEY.test(key) && existsSync(join(dir, `${key}.png`))) set.set(key, { key, name: name.slice(0, 60) || 'Sticker' });
+        const machine = typeof it === 'object' && MACHINE_KINDS.has(it?.kind);
+        if (typeof key === 'string' && STICKER_KEY.test(key) && existsSync(join(dir, `${key}.png`))) set.set(key, { key, name: name.slice(0, 60) || 'Sticker', machine });
       }
     } catch { /* no list yet: robots only */ }
     return set;
@@ -2392,18 +3381,52 @@ function stickerSet(dir) {
   read.dir = dir;
   return read;
 }
-const ART = new Set(['home', 'invite', 'setup', 'asleep'].filter((n) => existsSync(new URL(`./public/art/${n}.jpg`, import.meta.url))));
+const ART = new Set(['home', 'invite', 'setup', 'asleep', 'doorbell'].filter((n) => existsSync(new URL(`./public/art/${n}.jpg`, import.meta.url))));
 // Live pages refresh every 30 s, but never while you're typing, have a menu open or are answering a confirm.
-const REFRESH_JS = `setInterval(()=>{if(document.visibilityState!=='visible'||document.querySelector('details[open],.cm[data-state=ask],.acc[data-open=true]')||/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||''))return;location.reload();},30000);`;
+// The overview's friends: basket sections remember being folded (in this browser), and the filter hides everyone
+// whose name doesn't match. Without JavaScript the sections are open and the filter isn't shown.
+const FRIENDS_JS = `(()=>{const list=document.getElementById('friends');if(!list)return;const K='b2b-folded';const get=()=>{try{return JSON.parse(localStorage.getItem(K)||'[]')}catch(e){return []}};
+const box=document.querySelector('[data-find]'),inp=box&&box.querySelector('input'),none=list.querySelector('.ffind__none[hidden]'),secs=[...list.querySelectorAll('.bsec')];
+secs.forEach(s=>{const d=s.querySelector('details');if(get().includes(s.dataset.key))d.open=false;d.addEventListener('toggle',()=>{if(inp&&inp.value)return;const c=get().filter(k=>k!==s.dataset.key);if(!d.open)c.push(s.dataset.key);try{localStorage.setItem(K,JSON.stringify(c))}catch(e){}});});
+if(!inp)return;box.hidden=false;
+const run=()=>{const v=inp.value.trim().toLowerCase();let any=false;list.querySelectorAll('li[data-who]').forEach(r=>{const hit=!v||r.dataset.who.includes(v);r.hidden=!hit;if(hit)any=true;});
+secs.forEach(s=>{const d=s.querySelector('details');s.hidden=!!v&&!s.querySelector('li[data-who]:not([hidden])');if(v)d.open=true;else d.open=!get().includes(s.dataset.key);});if(none)none.hidden=any;};
+inp.addEventListener('input',run);inp.addEventListener('keydown',e=>{if(e.key==='Escape'&&inp.value){inp.value='';run();}});})();`;
+// The overview's Arc tabs, in plain JS: the pill glides to the picked tab, the section slides in the way you moved,
+// arrow keys, Home and End move between tabs. All shows every section. Runs right after the tabs, so the first paint is already right.
+const OVTABS_JS = `(function(){const w=document.querySelector('.ovtabs');if(!w)return;const list=w.querySelector('[role=tablist]'),sel=w.querySelector('.ovtabs__sel'),panel=w.querySelector('[role=tabpanel]'),tabs=[...list.querySelectorAll('[role=tab]')];
+const row=matchMedia('(max-width:1183px)'),still=matchMedia('(prefers-reduced-motion: reduce)');let cur=null;
+const place=()=>{const t=tabs.find(b=>b.dataset.pane===cur);if(!t)return;sel.style.width=t.offsetWidth+'px';sel.style.height=t.offsetHeight+'px';sel.style.transform='translate('+t.offsetLeft+'px,'+t.offsetTop+'px)';};
+const show=(k,o={})=>{const i=tabs.findIndex(b=>b.dataset.pane===k);if(i<0)return;const was=tabs.findIndex(b=>b.dataset.pane===cur);cur=k;
+tabs.forEach((b,j)=>{b.setAttribute('aria-selected',String(j===i));b.tabIndex=j===i?0:-1;});panel.setAttribute('aria-labelledby',tabs[i].id);
+panel.querySelectorAll('[data-pane-body]').forEach(p=>{p.hidden=k!=='all'&&p.dataset.paneBody!==k;});place();
+if(o.user){w.classList.add('moved');try{localStorage.setItem('b2b-pane',k);}catch(e){}if(was>=0&&was!==i&&panel.animate){const d=(i>was?1:-1)*8,a=row.matches?'translateX('+d+'px)':'translateY('+d+'px)';panel.animate(still.matches?[{opacity:0},{opacity:1}]:[{opacity:0,transform:a},{opacity:1,transform:'none'}],{duration:240,easing:'cubic-bezier(.22,1,.36,1)'});}
+if(row.matches)tabs[i].scrollIntoView({block:'nearest',inline:'nearest',behavior:still.matches?'auto':'smooth'});}};
+list.addEventListener('click',e=>{const b=e.target.closest('[role=tab]');if(b)show(b.dataset.pane,{user:true});});
+list.addEventListener('keydown',e=>{const i=tabs.indexOf(document.activeElement);if(i<0)return;const n=tabs.length,go={ArrowDown:i+1,ArrowRight:i+1,ArrowUp:i-1,ArrowLeft:i-1,Home:0,End:n-1}[e.key];if(go===undefined)return;e.preventDefault();const t=tabs[(go+n)%n];t.focus();show(t.dataset.pane,{user:true});});
+let k='friends';try{k=localStorage.getItem('b2b-pane')||k;}catch(e){}show(tabs.some(b=>b.dataset.pane===k)?k:'friends');
+const at=location.hash&&document.getElementById(decodeURIComponent(location.hash.slice(1)))?.closest('[data-pane-body]');if(at?.hidden)show(at.dataset.paneBody);w.classList.add('ready');
+const orient=()=>list.setAttribute('aria-orientation',row.matches?'horizontal':'vertical');orient();addEventListener('resize',place);row.addEventListener?.('change',()=>{orient();place();});document.fonts?.ready.then(place);})();`;
+const REFRESH_JS = `setInterval(()=>{if(document.visibilityState!=='visible'||document.querySelector('details[open]:not(.bsec__d),.cm[data-state=ask],.acc[data-open=true]')||document.querySelector('[data-find] input')?.value||/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||''))return;window.b2bStay&&b2bStay();location.reload();},30000);`;
 // The behaviour of the Arc components above, in plain JS. Every page loads it once.
 const uiJsFor = (tr) => `(function(){const $$=(s,r=document)=>[...r.querySelectorAll(s)];document.documentElement.classList.add('js');
+/* Staying in place: a save answers with the same page, so it comes back where you were, without the entrance animation. */
+const here=location.pathname+location.search;let was=null;try{was=JSON.parse(sessionStorage.getItem('stay'));sessionStorage.removeItem('stay');}catch(e){}
+if(was&&Date.now()-was.t<20000&&(was.p===here||was.a===here)){document.documentElement.classList.add('stay');if(!location.hash)scrollTo(0,was.y);}
+const stay=(a)=>{try{sessionStorage.setItem('stay',JSON.stringify({p:here,a,y:scrollY,t:Date.now()}));}catch(e){}};window.b2bStay=stay;
+/* Everything below wires up a piece of page; it runs on load and again on content a save brings in place. */
+const init=r=>{const top=r===document;
+/* Rename in the title: the pen opens a box with the name selected; Cancel or Escape puts the name back and closes it. */
+$$('.ptitle__edit',r).forEach(d=>{const i=d.querySelector('input'),pen=d.querySelector('summary'),shut=()=>{i.value=i.defaultValue;d.open=false;pen.focus();};
+d.addEventListener('toggle',()=>{if(d.open){i.focus();i.select();}});d.querySelector('[data-close]').addEventListener('click',e=>{e.preventDefault();shut();});
+d.addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();shut();}});});
 /* Button loading (Arc): on submit the label gives way to a spinner, focus stays, and a second press is swallowed. */
-$$('form').forEach(f=>{const b=f.querySelector('.btn[data-busy]');if(!b)return;f.addEventListener('submit',e=>{if(b.getAttribute('aria-busy')==='true'){e.preventDefault();return;}b.setAttribute('aria-busy','true');b.setAttribute('aria-disabled','true');});});
-addEventListener('pageshow',()=>$$('.btn[data-busy][aria-busy]').forEach(b=>{b.removeAttribute('aria-busy');b.removeAttribute('aria-disabled');}));
+$$('form',r).forEach(f=>{const b=f.querySelector('.btn[data-busy]');if(!b)return;f.addEventListener('submit',e=>{if(b.getAttribute('aria-busy')==='true'){e.preventDefault();return;}b.setAttribute('aria-busy','true');b.setAttribute('aria-disabled','true');});});
+if(top)addEventListener('pageshow',()=>$$('.btn[data-busy][aria-busy]').forEach(b=>{b.removeAttribute('aria-busy');b.removeAttribute('aria-disabled');}));
 /* Arc avatar: a photo still downloading fades in from a soft blur; one that fails leaves the initial showing. */
-$$('.avatar img').forEach(im=>{if(im.complete){if(!im.naturalWidth)im.remove();return;}im.dataset.loading='';im.addEventListener('load',()=>delete im.dataset.loading);im.addEventListener('error',()=>im.remove());});
+$$('.avatar img',r).forEach(im=>{if(im.complete){if(!im.naturalWidth)im.remove();return;}im.dataset.loading='';im.addEventListener('load',()=>delete im.dataset.loading);im.addEventListener('error',()=>im.remove());});
 /* Picture picker: a robot springs into the preview and blinks; a photo is cropped to its middle square, shrunk to 256px and sent as a JPEG. */
-$$('form[data-pick]').forEach(f=>{const face=f.querySelector('[data-face]'),file=f.querySelector('[data-own-file]'),own=f.querySelector('[data-own]'),out=f.querySelector('input[name=photo]'),err=f.querySelector('[data-photo-error]');
+$$('form[data-pick]',r).forEach(f=>{const face=f.querySelector('[data-face]'),file=f.querySelector('[data-own-file]'),own=f.querySelector('[data-own]'),out=f.querySelector('input[name=photo]'),err=f.querySelector('[data-photo-error]');
 const show=(html,cut)=>{face.innerHTML=html;face.toggleAttribute('data-cut',!!cut);face.classList.remove('go');void face.offsetWidth;face.classList.add('go');};
 f.addEventListener('change',e=>{const r=e.target;if(r.name!=='avatar')return;out.value='';if(err)err.hidden=true;const p=r.closest('label').querySelector('.pfp__img');show(p.innerHTML,p.classList.contains('pfp__img--cut'));});
 own.hidden=false;own.addEventListener('click',()=>file.click());
@@ -2413,16 +3436,18 @@ out.value=c.toDataURL('image/jpeg',.86);$$('input[name=avatar]',f).forEach(r=>r.
 im.onerror=()=>{URL.revokeObjectURL(u);file.value='';if(err)err.hidden=false;};im.src=u;});});
 /* Menus: close on a press outside or Escape; a menu's inline confirm resets when it closes. */
 const reset=d=>{const m=d.querySelector('.menu[data-confirming]');if(m){delete m.dataset.confirming;m.querySelector('.menu__confirm').hidden=true;}};
-document.addEventListener('click',e=>{$$('details.more[open]').forEach(d=>{if(!d.contains(e.target)){d.open=false;reset(d);}});});
-document.addEventListener('keydown',e=>{if(e.key==='Escape')$$('details.more[open]').forEach(d=>{d.open=false;reset(d);d.querySelector('summary').focus();});});
-$$('details.more').forEach(d=>d.addEventListener('toggle',()=>{if(!d.open)reset(d);}));
-$$('[data-reveal]').forEach(b=>b.addEventListener('click',e=>{e.preventDefault();const m=b.closest('.menu'),c=m.querySelector('.menu__confirm');m.dataset.confirming='';c.hidden=false;c.querySelector('button:not([type=button])').focus();}));
-$$('[data-unreveal]').forEach(b=>b.addEventListener('click',()=>reset(b.closest('details'))));
+if(top)document.addEventListener('click',e=>{$$('details.more[open]').forEach(d=>{if(!d.contains(e.target)){d.open=false;reset(d);}});});
+if(top)document.addEventListener('keydown',e=>{if(e.key==='Escape')$$('details.more[open]').forEach(d=>{d.open=false;reset(d);d.querySelector('summary').focus();});});
+/* A menu opening near the screen's edge (a basket on the left of a phone) moves back inside it. */
+const fit=d=>{const m=d.querySelector(':scope>.menu');if(!m||m.classList.contains('menu--up'))return;m.style.right='';const r0=d.getBoundingClientRect().right,left=r0-m.offsetWidth,pad=8,w=document.documentElement.clientWidth;if(left<pad)m.style.right=(left-pad)+'px';else if(r0>w-pad)m.style.right=(r0-w+pad)+'px';};
+$$('details.more',r).forEach(d=>d.addEventListener('toggle',()=>{if(d.open)fit(d);else reset(d);}));
+$$('[data-reveal]',r).forEach(b=>b.addEventListener('click',e=>{e.preventDefault();const m=b.closest('.menu'),c=m.querySelector('.menu__confirm');m.dataset.confirming='';c.hidden=false;c.querySelector('button:not([type=button])').focus();}));
+$$('[data-unreveal]',r).forEach(b=>b.addEventListener('click',()=>reset(b.closest('details'))));
 /* Notices: dismissed by hand; pages that swap their content in place bring new ones along. */
 /* Copy button: icon and label swap to Copied, the width never changes. */
-$$('[data-copy]').forEach(b=>b.addEventListener('click',async()=>{const t=document.querySelector(b.dataset.copy).innerText,l=b.querySelector('.copybtn__label');try{await navigator.clipboard.writeText(t);b.dataset.state='copied';l.textContent=${jsq(tr('Copied'))};}catch(e){l.textContent=${jsq(tr('Select it'))};}clearTimeout(b.t);b.t=setTimeout(()=>{delete b.dataset.state;l.textContent=${jsq(tr('Copy'))};},1800);}));
+$$('[data-copy]',r).forEach(b=>b.addEventListener('click',async()=>{const t=document.querySelector(b.dataset.copy).innerText,l=b.querySelector('.copybtn__label');try{await navigator.clipboard.writeText(t);b.dataset.state='copied';l.textContent=${jsq(tr('Copied'))};}catch(e){l.textContent=${jsq(tr('Select it'))};}clearTimeout(b.t);b.t=setTimeout(()=>{delete b.dataset.state;l.textContent=${jsq(tr('Copy'))};},1800);}));
 /* Confirm morph: the pill springs between its faces; Escape, Cancel, a press outside or 6 s of silence put it back. */
-$$('.cm').forEach(f=>{const s=f.querySelector('.cm__surface'),face={},trig=f.querySelector('.cm__trigger'),yes=f.querySelector('.cm__confirm');$$('.cm__face',f).forEach(x=>face[x.dataset.face]=x);let at=0,timer;
+$$('.cm',r).forEach(f=>{const s=f.querySelector('.cm__surface'),face={},trig=f.querySelector('.cm__trigger'),yes=f.querySelector('.cm__confirm');$$('.cm__face',f).forEach(x=>face[x.dataset.face]=x);let at=0,timer;
 const show=k=>{const from=s.getBoundingClientRect().width;for(const n in face)face[n].hidden=n!==k;f.dataset.state=k;s.style.width='';const to=s.getBoundingClientRect().width;s.style.width=from+'px';s.offsetWidth;s.style.width=to+'px';};
 const rest=()=>{clearTimeout(timer);show('idle');};
 trig.addEventListener('click',()=>{show('ask');at=Date.now();yes.focus();clearTimeout(timer);timer=setTimeout(()=>{if(f.dataset.state==='ask'&&!f.matches(':hover'))rest();},6000);});
@@ -2431,31 +3456,61 @@ f.addEventListener('submit',e=>{if(f.dataset.state!=='ask'||Date.now()-at<280){e
 f.addEventListener('keydown',e=>{if(e.key==='Escape'&&f.dataset.state==='ask'){e.stopPropagation();rest();trig.focus();}});
 document.addEventListener('pointerdown',e=>{if(f.dataset.state==='ask'&&!f.contains(e.target))rest();});});
 /* Accordion rows: the panel opens to its own height; closed panels are inert, so focus never lands inside. */
-$$('.acc__head').forEach(h=>h.addEventListener('click',()=>{const a=h.closest('.acc'),o=a.dataset.open!=='true',pn=a.querySelector('.acc__panel');a.dataset.open=String(o);h.setAttribute('aria-expanded',String(o));if(o)pn.removeAttribute('inert');else pn.setAttribute('inert','');}));
-const hashed=location.hash?document.getElementById(location.hash.slice(1)):null;if(hashed?.classList.contains('acc__panel'))hashed.closest('.acc').querySelector('.acc__head').click();
+$$('.acc__head',r).forEach(h=>h.addEventListener('click',()=>{const a=h.closest('.acc'),o=a.dataset.open!=='true',pn=a.querySelector('.acc__panel');a.dataset.open=String(o);h.setAttribute('aria-expanded',String(o));if(o)pn.removeAttribute('inert');else pn.setAttribute('inert','');}));
+if(top){const hashed=location.hash?document.getElementById(location.hash.slice(1)):null;if(hashed?.classList.contains('acc__panel'))hashed.closest('.acc').querySelector('.acc__head').click();}
 /* Tabs: the highlight glides from the section you left to the one you opened. */
-$$('.tabs').forEach(n=>{const sel=n.querySelector('.tabs__sel'),cur=n.querySelector('[aria-current]');if(!cur){sel.style.opacity='0';return;}
+if(top)$$('.tabs').forEach(n=>{const sel=n.querySelector('.tabs__sel'),cur=n.querySelector('[aria-current]');if(!cur){sel.style.opacity='0';return;}
 const at=el=>({x:el.offsetLeft,w:el.offsetWidth}),put=p=>{sel.style.width=p.w+'px';sel.style.transform='translateX('+p.x+'px)';};
 let from=null;try{from=JSON.parse(sessionStorage.getItem('tab-from'));sessionStorage.removeItem('tab-from');}catch(e){}
-put(from||at(cur));sel.offsetWidth;n.classList.add('ready');if(from)requestAnimationFrame(()=>put(at(cur)));
+put(from||at(cur));sel.offsetWidth;n.classList.add('ready');if(n.scrollWidth>n.clientWidth)n.scrollLeft=cur.offsetLeft-(n.clientWidth-cur.offsetWidth)/2;if(from)requestAnimationFrame(()=>put(at(cur)));
 $$('a',n).forEach(a=>a.addEventListener('click',()=>{try{sessionStorage.setItem('tab-from',JSON.stringify(at(cur)));}catch(e){}put(at(a));}));addEventListener('resize',()=>put(at(cur)));});
 /* Switch that saves as soon as it changes. */
-$$('[data-autosave]').forEach(i=>i.addEventListener('change',()=>i.form.requestSubmit()));
+$$('[data-autosave]',r).forEach(i=>i.addEventListener('change',()=>i.form.requestSubmit()));
 /* Sortable table: one column at a time, aria-sort says which and which way. */
-$$('th[data-sort]').forEach(th=>th.querySelector('button').addEventListener('click',()=>{const t=th.closest('table'),k=th.dataset.sort,num=th.dataset.type==='num',cur=th.getAttribute('aria-sort');const dir=cur?(cur==='ascending'?'descending':'ascending'):(num?'descending':'ascending');
+$$('th[data-sort]',r).forEach(th=>th.querySelector('button').addEventListener('click',()=>{const t=th.closest('table'),k=th.dataset.sort,num=th.dataset.type==='num',cur=th.getAttribute('aria-sort');const dir=cur?(cur==='ascending'?'descending':'ascending'):(num?'descending':'ascending');
 $$('th[data-sort]',t).forEach(x=>x.removeAttribute('aria-sort'));th.setAttribute('aria-sort',dir);const tb=t.tBodies[0];[...tb.rows].sort((a,b)=>{const x=a.dataset[k],y=b.dataset[k],c=num?Number(x)-Number(y):x.localeCompare(y);return dir==='ascending'?c:-c;}).forEach(r=>tb.appendChild(r));}));
 /* Segmented control: the selection glides under the chosen label and filters the rows it controls. */
-$$('.seg').forEach(g=>{const sel=g.querySelector('.seg__sel'),bs=$$('button',g),scope=document.querySelector(g.dataset.for);const on=()=>bs.find(b=>b.getAttribute('aria-pressed')==='true')||bs[0];
+$$('.seg',r).forEach(g=>{const sel=g.querySelector('.seg__sel'),bs=$$('button',g),scope=document.querySelector(g.dataset.for);const on=()=>bs.find(b=>b.getAttribute('aria-pressed')==='true')||bs[0];
 const put=b=>{sel.style.width=b.offsetWidth+'px';sel.style.transform='translateX('+(b.offsetLeft-3)+'px)';};
-bs.forEach(b=>b.addEventListener('click',()=>{bs.forEach(x=>x.setAttribute('aria-pressed',String(x===b)));put(b);const v=b.dataset.filter;if(scope)$$('[data-dir]',scope).forEach(r=>r.hidden=v!=='all'&&r.dataset.dir!==v);}));
+bs.forEach(b=>b.addEventListener('click',()=>{bs.forEach(x=>x.setAttribute('aria-pressed',String(x===b)));put(b);if(g.closest('[data-theme-pick]')&&window.b2bTheme)b2bTheme(b.value);const v=b.dataset.filter;if(scope)$$('[data-dir]',scope).forEach(r=>r.hidden=v!=='all'&&r.dataset.dir!==v);}));
 put(on());requestAnimationFrame(()=>g.classList.add('ready'));addEventListener('resize',()=>put(on()));});
+$$('.apppick',r).forEach(g=>{const bs=$$('button',g),scope=document.querySelector(g.dataset.for);bs.forEach(b=>b.addEventListener('click',()=>{bs.forEach(x=>x.setAttribute('aria-pressed',String(x===b)));if(scope)$$('[data-dir]',scope).forEach(d=>d.hidden=d.dataset.dir!==b.dataset.filter);}));});
 /* One-time code: six slots fill one hidden field; typing moves on, Backspace moves back, a paste fills them all. */
-$$('.otp').forEach(g=>{const hid=g.querySelector('input[type=hidden]'),sl=$$('.otp__slot',g);
+$$('.otp',r).forEach(g=>{const hid=g.querySelector('input[type=hidden]'),sl=$$('.otp__slot',g);
 const sync=()=>{hid.value=sl.map(x=>x.value).join('');sl.forEach(x=>x.dataset.filled=String(!!x.value));if(hid.value.length===6&&!g.dataset.sent){g.dataset.sent='1';g.closest('form').requestSubmit();}};
 const fill=(i,v)=>{v.split('').slice(0,6-i).forEach((d,j)=>{sl[i+j].value=d;});sl[Math.min(5,i+v.length)].focus();sync();};
 sl.forEach((x,i)=>{x.addEventListener('input',()=>{const v=x.value.replace(/[^0-9]/g,'');if(v.length>1)return fill(i,v);x.value=v;if(v&&i<5)sl[i+1].focus();sync();});
 x.addEventListener('keydown',e=>{if(e.key==='Backspace'&&!x.value&&i>0){sl[i-1].value='';sl[i-1].focus();sync();e.preventDefault();}else if(e.key==='ArrowLeft'&&i>0)sl[i-1].focus();else if(e.key==='ArrowRight'&&i<5)sl[i+1].focus();});
 x.addEventListener('paste',e=>{const v=(e.clipboardData.getData('text')||'').replace(/[^0-9]/g,'');if(v){e.preventDefault();fill(i,v);}});});});
+};init(document);
+/* Switches save in the background: the switch finishes its move, then the page underneath is brought up to date
+   in place (open rows stay open, typed text stays, focus stays). Language changes everything, so it reloads in place. */
+const H=document.documentElement,still=matchMedia('(prefers-reduced-motion: reduce)'),wait=ms=>new Promise(k=>setTimeout(k,ms));let line=Promise.resolve();
+const path=u=>{const x=new URL(u,location.href);return x.pathname+x.search;};
+const formOf=x=>x.form?x.form.getAttribute('action'):'';
+window.b2bTheme=t=>{const go=()=>{if(t)H.dataset.theme=t;else delete H.dataset.theme;};if(document.startViewTransition&&!still.matches)document.startViewTransition(go);else go();};
+const hard=(f,s)=>{f.dataset.hard='';f.requestSubmit(s&&s.form===f?s:null);};
+async function save(f,s){const body=new URLSearchParams(new FormData(f));if(s&&s.name)body.append(s.name,s.value);
+const settle=wait(still.matches?0:560),act=f.getAttribute('action'),el=s||(f.contains(document.activeElement)?document.activeElement:null),key=el&&el.name?{n:el.name,v:el.value}:null;
+if(f.hasAttribute('data-reload')){let ok=false;try{const r=await fetch(f.action,{method:'POST',body,redirect:'manual'});ok=r.type==='opaqueredirect'||r.ok;}catch(e){}if(!ok)return hard(f,s);await settle;stay();location.reload();return;}
+let r,html;try{r=await fetch(f.action,{method:'POST',body});html=await r.text();}catch(e){return hard(f,s);}
+const doc=new DOMParser().parseFromString(html,'text/html'),col=doc.querySelector('.col'),cur=document.querySelector('.col'),to=path(r.url);
+if(!col||!cur||(to!==here&&to!==path(f.action))){location.assign(r.url);return;}
+await settle;
+const open=$$('.acc[data-open=true] .acc__panel',cur).map(p=>p.id);
+const typed=$$('input,textarea,select',cur).filter(x=>x.form!==f&&x.name&&!/^(hidden|checkbox|radio|submit|button|file)$/.test(x.type)&&(x.tagName==='SELECT'?[...x.options].some(o=>o.selected!==o.defaultSelected):x.value!==x.defaultValue)).map(x=>({a:formOf(x),n:x.name,v:x.value}));
+cur.replaceChildren(...col.childNodes);
+typed.forEach(t=>{const y=$$('[name="'+CSS.escape(t.n)+'"]',cur).find(y=>formOf(y)===t.a);if(y)y.value=t.v;});
+open.forEach(id=>{const p=document.getElementById(id);if(!p)return;const a=p.closest('.acc');a.dataset.open='true';a.querySelector('.acc__head').setAttribute('aria-expanded','true');p.removeAttribute('inert');});
+$$('body > .toast').forEach(t=>t.remove());const said=doc.querySelector('.toast');if(said)document.body.append(said);
+['lang','data-theme'].forEach(k=>{const v=doc.documentElement.getAttribute(k);if(v===null)H.removeAttribute(k);else H.setAttribute(k,v);});
+$$('meta[name=theme-color]',document.head).forEach(m=>m.remove());$$('meta[name=theme-color]',doc.head).forEach(m=>document.head.append(m));document.title=doc.title;
+init(cur);
+if(key){const y=$$('form[action="'+CSS.escape(act)+'"] [name="'+CSS.escape(key.n)+'"]',cur).find(y=>(y.type!=='radio'&&y.tagName!=='BUTTON')||y.value===key.v);if(y)y.focus({preventScroll:true});}}
+document.addEventListener('submit',e=>{const f=e.target;if(e.defaultPrevented||f.target==='_blank')return;
+if('hard' in f.dataset){delete f.dataset.hard;stay(path(f.action));return;}
+if(f.method==='post'&&f.querySelector('[data-autosave],.seg button:not([type=button])')&&window.DOMParser){e.preventDefault();const s=e.submitter;line=line.then(()=>save(f,s)).catch(()=>location.reload());return;}
+stay(path(f.action));});
 })();`;
 
 const uiJsMade = new Map();
@@ -2464,6 +3519,15 @@ const uiJs = (tr) => uiJsMade.get(tr.lang) ?? uiJsMade.set(tr.lang, uiJsFor(tr))
 // With the landing site on this server, the dashboard uses its faces (Mona for text, Hubot for page titles).
 const FONTS = `@font-face{font-family:"Hubot";src:url(/fonts/hubot-display.woff2) format("woff2");font-weight:400 640;font-display:swap}
 @font-face{font-family:"Mona";src:url(/fonts/mona-text.woff2) format("woff2");font-weight:400 600;font-display:swap}`;
+
+const DARK = `color-scheme:dark;
+--background:#0e131b;--surface:#171d28;--surface-raised:#1c2330;--surface-muted:#1f2734;--foreground:#e8ecf3;--text-secondary:#a4aec0;--text-muted:#8691a5;
+--border:#2a3342;--border-subtle:#222a37;--border-strong:#3b4557;--accent:#7f97ff;--accent-strong:#a5b5ff;--accent-subtle:rgb(127 151 255 / .14);--accent-foreground:#0e131b;
+--success:oklch(74% .15 150);--warning:oklch(80% .14 75);--danger:oklch(70% .18 25);
+--shadow-resting:0 1px 2px rgb(0 0 0 / .4);--shadow-floating:0 18px 40px -18px rgb(0 0 0 / .7),0 2px 6px rgb(0 0 0 / .35);
+--control-track:#3b4557;--control-track-hover:#4a5569;--control-thumb:#f3f5f8;
+--hairline:rgb(255 255 255 / .07);--hairline-strong:rgb(255 255 255 / .1);--scrim:rgb(0 0 0 / .6);--ring:var(--surface);--sticker-edge:#eef1f6;--chart-1:#7f97ff;--chart-2:#f28a5c;
+--control-on:var(--accent);--art-filter:invert(1) hue-rotate(180deg);--art-blend:lighten`;
 
 const CSS = `
 /* Arc UI (MIT, uiarc.dev) ported to plain CSS: foundation tokens on the bot2bot palette, then user menu, avatar,
@@ -2481,8 +3545,13 @@ const CSS = `
 --shadow-resting:0 1px 2px rgb(26 34 48 / .06);--shadow-floating:0 18px 40px -18px rgb(26 34 48 / .28),0 2px 6px rgb(26 34 48 / .06);
 --duration-instant:120ms;--duration-fast:160ms;--duration-standard:240ms;--duration-spring:580ms;--ease-standard:cubic-bezier(.22,1,.36,1);
 --ease-spring:linear(0,.0213,.0739,.1443,.2235,.305,.3849,.4606,.5305,.594,.6508,.7011,.7452,.7836,.8168,.8454,.8699,.8907,.9084,.9234,.9361,.9467,.9557,.9632,.9694,.9747,.979,.9826,.9857,.9882,.9902,.992,.9934,.9946,.9955,.9963,1);
---control-track:#c3cad5;--control-track-hover:#b3bbc8;--control-thumb:#fff;--control-thumb-shadow:0 1px 2px rgb(26 34 48 / .18),0 0 0 .5px rgb(26 34 48 / .06)}
-*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+--control-track:#c3cad5;--control-track-hover:#b3bbc8;--control-thumb:#fff;--control-thumb-shadow:0 1px 2px rgb(26 34 48 / .18),0 0 0 .5px rgb(26 34 48 / .06);
+--hairline:rgb(26 34 48 / .06);--hairline-strong:rgb(26 34 48 / .08);--scrim:rgb(26 34 48 / .36);--ring:#fff;--sticker-edge:#fff;--chart-1:#2747c9;--chart-2:#eb6834;--art-filter:none;--art-blend:normal}
+/* Dark: the same ink-blue, turned down. It follows the device unless the person picked Light or Dark in Account. */
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){${DARK}}}:root[data-theme=dark]{${DARK}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%;scrollbar-gutter:stable}
+a,button,summary,label,select,[role=tab],[role=button]{touch-action:manipulation}
+button,summary,[role=tab],.btn,.seg{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 body{margin:0;background:var(--background);color:var(--foreground);font:400 var(--text-sm)/var(--leading-body) var(--font-body);letter-spacing:var(--tracking-body);-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent}
 a{color:inherit}p{margin:0 0 12px}b,strong{font-weight:500}
 h1{margin:0;font:500 var(--text-2xl)/1.1 var(--font-display);letter-spacing:var(--tracking-display)}
@@ -2508,22 +3577,63 @@ h2{margin:0 0 8px;font-size:var(--text-base);font-weight:500;letter-spacing:-.01
 
 /* ── Page: one centred column that settles in on arrival ── */
 .page{min-width:0;padding:36px 20px 40px}
-.col{width:100%;max-width:720px;margin:0 auto;display:grid;gap:28px;align-content:start;animation:page-in 420ms var(--ease-standard) both}.col>*{min-width:0}
-.col--narrow{max-width:480px}@keyframes page-in{from{opacity:0;transform:translateY(8px)}}
+.col{width:100%;max-width:720px;margin:0 auto;display:grid;gap:28px;align-content:start;animation:page-in 240ms var(--ease-standard) both}.col>*{min-width:0}
+.col--narrow{max-width:480px}.col--wide{max-width:none}
+/* The overview: Arc tabs down the left (All, Friends, Groups, Your bots, Chat apps), the picked section on the right.
+   Below 1024px the tabs become a row above the section that scrolls sideways. */
+/* Every signed-in page is the same centred column, so nothing moves between pages. The overview's tabs sit in the
+   left margin beside it when there's room, and above it as a row that scrolls sideways when there isn't. */
+.ovtabs{display:grid;gap:20px;align-items:start}
+.ovtabs__list{position:relative;isolation:isolate;display:grid;gap:2px;align-content:start}
+.ovtabs__tab{position:relative;z-index:1;display:flex;align-items:center;gap:10px;min-height:40px;padding:0 12px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--text-secondary);font:inherit;font-weight:500;text-align:left;white-space:nowrap;cursor:pointer;transition:color var(--duration-fast) var(--ease-standard)}
+.ovtabs__tab svg{width:18px;height:18px;flex:none}
+.ovtabs__label{flex:1}
+.ovtabs__tab .count{margin-left:auto}
+.ovtabs__tab[aria-selected="true"]{color:var(--foreground)}
+.ovtabs__tab:active{color:var(--foreground);transform:scale(.97)}.ovtabs__tab{transition:color var(--duration-fast) var(--ease-standard),transform 120ms var(--ease-standard)}
+@media (hover:hover) and (pointer:fine){.ovtabs__tab:hover{color:var(--foreground)}}
+.ovtabs__sel{position:absolute;z-index:0;top:0;left:0;width:0;height:0;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--surface);box-shadow:var(--shadow-resting);opacity:0}
+.ovtabs.ready .ovtabs__sel{opacity:1}
+.ovtabs.moved .ovtabs__sel{transition:transform var(--duration-spring) var(--ease-spring),width var(--duration-spring) var(--ease-spring),height var(--duration-spring) var(--ease-spring)}
+.ovtabs:not(.ready) .ovtabs__tab[aria-selected="true"]{background:var(--surface);box-shadow:var(--shadow-resting),0 0 0 1px var(--border)}
+.ovtabs__panel,.ovtabs__panel>div{display:grid;gap:28px;align-content:start;min-width:0}
+.ovtabs__panel>div[hidden]{display:none}
+.ovtabs__panel:focus-visible{outline:none}
+@media (min-width:1184px){.ovtabs{grid-template-columns:200px minmax(0,1fr);gap:32px;margin-left:-232px}.ovtabs__list{position:sticky;top:84px}}
+@media (max-width:1183px){
+ .ovtabs__list{grid-auto-flow:column;grid-auto-columns:max-content;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;margin:0 -20px;padding:0 20px;scroll-padding-inline:20px}.ovtabs__list::-webkit-scrollbar{display:none}
+ .ovtabs__tab{min-height:36px;padding:0 12px;gap:8px}.ovtabs__tab svg{width:16px;height:16px}.ovtabs__tab .count{margin-left:2px}}
+@media (prefers-reduced-motion:reduce){.ovtabs.moved .ovtabs__sel{transition:none}.ovtabs__tab:active{transform:none}}
+@keyframes page-in{from{opacity:0}}.stay .col{animation:none}.vt .col{animation:none}
+@view-transition{navigation:auto}
+.top{view-transition-name:top}
+::view-transition-old(top){display:none}::view-transition-new(top),::view-transition-group(top){animation:none}
+::view-transition-old(root),::view-transition-new(root){animation-duration:160ms;animation-timing-function:var(--ease-standard)}
+@media (prefers-reduced-motion:reduce){@view-transition{navigation:none}}
 body.in .legal{max-width:720px;margin:48px auto 0}
 .pagehead{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px}
 .pagehead__text{display:grid;gap:6px;min-width:0}.pagehead__sub{margin:0;color:var(--text-secondary)}
 .pagehead__actions{display:flex;flex-wrap:wrap;gap:8px}.pagehead__actions form{margin:0}
-.crumb{display:inline-flex;align-items:center;gap:4px;margin-left:-4px;color:var(--text-secondary);text-decoration:none;font-weight:500;font-size:var(--text-sm)}.crumb svg{width:16px;height:16px}.crumb:hover{color:var(--foreground)}
+.ptitle{display:flex;align-items:center;gap:6px;min-width:0}.ptitle h1{min-width:0;overflow-wrap:anywhere}.ptitle__pen{flex:none}
+.ptitle:has(.ptitle__edit[open])>h1,.ptitle__edit[open]>.ptitle__pen{display:none}.ptitle:has(.ptitle__edit[open]){display:block}
+.ptitle__form{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0}
+.ptitle__box{position:relative;display:flex;flex:1 1 240px;max-width:360px}.ptitle__at{position:absolute;inset:0 auto 0 13px;display:grid;place-items:center;color:var(--text-muted);font:500 var(--text-lg)/1 var(--font-display);pointer-events:none}
+.ptitle__box input{flex:1;height:44px;padding-left:30px;font:500 var(--text-lg)/1 var(--font-display);letter-spacing:var(--tracking-display)}.ptitle__box input[aria-invalid=true]{border-color:var(--danger)}
+.ptitle__desc{flex-basis:100%;margin:0;color:var(--text-secondary);font-size:var(--text-xs)}
+@media (prefers-reduced-motion:no-preference){.ptitle__edit[open] .ptitle__form{animation:ptitle-in var(--duration-fast) var(--ease-standard)}}@keyframes ptitle-in{from{opacity:0;transform:translateY(-2px)}}
+.crumb{display:inline-flex;align-items:center;gap:4px;margin-left:-4px;color:var(--text-secondary);text-decoration:none;font-weight:500;font-size:var(--text-sm)}.crumb svg{width:16px;height:16px}@media (hover:hover) and (pointer:fine){.crumb:hover{color:var(--foreground)}}
 .note{display:flex;align-items:center;gap:6px;margin:0;color:var(--text-muted);font-size:var(--text-xs)}.note svg{width:13px;height:13px}
-.legal{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:40px;font-size:var(--text-xs)}.legal a{color:var(--text-muted);text-decoration:none}.legal a:hover{color:var(--foreground);text-decoration:underline}
-body.out{min-height:100vh;display:flex;flex-direction:column}body.out .topbar{padding:20px clamp(16px,3vw,40px)}
+.legal{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:40px;font-size:var(--text-xs)}.legal a{color:var(--text-muted);text-decoration:none}@media (hover:hover) and (pointer:fine){.legal a:hover{color:var(--foreground);text-decoration:underline}}
+body.out{min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}body.out .topbar{padding:20px clamp(16px,3vw,40px)}
 body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px 48px}body.out .legal{justify-content:center;margin:0 auto 28px}
 .sim{margin:0 0 16px;padding:8px 14px;border-radius:var(--radius-control);background:color-mix(in oklab,var(--warning) 16%,var(--surface));color:var(--foreground);font-weight:500;text-align:center}
 
 /* ── Cards (Arc surface): a border, no shadow ── */
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-surface);padding:24px;min-width:0}
-.card>:last-child{margin-bottom:0}.card.narrow{max-width:480px;width:100%;margin-inline:auto}
+.card>:last-child{margin-bottom:0}
+/* A heading opening a card has room under it; a quiet line set apart closes it (who asked, who's signed in). */
+.card:not(.stack)>h1:not(:last-child){margin-bottom:14px}.card:not(.stack)>h2:first-child:not(:last-child){margin-bottom:10px}
+.card__aside{display:grid;gap:4px;margin-top:24px;padding-top:16px;border-top:1px solid var(--border-subtle);color:var(--text-secondary);font-size:var(--text-xs)}.card__aside p,.card__aside form{margin:0}.card.narrow{max-width:480px;width:100%;margin-inline:auto}
 .card--flush{padding:0;overflow:visible}
 .card__head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
 .card__head h2{margin:0;display:flex;align-items:center;gap:8px}.card__head form{margin:0}
@@ -2561,11 +3671,11 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .acc[data-open="true"] .acc__body{opacity:1;transform:none;transition-delay:60ms}
 .kv{display:grid;gap:8px;margin:0 0 16px}.kv>div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px}
 .kv dt{color:var(--text-muted)}.kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
-.acc__setting{margin:0 0 16px}.acc__actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.acc__actions form{margin:0}
+.acc__setting{margin:0 0 16px}.acc__actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.acc__actions form{margin:0}.acc__actions .acc__end{margin-left:auto}
 @media (max-width:560px){.acc__body{padding-left:20px}.kv>div{grid-template-columns:1fr;gap:0}}
 
 /* ── Avatar (Arc) ── */
-.avatar{position:relative;display:inline-grid;flex:none;place-items:center;border:2px solid #fff;border-radius:var(--radius-pill);background:var(--surface-muted);box-shadow:0 1px 1px rgb(0 0 0 / .08),0 3px 8px rgb(0 0 0 / .1);color:var(--foreground);font-size:var(--text-xs);font-weight:500;line-height:1}
+.avatar{position:relative;display:inline-grid;flex:none;place-items:center;border:2px solid var(--ring);border-radius:var(--radius-pill);background:var(--surface-muted);box-shadow:0 1px 1px rgb(0 0 0 / .08),0 3px 8px rgb(0 0 0 / .1);color:var(--foreground);font-size:var(--text-xs);font-weight:500;line-height:1}
 .avatar--sm{width:28px;height:28px;font-size:11px}.avatar--md{width:34px;height:34px;font-size:13px}.avatar--lg{width:48px;height:48px;font-size:var(--text-sm)}
 .avatar img{position:absolute;inset:0;width:100%;height:100%;border-radius:inherit;object-fit:cover;pointer-events:none;transition:opacity var(--duration-standard) var(--ease-standard),filter var(--duration-standard) var(--ease-standard)}
 .avatar img[data-loading]{opacity:0;filter:blur(4px);transition:none}.avatar--lg{border-width:3px}
@@ -2573,9 +3683,24 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .avatar--cut{border:0;background:none;box-shadow:none;filter:drop-shadow(0 1px 1px rgb(0 0 0 / .1)) drop-shadow(0 3px 5px rgb(0 0 0 / .12))}.avatar--cut img{border-radius:0;object-fit:contain}
 .me{display:flex;align-items:center;gap:14px;min-width:0}
 /* Picture picker: the chosen robot lands in the preview on a spring and blinks once. */
-.dlg{width:min(420px,calc(100vw - 32px));padding:0;border:0;border-radius:var(--radius-surface);background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-floating),0 0 0 1px rgb(26 34 48/.06)}
-.dlg[open]{animation:dlg-in 420ms var(--ease-spring) both}.dlg::backdrop{background:rgb(26 34 48/.36);animation:dlg-fade 200ms ease-out both}
-.dlg__in{display:grid;gap:14px;padding:24px}.dlg__title{margin:0;font:500 var(--text-xl)/1.15 var(--font-display);letter-spacing:var(--tracking-display)}
+.dlg{width:min(420px,calc(100vw - 32px));padding:0;border:0;border-radius:var(--radius-surface);background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-floating),0 0 0 1px var(--hairline)}
+.dlg[open]{animation:dlg-in 420ms var(--ease-spring) both}.dlg::backdrop{background:var(--scrim);animation:dlg-fade 200ms ease-out both}
+.dlg__in{display:grid;gap:14px;padding:24px}
+/* A big update: three robots passing a message along (the dot travels, unless motion is reduced), then the title and points. */
+.talk{display:flex;align-items:center;justify-content:center;padding:26px 16px;border-radius:var(--radius-panel);background:var(--accent-subtle)}
+.talk img{width:46px;height:46px;flex:none;border-radius:50%;box-shadow:0 0 0 3px var(--surface)}
+.talk__wire{position:relative;width:clamp(36px,12vw,72px);height:2px;margin:0 6px;background:repeating-linear-gradient(90deg,color-mix(in oklab,var(--accent) 45%,transparent) 0 6px,transparent 6px 11px)}
+.talk__wire i{position:absolute;top:50%;left:0;width:9px;height:9px;margin-top:-4.5px;border-radius:50%;background:var(--accent);animation:talk-hop 2.4s var(--ease-standard) infinite}
+.talk__wire--late i{animation-delay:1.2s}
+@keyframes talk-hop{0%{left:0;opacity:0}12%{opacity:1}50%{left:calc(100% - 9px);opacity:1}62%,100%{left:calc(100% - 9px);opacity:0}}
+@media (prefers-reduced-motion:reduce){.talk__wire i{animation:none;left:calc(50% - 4.5px)}}
+.dlg--big{width:min(480px,calc(100vw - 32px))}.dlg--big .talk{margin:-24px -24px 4px;border-radius:var(--radius-surface) var(--radius-surface) 0 0}
+.bigup__title{font:500 var(--text-2xl)/1.08 var(--font-display);letter-spacing:var(--tracking-display);margin:0}
+.bigup__lead{margin:0;color:var(--foreground)}
+.bigup__points{list-style:none;margin:0;padding:0;display:grid;gap:8px;color:var(--text-secondary)}
+.bigup__points li{position:relative;padding-left:26px}
+.bigup__points li::before{content:"";position:absolute;left:0;top:.2em;width:16px;height:16px;border-radius:50%;background:var(--accent-subtle)}
+.bigup__points li::after{content:"";position:absolute;left:5px;top:calc(.2em + 4px);width:6px;height:3.5px;border-left:1.75px solid var(--accent);border-bottom:1.75px solid var(--accent);transform:rotate(-45deg)}.dlg__title{margin:0;font:500 var(--text-xl)/1.15 var(--font-display);letter-spacing:var(--tracking-display)}
 .dlg__one{margin:0;font-size:var(--text-base)}.dlg__list{margin:0;padding:0;list-style:none;display:grid;gap:9px}
 .dlg__list li{position:relative;padding-left:18px}.dlg__list li::before{content:"";position:absolute;left:3px;top:.6em;width:6px;height:6px;border-radius:50%;background:var(--accent)}
 .dlg__foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:6px}
@@ -2604,7 +3729,7 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .fbtext{white-space:normal!important}@media(max-width:640px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-panel);padding:14px 16px}.kpi p{margin:0}
 .kpi__label{color:var(--text-secondary);font-size:var(--text-xs);font-weight:500}.kpi__value{font:500 var(--text-2xl)/1.15 var(--font-display);letter-spacing:var(--tracking-display);font-variant-numeric:tabular-nums;margin:4px 0 2px!important}.kpi__note{color:var(--text-muted);font-size:var(--text-xs)}
-.viz{margin:0;display:grid;gap:12px;--s1:#2747c9;--s2:#eb6834}.viz__head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}.viz__head h3{font-size:var(--text-sm);font-weight:500}
+.viz{margin:0;display:grid;gap:12px;--s1:var(--chart-1);--s2:var(--chart-2)}.viz__head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}.viz__head h3{font-size:var(--text-sm);font-weight:500}
 .viz__legend{display:flex;gap:14px;margin:0;padding:0;list-style:none;color:var(--text-secondary);font-size:var(--text-xs)}.viz__legend li{display:flex;align-items:center;gap:6px}.viz__sw{width:10px;height:10px;border-radius:3px}
 .viz__sw.viz__s1{background:var(--s1)}.viz__sw.viz__s2{background:var(--s2)}path.viz__s1{fill:var(--s1)}path.viz__s2{fill:var(--s2)}
 .viz__plot{position:relative}.viz__plot svg{display:block;width:100%;height:auto;overflow:visible}.viz__grid{stroke:var(--border-subtle);stroke-width:1}.viz__base{stroke:var(--border-strong);stroke-width:1}
@@ -2614,7 +3739,7 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .hbars{margin:0;padding:0;list-style:none;display:grid;gap:10px}.hbars li{display:grid;grid-template-columns:minmax(80px,140px) 1fr 32px;align-items:center;gap:12px}
 .hbars__name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hbars__track{height:10px}.hbars__bar{display:block;height:100%;border-radius:0 4px 4px 0;background:var(--s1)}.hbars__n{text-align:right;color:var(--text-secondary);font-variant-numeric:tabular-nums}
 .pfp{display:grid;gap:24px}.pfp__name{max-width:360px;width:100%;justify-self:center}.setrow>.grow{flex:1;min-width:0}.pfp__head{display:grid;justify-items:center;gap:8px;text-align:center}.pfp__head h1{margin:10px 0 0}
-.pfp__face{display:block;width:112px;height:112px;border:6px solid #fff;border-radius:var(--radius-pill);overflow:hidden;background:var(--surface-muted);filter:drop-shadow(0 1px 1px rgb(0 0 0 / .08)) drop-shadow(0 8px 14px rgb(0 0 0 / .1))}
+.pfp__face{display:block;width:112px;height:112px;border:6px solid var(--sticker-edge);border-radius:var(--radius-pill);overflow:hidden;background:var(--surface-muted);filter:drop-shadow(0 1px 1px rgb(0 0 0 / .08)) drop-shadow(0 8px 14px rgb(0 0 0 / .1))}
 .pfp__face svg,.pfp__face img{display:block;width:100%;height:100%;object-fit:cover}
 .pfp__face[data-cut]{width:132px;height:132px;border:0;border-radius:0;overflow:visible;background:none}.pfp__face[data-cut] img{object-fit:contain}
 .pfp__set{display:grid;gap:12px;min-width:0;margin:0;padding:0;border:0}.pfp__legend{margin-bottom:12px;padding:0;color:var(--text-secondary);font-weight:500}
@@ -2623,7 +3748,7 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .pfp__grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin:0;padding:0;border:0;min-width:0}
 .pfp__opt{position:relative;display:block;min-width:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .pfp__opt input{position:absolute;opacity:0;pointer-events:none}
-.pfp__img{position:relative;display:block;width:100%;aspect-ratio:1;border:3px solid #fff;border-radius:var(--radius-pill);overflow:hidden;box-shadow:0 1px 1px rgb(0 0 0 / .08),0 4px 10px rgb(0 0 0 / .1);transition:box-shadow var(--duration-fast) var(--ease-standard),transform 220ms cubic-bezier(.34,1.56,.64,1)}
+.pfp__img{position:relative;display:block;width:100%;aspect-ratio:1;border:3px solid var(--sticker-edge);border-radius:var(--radius-pill);overflow:hidden;box-shadow:0 1px 1px rgb(0 0 0 / .08),0 4px 10px rgb(0 0 0 / .1);transition:box-shadow var(--duration-fast) var(--ease-standard),transform 220ms cubic-bezier(.34,1.56,.64,1)}
 .pfp__img svg{position:absolute;inset:0;display:block;width:100%;height:100%}
 .pfp__opt input:checked+.pfp__img{box-shadow:0 0 0 2px var(--background),0 0 0 4px var(--foreground)}
 .pfp__opt input:focus-visible+.pfp__img{box-shadow:0 0 0 2px var(--background),0 0 0 4px var(--accent)}
@@ -2639,6 +3764,18 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .pdot::before{content:"";position:absolute;inset:0;margin:auto;width:46%;height:46%;border-radius:50%;background:var(--presence-surface,var(--surface));transform:scale(0);transition:transform var(--duration-spring) var(--ease-spring),background-color var(--duration-fast) var(--ease-standard)}
 .pdot[data-status="away"]{--dot-color:var(--warning)}.pdot[data-status="offline"]{--dot-color:var(--text-muted)}
 .pdot[data-status="away"]::before,.pdot[data-status="offline"]::before{transform:scale(1)}
+/* A bot's row: the mark of the assistant it runs on, its presence dot on the corner, and its doorbell as a bell. */
+.botmark{--mark-bg:var(--surface-muted);position:relative;display:grid;place-items:center;width:40px;height:40px;flex:none;border-radius:12px;background:var(--mark-bg);color:var(--foreground)}
+.botmark>svg{width:20px;height:20px}.botmark[data-origin="openclaw"]>svg{width:23px;height:23px}
+.botmark>.pdot{position:absolute;right:-3px;bottom:-3px;box-shadow:0 0 0 2.5px var(--presence-surface,var(--surface))}
+.bell{position:relative;display:grid;place-items:center;width:32px;height:32px;flex:none;border-radius:999px;color:var(--text-muted)}
+.bell>svg{width:18px;height:18px}
+.bell[data-state="on"]{color:var(--accent);background:var(--accent-subtle)}.bell[data-state="warn"]{color:var(--warning)}.bell[data-state="none"]{opacity:.75}
+.bell__tip{position:absolute;right:calc(100% + 10px);top:50%;z-index:5;width:max-content;max-width:250px;padding:8px 11px;border-radius:10px;background:var(--foreground);color:var(--background);font-size:var(--text-xs);font-weight:500;line-height:1.4;text-align:left;white-space:normal;box-shadow:var(--shadow-floating);pointer-events:none;opacity:0;transform:translate(4px,-50%);transition:opacity var(--duration-fast) var(--ease-standard),transform var(--duration-fast) var(--ease-standard)}
+@media (hover:hover) and (pointer:fine){.bell:hover>.bell__tip{opacity:1;transform:translate(0,-50%)}}
+.line--link:focus-visible .bell__tip{opacity:1;transform:translate(0,-50%)}
+@media (prefers-reduced-motion:reduce){.bell__tip{transition:none}}
+.card--tips{overflow:visible}.card--tips>.list>li:first-child>.line{border-radius:var(--radius-surface) var(--radius-surface) 0 0}.card--tips>.list>li:last-child>.line{border-radius:0 0 var(--radius-surface) var(--radius-surface)}.card--tips>.list>li:only-child>.line{border-radius:var(--radius-surface)}
 
 /* ── User menu (Arc): you, your plan, and the way out ── */
 .umenu{flex:none}.umenu__trigger{display:flex;align-items:center;padding:3px;border-radius:999px;cursor:pointer;transition:background-color var(--duration-fast) var(--ease-standard)}
@@ -2658,7 +3795,7 @@ h2 .umenu__plan{display:inline-block;vertical-align:2px;margin-left:6px}
 .umenu__email{overflow:hidden;font-size:12px;color:var(--text-muted);text-overflow:ellipsis;white-space:nowrap}
 .umenu__sep{height:1px;margin:4px -4px;background:color-mix(in oklab,var(--foreground) 7%,transparent)}.umenu form{margin:0}
 .umenu__item{display:flex;align-items:center;gap:10px;width:100%;height:32px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--foreground);font:inherit;font-size:13px;text-align:left;text-decoration:none;cursor:pointer}
-.umenu__item svg{width:16px;height:16px;flex:none;color:var(--text-secondary)}.umenu__item:hover,.umenu__item:focus-visible{outline:none;background:color-mix(in oklab,var(--foreground) 6%,transparent)}.umenu__item:hover svg{color:var(--foreground)}
+.umenu__item svg{width:16px;height:16px;flex:none;color:var(--text-secondary)}.umenu__item:focus-visible{outline:none;background:color-mix(in oklab,var(--foreground) 6%,transparent)}@media (hover:hover) and (pointer:fine){.umenu__item:hover{background:color-mix(in oklab,var(--foreground) 6%,transparent)}.umenu__item:hover svg{color:var(--foreground)}}
 
 /* ── Badge (Arc): a short status word with a faint tint ── */
 .badge{display:inline-flex;align-items:center;min-height:24px;padding:0 9px;border:1px solid var(--badge-border,var(--border));border-radius:var(--radius-pill);background:var(--badge-bg,var(--surface-muted));color:var(--badge-fg,var(--text-secondary));font-size:var(--text-xs);font-weight:500;line-height:1;white-space:nowrap;vertical-align:middle}
@@ -2670,7 +3807,7 @@ h2 .umenu__plan{display:inline-block;vertical-align:2px;margin-left:6px}
 /* ── Alert (Arc): what needs you, with the action that resolves it ── */
 /* ── Notice: what just happened, how to take it back, what next. Settles in once; reduced motion just shows it ── */
 .toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom));z-index:60;display:flex;align-items:center;gap:10px;max-width:calc(100vw - 24px);padding:9px 16px 9px 14px;border-radius:999px;background:var(--foreground);color:var(--background);box-shadow:var(--shadow-floating,0 8px 24px rgb(0 0 0/.18));font-size:var(--text-sm);font-weight:500;transform:translateX(-50%);animation:toast-in 380ms var(--ease-spring) both,toast-out 220ms ease-in 4s forwards}
-.toast--undo{padding-right:6px;animation-delay:0s,8s}.toast:hover,.toast:focus-within{animation-play-state:paused}
+.toast--undo{padding-right:6px;animation-delay:0s,8s}.toast:focus-within{animation-play-state:paused}@media (hover:hover) and (pointer:fine){.toast:hover{animation-play-state:paused}}
 .toast>svg{flex:none;width:16px;height:16px;color:var(--success)}.toast__what{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.toast form{margin:0}
 .toast__undo{min-height:30px;padding:0 12px;border:0;border-radius:999px;background:color-mix(in oklab,var(--background) 16%,transparent);color:inherit;font:inherit;cursor:pointer}
 @media (hover:hover) and (pointer:fine){.toast__undo:hover{background:color-mix(in oklab,var(--background) 26%,transparent)}}
@@ -2687,10 +3824,10 @@ h2 .umenu__plan{display:inline-block;vertical-align:2px;margin-left:6px}
 
 /* ── Button (Arc): primary is ink, secondary (.ghost) sits on the surface, danger keeps the surface with a red label.
    Loading keeps the button focusable, hides the label and spins in its place, so the width never moves. ── */
-.btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:var(--control-height-md);padding:0 16px;border:1px solid transparent;border-radius:18px;background:var(--foreground);border-color:var(--foreground);color:var(--background);font:inherit;font-size:var(--text-sm);font-weight:500;line-height:1.4;white-space:nowrap;text-decoration:none;cursor:pointer;-webkit-tap-highlight-color:transparent;
+.btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:var(--control-height-md);padding:0 20px;border:1px solid transparent;border-radius:18px;background:var(--foreground);border-color:var(--foreground);color:var(--background);font:inherit;font-size:var(--text-sm);font-weight:500;line-height:1.4;white-space:nowrap;text-decoration:none;cursor:pointer;-webkit-tap-highlight-color:transparent;
 transition:color var(--duration-fast) var(--ease-standard),background-color var(--duration-fast) var(--ease-standard),border-color var(--duration-fast) var(--ease-standard),opacity var(--duration-fast) var(--ease-standard),box-shadow var(--duration-fast) var(--ease-standard),transform 120ms cubic-bezier(.34,1.56,.64,1)}
 .btn svg{width:16px;height:16px;flex:none}.btn:active:not(:disabled):not([aria-busy=true]){transform:scale(.97)}.btn:disabled{opacity:.52;cursor:not-allowed}
-.btn.small{min-height:var(--control-height-sm);padding:0 12px}.btn.wide{width:100%}.btn.wide:active:not(:disabled){transform:scale(.985)}
+.btn.small{min-height:var(--control-height-sm);padding:0 14px}.btn.wide{width:100%}.btn.wide:active:not(:disabled){transform:scale(.985)}
 .btn.blue{background:var(--accent);border-color:var(--accent);color:var(--accent-foreground)}
 .btn.ghost{background:var(--surface);color:var(--foreground);border-color:var(--border)}
 .btn.danger{background:var(--surface);color:var(--danger);border-color:var(--border)}
@@ -2704,7 +3841,8 @@ transition:color var(--duration-fast) var(--ease-standard),background-color var(
 @keyframes btn-spin{to{transform:rotate(360deg)}}
 .iconbtn{display:grid;place-items:center;width:32px;height:32px;border-radius:10px;color:var(--text-muted);cursor:pointer;list-style:none}.iconbtn svg{width:18px;height:18px}.iconbtn::-webkit-details-marker{display:none}
 @media (hover:hover) and (pointer:fine){.iconbtn:hover{background:var(--surface-muted);color:var(--foreground)}}
-.link{background:none;border:0;padding:0;color:var(--text-secondary);text-decoration:underline;text-underline-offset:.2em;text-decoration-color:var(--border-strong);cursor:pointer;font:inherit}.link:hover{color:var(--foreground)}.link.danger{color:var(--danger)}
+.link{background:none;border:0;padding:0;color:var(--text-secondary);text-decoration:underline;text-underline-offset:.2em;text-decoration-color:var(--border-strong);cursor:pointer;font:inherit}@media (hover:hover) and (pointer:fine){.link:hover{color:var(--foreground)}}.link.danger{color:var(--danger)}
+.link svg{width:14px;height:14px;vertical-align:-2px;margin-left:2px}
 
 /* ── Dropdown menu (Arc): a raised panel that grows from its trigger ── */
 .more{position:relative}.more>summary{list-style:none}.more>summary::-webkit-details-marker{display:none}
@@ -2713,7 +3851,7 @@ transition:color var(--duration-fast) var(--ease-standard),background-color var(
 .more .menu form{margin:0}
 .more .menu a,.more .menu button{display:flex;align-items:center;gap:10px;width:100%;min-height:36px;padding:0 11px;border:0;border-radius:calc(var(--radius-panel) - 6px);background:none;color:var(--foreground);font:inherit;font-size:var(--text-sm);text-decoration:none;cursor:pointer;text-align:left}
 .more .menu svg{width:16px;height:16px;color:var(--text-secondary)}.more .menu .danger{color:var(--danger)}
-.more .menu a:hover,.more .menu button:hover{background:var(--surface-muted)}.more .menu .danger:hover{background:color-mix(in oklab,var(--danger) 8%,var(--surface))}
+@media (hover:hover) and (pointer:fine){.more .menu a:hover,.more .menu button:hover{background:var(--surface-muted)}.more .menu .danger:hover{background:color-mix(in oklab,var(--danger) 8%,var(--surface))}}
 .more .menu[data-confirming]>:not(.menu__confirm){display:none}
 .menu__confirm{display:grid;gap:10px;width:15rem;padding:8px 8px 4px;white-space:normal}.menu__confirm p{margin:0;font-size:var(--text-sm);color:var(--text-secondary)}
 .menu__actions{display:flex;justify-content:flex-end;gap:4px}.more .menu .menu__actions button{width:auto;min-height:32px;padding:0 12px;border-radius:999px}
@@ -2741,6 +3879,7 @@ transition:color var(--duration-fast) var(--ease-standard),background-color var(
 .cm__confirm:hover{background:color-mix(in oklab,var(--danger) 18%,transparent)}.cm[data-tone="neutral"] .cm__confirm:hover{background:var(--accent-strong)}}
 
 /* ── Segmented control (Arc): the selection glides, labels only change colour ── */
+.apppick{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.apppick button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--surface);color:var(--text-secondary);font:inherit;cursor:pointer}.apppick button svg{width:16px;height:16px;flex:none}.apppick button[aria-pressed=true]{border-color:var(--foreground);color:var(--foreground);background:var(--surface-muted)}@media (max-width:420px){.apppick button{flex-direction:column;gap:4px;font-size:13px}}
 .seg{display:inline-flex;max-width:100%;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--surface-muted)}
 .seg__track{position:relative;isolation:isolate;display:flex;gap:2px;padding:3px;border-radius:inherit}
 .seg button{position:relative;z-index:1;min-height:30px;padding:0 12px;border:0;border-radius:calc(var(--radius-control) - 4px);background:transparent;color:var(--text-muted);font:inherit;font-weight:500;white-space:nowrap;cursor:pointer;transition:color var(--duration-fast) var(--ease-standard)}
@@ -2758,6 +3897,54 @@ transition:color var(--duration-fast) var(--ease-standard),background-color var(
 .switch input:focus-visible+.switch__track{outline:2px solid color-mix(in oklab,var(--accent) 72%,transparent);outline-offset:2px}
 @media (hover:hover) and (pointer:fine){.switch:has(input:disabled){cursor:default}.switch input:disabled{cursor:default}.switch input:disabled+.switch__track{opacity:.45}
 .switch:hover input:not(:checked)+.switch__track{background:var(--control-track-hover)}}
+/* Nightly updates: when it's on, the card turns to night (a starry sky, like the T3 Code title bar). It flips the
+   moment the switch does, before the save comes back. Dark in both themes on purpose. */
+.card--night{position:relative;overflow:hidden;isolation:isolate;transition:border-color 520ms var(--ease-standard),color 520ms var(--ease-standard)}
+.card--night::before,.card--night::after{content:"";position:absolute;pointer-events:none;opacity:0;transition:opacity 520ms var(--ease-standard)}
+.card--night::before{inset:0;z-index:-1;background:radial-gradient(circle 1.2px at 7% 14%,#fff 99%,transparent),radial-gradient(circle 1px at 24% 88%,rgb(255 255 255/.7) 99%,transparent),radial-gradient(circle 1.5px at 38% 12%,rgb(255 255 255/.85) 99%,transparent),radial-gradient(circle 1px at 52% 86%,rgb(255 255 255/.55) 99%,transparent),radial-gradient(circle 1.2px at 63% 16%,rgb(255 255 255/.75) 99%,transparent),radial-gradient(circle 1.5px at 79% 82%,rgb(255 255 255/.6) 99%,transparent),radial-gradient(circle 1px at 86% 26%,#fff 99%,transparent),radial-gradient(circle 1px at 96% 70%,rgb(255 255 255/.5) 99%,transparent),radial-gradient(60% 110% at 6% 115%,rgb(70 104 214/.5),transparent 70%),radial-gradient(45% 90% at 80% -10%,rgb(132 84 214/.38),transparent 70%),linear-gradient(100deg,#0d1533 0%,#151a45 50%,#2b1b5e 100%)}
+.card--night::after{top:12px;right:27%;width:9px;height:9px;background:linear-gradient(rgb(255 255 255/.75),rgb(255 255 255/.75)) center/1px 100% no-repeat,linear-gradient(rgb(255 255 255/.75),rgb(255 255 255/.75)) center/100% 1px no-repeat}
+.card--night:has(input:checked){border-color:rgb(255 255 255/.08);color:#eef0ff;--control-on:#e9ecff;--control-thumb:#0d1533;--control-track:rgb(255 255 255/.22)}
+.card--night:has(input:checked)::before,.card--night:has(input:checked)::after{opacity:1}
+.card--night:has(input:checked) .setrow__desc{color:#b8bfe6}
+.card--night:has(input:checked) .switch input:focus-visible+.switch__track{outline-color:#e9ecff}
+@media (prefers-reduced-motion:reduce){.card--night,.card--night::before,.card--night::after{transition:none}}
+/* The files card: airmail. On, the card gets an airmail edge and files fly from one bot to the other, past the lock. */
+.card--files,.filesart{--airmail-red:#e0473e;--airmail-blue:#2b57d6}
+.card--files{border:4px solid transparent;padding:21px;background:var(--surface) border-box;outline:1px solid var(--border);outline-offset:-1px;transition:background 520ms var(--ease-standard),outline-color 520ms var(--ease-standard)}
+.card--files:has(input:checked){outline-color:transparent;background:linear-gradient(var(--surface),var(--surface)) padding-box,repeating-linear-gradient(135deg,var(--airmail-red) 0 10px,var(--surface) 10px 15px,var(--airmail-blue) 15px 25px,var(--surface) 25px 30px) border-box}
+.filesart{display:grid;place-items:center;height:112px;margin-bottom:4px;border-radius:var(--radius-panel);background:radial-gradient(70% 120% at 50% 110%,color-mix(in oklab,var(--airmail-blue) 14%,transparent),transparent 70%),color-mix(in oklab,var(--airmail-blue) 6%,var(--surface));overflow:hidden;transition:background 520ms var(--ease-standard)}
+.filesart__stage{position:relative;width:300px;height:96px;flex:none}
+.dlg--big .filesart{height:168px;margin:-24px -24px 4px;border-radius:var(--radius-surface) var(--radius-surface) 0 0;border-bottom:5px solid transparent;border-image:repeating-linear-gradient(135deg,var(--airmail-red) 0 10px,var(--surface) 10px 15px,var(--airmail-blue) 15px 25px,var(--surface) 25px 30px) 5}.dlg--big .filesart__stage{scale:1.3}
+.filesart__route{position:absolute;inset:0;overflow:visible}
+.filesart__route path{fill:none;stroke:color-mix(in oklab,var(--airmail-blue) 45%,var(--surface));stroke-width:2;stroke-linecap:round;stroke-dasharray:1 7;opacity:.55;transition:opacity 520ms var(--ease-standard)}
+.filesart__bot{position:absolute;bottom:0;width:60px;height:60px;filter:drop-shadow(0 2px 3px rgb(20 30 60/.14)) saturate(.35);opacity:.8;transition:filter 520ms var(--ease-standard),opacity 520ms var(--ease-standard)}
+.filesart__bot--from{left:12px}.filesart__bot--to{right:12px}
+.filesart__lock{position:absolute;z-index:1;left:150px;top:13px;translate:-50% -50%;display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--airmail-blue);color:#fff;box-shadow:0 0 0 2px #fff,0 2px 5px rgb(20 30 60/.2);opacity:.5;transition:opacity 520ms var(--ease-standard)}
+.filesart__chip{position:absolute;left:0;top:0;width:24px;height:30px;border-radius:4px;background:#fff;box-shadow:0 0 0 2px #fff,0 0 0 2.5px rgb(20 30 60/.08),0 3px 7px rgb(20 30 60/.18);offset-path:path("M 74 52 C 118 -2, 182 -2, 226 52");offset-rotate:0deg;offset-anchor:center;offset-distance:0%;overflow:hidden}
+.filesart__chip::after{content:"";position:absolute;top:0;right:0;width:7px;height:7px;background:linear-gradient(225deg,var(--surface-muted) 50%,#dfe4ec 50%)}
+.filesart__chip--photo{background:linear-gradient(transparent 52%,#fff 52%) ,radial-gradient(circle 3.5px at 70% 22%,#ffcf4a 95%,transparent),linear-gradient(160deg,#9fc3ff,#5f8ef0);}
+.filesart__chip--photo::before{content:"";position:absolute;left:2px;right:2px;top:7px;height:9px;background:#3f8d5b;clip-path:polygon(0 100%,35% 20%,55% 70%,72% 40%,100% 100%)}
+.filesart__chip--pdf b{position:absolute;left:3px;right:3px;bottom:5px;padding:1px 0;border-radius:2px;background:var(--airmail-red);color:#fff;font:600 7px/1 var(--font-sans,system-ui);letter-spacing:.04em;text-align:center}
+.filesart__chip--pdf::before,.filesart__chip--note::before{content:"";position:absolute;left:4px;right:6px;top:7px;height:12px;background:repeating-linear-gradient(#c9d1de 0 1.5px,transparent 1.5px 4px)}
+.filesart__chip--note{background:#fff8d6}.filesart__chip--note::before{height:17px;background:repeating-linear-gradient(#d9c98a 0 1.5px,transparent 1.5px 4px)}
+/* Off: the files wait in a pile next to the sender. */
+.filesart__chip--photo{offset-distance:1%;rotate:-8deg}.filesart__chip--pdf{offset-distance:4%;rotate:5deg}.filesart__chip--note{offset-distance:7%;rotate:-3deg}
+:is(.card--files:has(input:checked),.filesart--live) .filesart__bot{filter:drop-shadow(0 2px 3px rgb(20 30 60/.14));opacity:1}
+:is(.card--files:has(input:checked),.filesart--live) .filesart__route path{opacity:1;animation:filesart-route 1.2s linear infinite}
+:is(.card--files:has(input:checked),.filesart--live) .filesart__lock{opacity:1;animation:filesart-lock 1.4s var(--ease-standard) 1.75s infinite}
+:is(.card--files:has(input:checked),.filesart--live) .filesart__chip{animation:filesart-fly 4.2s cubic-bezier(.45,0,.3,1) infinite both}
+:is(.card--files:has(input:checked),.filesart--live) .filesart__chip--pdf{animation-delay:1.4s}:is(.card--files:has(input:checked),.filesart--live) .filesart__chip--note{animation-delay:2.8s}
+:is(.card--files:has(input:checked),.filesart--live) .filesart__bot--to{animation:filesart-hop 1.4s var(--ease-standard) 3.3s infinite}
+:is(.card--files:has(input:checked),.filesart--live) .filesart__bot--from{animation:filesart-bob 2.8s ease-in-out infinite}
+@keyframes filesart-fly{0%{offset-distance:0%;opacity:0;scale:.6;rotate:-10deg}10%{opacity:1;scale:1}50%{rotate:6deg}82%{offset-distance:100%;opacity:1;scale:.9;rotate:-4deg}90%,100%{offset-distance:100%;opacity:0;scale:.4;rotate:0deg}}
+@keyframes filesart-lock{0%,100%{scale:1}18%{scale:1.28;box-shadow:0 0 0 2px #fff,0 0 0 7px color-mix(in oklab,var(--airmail-blue) 22%,transparent),0 2px 5px rgb(20 30 60/.2)}40%{scale:1}}
+@keyframes filesart-hop{0%,100%{translate:0 0}14%{translate:0 -6px}30%{translate:0 0}}
+@keyframes filesart-bob{0%,100%{rotate:0deg}50%{rotate:-4deg}}
+@keyframes filesart-route{to{stroke-dashoffset:-16}}
+@media (prefers-reduced-motion:reduce){
+.card--files,.filesart,.filesart__bot,.filesart__route path,.filesart__lock{transition:none}
+:is(.card--files:has(input:checked),.filesart--live) :is(.filesart__chip,.filesart__lock,.filesart__bot,.filesart__route path){animation:none}
+:is(.card--files:has(input:checked),.filesart--live) .filesart__chip--photo{offset-distance:15%;rotate:-6deg}:is(.card--files:has(input:checked),.filesart--live) .filesart__chip--pdf{offset-distance:34%;rotate:3deg}:is(.card--files:has(input:checked),.filesart--live) .filesart__chip--note{offset-distance:78%;rotate:-3deg}}
 
 /* ── Stepper (Arc): markers on one track; the fill grows from each finished step ── */
 .stepper{--marker:28px;--halo:4px;display:grid;margin:0;padding:0;list-style:none}
@@ -2825,7 +4012,15 @@ transition:color var(--duration-fast) var(--ease-standard),background-color var(
 .empty h3{margin:16px 0 0}.empty p{max-width:22rem;margin:6px 0 0;color:var(--text-secondary);text-wrap:balance}.empty__action{margin-top:16px}.empty__action form{margin:0}
 
 /* ── Forms ── */
-.stack{display:grid;gap:14px;margin-top:12px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.stack{display:grid;gap:16px;margin-top:20px}.card.stack{margin-top:0}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}
+.stack>p,.stack>.muted,.stack>.actions,.stack>h1,.stack>h2,.stack>.howto{margin:0}.stack>.link{justify-self:center;min-height:var(--control-height-sm);padding:0 8px}
+.decide{display:flex;gap:10px;margin-top:8px}.decide>.btn{flex:1}.decide>.btn:first-child{order:2}
+.card>p+.btn,.card>p+form>.btn:only-child{margin-top:8px}.center>h1:not(:first-child){margin-top:16px}
+/* Whatever follows a form or a row of buttons gets room, so a button never sits on the next line of text. */
+.card>form:not(:last-child):not(.setrow),.card>.actions:not(:last-child),.stack+p,.stack+form{margin-bottom:16px}.stack+p,.stack+form,.stack+.wait{margin-top:16px}
+.card>.stack:first-child,[data-dir]>.stack:first-child{margin-top:0}.card>.alert{margin:12px 0}.card>.alert:first-child{margin-top:0}.card__head p{margin:2px 0 0}
+p.setrow__label,p.setrow__desc{margin:0}p.setrow__desc{margin-top:2px}.card>p.setrow__desc:not(:last-child){margin-bottom:12px}
+body.out main>*{margin-block:0}body.out main{gap:20px}.center>:last-child{margin-bottom:0}
 label{display:grid;gap:6px;font-weight:500;font-size:var(--text-sm)}
 .field__desc{color:var(--text-secondary);font-size:var(--text-xs);font-weight:400}.field__error{color:var(--danger);font-size:var(--text-xs);font-weight:500}
 .field input[aria-invalid=true]{border-color:var(--danger)}
@@ -2834,7 +4029,7 @@ input::placeholder,textarea::placeholder{color:var(--text-muted)}
 select{appearance:none;padding-right:36px;cursor:pointer;background:var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7588' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 12px center/16px}
 @media (hover:hover) and (pointer:fine){input:hover:not(:disabled):not(.otp__slot),textarea:hover:not(:disabled){border-color:var(--foreground)}select:hover{background-color:var(--surface-muted)}}
 input,select{height:var(--control-height-md);padding:0 12px;min-width:0}textarea{padding:10px 12px;line-height:1.4;resize:vertical}
-@media (min-width:641px){input,select,textarea{font-size:var(--text-sm)}}
+@media (min-width:641px) and (pointer:fine){input,select,textarea{font-size:var(--text-sm)}}
 input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;border-color:var(--foreground)}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.row3{display:grid;grid-template-columns:1fr 1fr 2fr;gap:12px}@media(max-width:560px){.row3{grid-template-columns:1fr 1fr}.row3 label:last-child{grid-column:1/-1}}
 .pick{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:6px 0 14px}.pick label{min-width:180px}
@@ -2857,10 +4052,14 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;bor
 @media (max-width:560px){.fact{grid-template-columns:1fr;gap:2px}}
 
 
-.wait{display:flex;align-items:center;gap:10px;font-weight:500;color:var(--text-secondary)}.wait.hidden{display:none}
+.wait{display:flex;align-items:center;gap:10px;font-weight:500;color:var(--text-secondary)}.wait.center{justify-content:center}.diy+.wait{margin:16px 0}.diy+form,.diy+.wait+form{margin-top:16px}.lead--sm{font-size:17px}.wait.hidden{display:none}
 .howto{padding-left:20px}.howto li{margin:6px 0}
+/* Shown only on touch screens, where a computer-only step can't be finished. */
+.phone-only{display:none;padding:10px 12px;border-radius:10px;background:var(--surface-muted);border:1px solid var(--border)}@media (hover:none) and (pointer:coarse){.phone-only{display:block}}
+.video{display:flex;align-items:center;gap:12px;margin:20px 0;padding:8px;border:1px solid var(--border);border-radius:12px;color:var(--foreground);text-decoration:none;font-weight:500}@media (hover:hover) and (pointer:fine){.video:hover{background:var(--surface)}}.video img{width:120px;height:auto;border-radius:8px;flex:none}.video span{color:var(--accent)}
 .way{display:grid;gap:8px}.way+.way{border-top:1px solid var(--border-subtle);margin-top:20px;padding-top:20px}.way h2{margin:0}.way__head{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.diy>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;font-weight:500;padding:2px 0;cursor:pointer}.diy>summary::-webkit-details-marker{display:none}
+.diy>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;min-height:44px;font-weight:500;padding:6px 0;cursor:pointer}.diy+.diy{margin-top:6px;padding-top:6px;border-top:1px solid var(--border-subtle)}.diy>summary::-webkit-details-marker{display:none}
+.diy__name{display:inline-flex;align-items:center;gap:10px;min-width:0}.diy__marks{display:inline-flex;gap:5px;flex:none;--mark-bg:var(--surface)}.diy__marks>svg{width:18px;height:18px}
 .diy>summary::after{content:"+";font-size:20px;font-weight:400;color:var(--text-muted)}.diy[open]>summary::after{content:"\\2013"}
 details summary{cursor:pointer}
 
@@ -2871,16 +4070,43 @@ details summary{cursor:pointer}
 .bubble .meta{font-size:var(--text-xs);color:var(--text-secondary);margin-bottom:3px}.bubble.out .meta{color:color-mix(in oklab,var(--background) 70%,var(--foreground))}
 .bubble .text{white-space:pre-wrap;word-break:break-word}.bubble .ext{display:block;margin-top:6px;word-break:break-all}
 .choices{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
-.chip{height:var(--control-height-sm);padding:0 14px;border-radius:var(--radius-pill);border:1px solid var(--border-strong);background:var(--surface);color:var(--foreground);font:inherit;font-weight:500;cursor:pointer}.chip:hover{background:var(--surface-muted)}
+.chip{height:var(--control-height-sm);padding:0 14px;border-radius:var(--radius-pill);border:1px solid var(--border-strong);background:var(--surface);color:var(--foreground);font:inherit;font-weight:500;cursor:pointer}@media (hover:hover) and (pointer:fine){.chip:hover{background:var(--surface-muted)}}
 .answered{margin-top:8px}.compose{display:grid;gap:10px;margin-top:8px;border-top:1px solid var(--border-subtle);padding-top:14px}.compose .btn{justify-self:start}
+/* Group chats: rows on the overview (a little pile of faces, Join and No thanks), the group page, and friends by basket. */
+.gline{display:flex;flex-wrap:wrap;align-items:center}.gline>.line{flex:1 1 240px;min-width:0}
+.gline__act{display:flex;align-items:center;gap:8px;padding:8px 16px 8px 0}.gline__act form{margin:0}.gline>.more{margin-right:14px}
+.gpile{display:flex;flex:none;align-items:center;min-width:34px}.gpile .avatar+.avatar{margin-left:-14px}
+.gmark{display:grid;flex:none;place-items:center;width:34px;height:34px;border-radius:12px;background:var(--surface-muted);color:var(--text-secondary)}.gmark svg{width:18px;height:18px}
+.gmark--lg{width:64px;height:64px;margin:0 auto 14px;border-radius:22px}.gmark--lg svg{width:28px;height:28px}
+.ghead{display:grid;gap:10px}.ghead__meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0;color:var(--text-secondary);font-size:var(--text-sm)}.ghead__meta--center{justify-content:center;margin-top:10px}
+.ptitle__box--plain input{padding-left:12px}
+.gsys{justify-self:center;max-width:90%;color:var(--text-muted);font-size:var(--text-xs);text-align:center;text-wrap:balance}
+.choices--show{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.choices--show .chip{display:inline-flex;align-items:center;cursor:default}
+.bubble i{opacity:.8}
+.gtell{margin:8px 0 0;padding-top:14px;border-top:1px solid var(--border-subtle);color:var(--text-secondary);font-size:var(--text-sm)}
+.gpick{display:grid;min-width:0;margin:0;padding:0;border:0}.gpick legend{margin-bottom:4px}
+.gpick__opt{display:flex;align-items:center;gap:12px;min-height:52px;padding:4px 2px;cursor:pointer}.gpick__opt+.gpick__opt{border-top:1px solid var(--border-subtle)}
+.gpick__opt input{flex:none;width:18px;height:18px;margin:0;accent-color:var(--foreground)}
+.setrow.gset{display:grid;justify-content:stretch}.seg--fit{display:flex;width:100%}.seg--fit .seg__track{flex:1}.seg--fit button{flex:1 1 auto;min-height:34px;padding:5px 10px;white-space:normal;line-height:1.2}
+.ffind input{width:min(210px,44vw);height:34px;padding:0 12px}
+.bsec{position:relative}.bsec+.bsec{border-top:1px solid var(--border-subtle)}
+.bsec__head{display:flex;align-items:center;gap:8px;min-height:50px;padding:8px 60px 8px 18px;color:var(--text-secondary);font-weight:500;list-style:none;cursor:pointer}.bsec__head::-webkit-details-marker{display:none}
+.bsec__head>svg{width:16px;height:16px;flex:none;color:var(--text-muted);transition:transform var(--duration-standard) var(--ease-standard)}.bsec__d:not([open])>.bsec__head>svg{transform:rotate(-90deg)}
+.bsec__head .basket-word{color:var(--foreground)}.bsec__d>.list{border-top:1px solid var(--border-subtle)}
+.bsec__menu{position:absolute;top:9px;right:12px}
+.list>li[hidden],.bsec[hidden],.ffind[hidden]{display:none}
+.ffind__none{margin:0;padding:18px 20px;color:var(--text-muted);font-size:var(--text-sm)}
+.card--menus{overflow:visible}.card--menus>.list>li:first-child>.line--link{border-top-left-radius:19px}.card--menus>.list>li:last-child>.line--link{border-bottom-left-radius:19px}
+.card--menus>.bsec:first-child>.bsec__d>.bsec__head{border-radius:19px 19px 0 0}.card--menus>.bsec:last-child>.bsec__d[open]>.list>li:last-child>.acc__head{border-radius:0 0 19px 19px}
+@media (max-width:560px){.gline__act--row{width:100%;padding:0 20px 14px 68px}}
 .extra summary{color:var(--text-secondary)}.extra[open]{display:grid;gap:10px}
 
 /* ── Signed-out and focused pages ── */
-.art{margin:0 auto;max-width:520px;width:100%}.art img{display:block;width:100%;height:auto;-webkit-mask-image:radial-gradient(ellipse 58% 54% at 50% 47%,#000 40%,transparent 100%);mask-image:radial-gradient(ellipse 58% 54% at 50% 47%,#000 40%,transparent 100%)}
+.art{margin:0 auto;max-width:520px;width:100%}.art img{display:block;width:100%;height:auto;filter:var(--art-filter);mix-blend-mode:var(--art-blend);-webkit-mask-image:radial-gradient(ellipse 58% 54% at 50% 47%,#000 40%,transparent 100%);mask-image:radial-gradient(ellipse 58% 54% at 50% 47%,#000 40%,transparent 100%)}
 .art.small{max-width:340px}
 .hero{max-width:640px;margin:48px auto;text-align:center}.hero h1{font-size:40px;margin-bottom:12px}.lead{color:var(--text-secondary);font-size:var(--text-lg);margin:0 0 24px}
 .center>.avatar{width:64px;height:64px;margin:0 auto 14px;font-size:26px;background:var(--foreground);color:var(--background);box-shadow:none}
-.card h1,.center h1{margin-bottom:8px}
+.card h1,.center h1{margin-bottom:12px}.card.stack>h1{margin:0}
 .price{font-size:32px;font-weight:500;letter-spacing:-.03em;margin:4px 0 8px}.ticks{padding-left:18px;margin:0 0 18px}.ticks li{margin:4px 0}.tiers{width:100%}
 .row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:12px 0;border-top:1px solid var(--border-subtle)}.row form{margin:0}
 .quiet{text-align:center}
@@ -2888,8 +4114,9 @@ details summary{cursor:pointer}
 /* ── Phones: the tabs move under the brand and can scroll ── */
 @media (max-width:640px){
 .top__in{flex-wrap:wrap;gap:10px 12px;padding:10px 16px 10px}.brand{margin-right:auto}
-.tabs{order:3;flex:1 0 100%;margin:0;overflow-x:auto;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.tabs__item{flex:1;justify-content:center}
+.tabs{order:3;flex:1 0 100%;margin:0;overflow-x:auto;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.tabs__item{flex:1;justify-content:center;padding:0 10px}
 .page{padding:24px 16px 36px}
+.ovtabs__list{margin:0 -16px;padding:0 16px;scroll-padding-inline:16px}
 .pagehead__actions{width:100%}.pagehead__actions form,.pagehead__actions .btn{flex:1}.pagehead__actions .btn{width:100%}
 h1{font-size:24px}}
 @media (max-width:560px){.setrow{flex-wrap:wrap}.setrow--keep{flex-wrap:nowrap}}
@@ -2900,15 +4127,30 @@ h1{font-size:24px}}
 :root{--font-hand:"Caveat","Segoe Print","Bradley Hand",cursive;--pen:var(--accent);--pen-subtle:var(--accent-subtle);
 --stick-shadow:drop-shadow(0 1px 1px rgb(0 0 0 / .08)) drop-shadow(0 8px 14px rgb(0 0 0 / .1));--lift-shadow:drop-shadow(0 2px 2px rgb(0 0 0 / .07)) drop-shadow(0 20px 22px rgb(0 0 0 / .16))}
 .hand{font-family:var(--font-hand);font-weight:500;letter-spacing:0}
+.tiernote{margin:-4px 0 12px;font-family:var(--font-hand);font-size:22px;line-height:1.2;color:var(--pen);rotate:-1.5deg;transform-origin:left}
+/* The golf Plan card (users.tier_theme = 'golf'): a fairway with mowing stripes, morning light from the left and a
+   hole with its flag on the right. Colours inside the card flip to light so the meter and text read on the grass. */
+.card--golf{position:relative;overflow:hidden;isolation:isolate;border-color:rgb(255 255 255/.08);color:#f1f7ee;
+  --foreground:#f1f7ee;--text-secondary:#cfe3cf;--text-muted:#b4d0b6;--surface:#1c5a35;--surface-muted:rgb(255 255 255/.12);--accent:#ffd34d;--pen:#ffe58a;
+  background:radial-gradient(70% 90% at 0% 0%,rgb(255 244 200/.18),transparent 65%),repeating-linear-gradient(112deg,rgb(255 255 255/.045) 0 34px,transparent 34px 68px),linear-gradient(165deg,#1f6a3c 0%,#1a5a33 55%,#154a2a 100%)}
+.card--golf h2,.card--golf p{position:relative}
+.card--golf .meter__track{background:rgb(0 0 0/.22)}.card--golf .meter__top{padding-right:210px}
+.golf__scene{position:absolute;top:0;right:0;z-index:-1;width:220px;height:132px;pointer-events:none}
+.golf__flag{transform-box:fill-box;transform-origin:0 50%;animation:golf-wave 3.2s ease-in-out infinite}
+@keyframes golf-wave{50%{transform:skewY(-4deg) scaleX(.94)}}
+.umenu__plan.umenu__plan--golf{border-color:transparent;background:#1f6a3c;color:#f1f7ee}
+.card--golf .umenu__plan--golf{background:rgb(255 255 255/.16)}
+@media (max-width:560px){.golf__scene{width:160px;height:96px;opacity:.75}.card--golf .meter__top{padding-right:120px}}
+@media (prefers-reduced-motion:reduce){.golf__flag{animation:none}}
 .js-only{display:none}.js .js-only{display:inline}.js .no-js{display:none}
 .tabs__count{display:inline-grid;place-items:center;min-width:18px;height:18px;margin-left:6px;padding:0 5px;border-radius:999px;background:var(--accent);color:var(--accent-foreground);font-size:11px;font-weight:500;line-height:1;font-variant-numeric:tabular-nums}
-.sheet{position:relative;min-width:0;background:var(--surface);border-radius:28px;padding:28px;box-shadow:0 0 0 1px rgb(26 34 48 / .06),0 1px 2px rgb(26 34 48 / .04)}
+.sheet{position:relative;min-width:0;background:var(--surface);border-radius:28px;padding:28px;box-shadow:0 0 0 1px var(--hairline),0 1px 2px rgb(26 34 48 / .04)}
 .lede{margin:6px 0 0;color:var(--text-secondary);max-width:46ch}
 
 .stk{--s:92px;--tilt:0deg;--rx:0deg;--ry:0deg;--lift:0px;--scale:1;position:relative;display:block;width:var(--s);height:var(--s);flex:none;border-radius:50%;color:inherit;text-decoration:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 a.stk{touch-action:none;cursor:grab}
 .stk__img{display:block;width:100%;height:100%;object-fit:contain;pointer-events:none;filter:var(--stick-shadow);transform:perspective(500px) translateY(var(--lift)) rotate(var(--tilt)) rotateX(var(--rx)) rotateY(var(--ry)) scale(var(--scale));transition:transform 420ms var(--ease-spring),filter 240ms var(--ease-standard),opacity 200ms var(--ease-standard)}
-.stk__disc{display:grid;place-items:center;overflow:hidden;border:calc(var(--s) * .055) solid #fff;border-radius:50%;background:var(--surface-muted)}
+.stk__disc{display:grid;place-items:center;overflow:hidden;border:calc(var(--s) * .055) solid var(--sticker-edge);border-radius:50%;background:var(--surface-muted)}
 .stk__disc img{display:block;width:100%;height:100%;object-fit:cover}
 .stk__initial{font:500 calc(var(--s) * .38)/1 var(--font-display);color:var(--text-secondary)}
 a.stk:hover,a.stk:focus-visible,.stk.is-named{z-index:5}
@@ -2939,8 +4181,10 @@ a.stk:hover .stk__name,a.stk:focus-visible .stk__name,.stk.is-named .stk__name{c
 .basket__head{display:flex;align-items:flex-start;justify-content:space-between;gap:6px;min-height:30px}
 .basket__name{margin:0;min-width:0;font-size:28px;line-height:1;font-weight:500;overflow-wrap:anywhere}
 .basket__tag{align-self:flex-start;margin:8px 0 0}
-.tag{display:inline-flex;white-space:nowrap;align-items:center;gap:5px;padding:2px 11px 3px 8px;border:0;border-radius:999px;background:var(--surface);color:var(--foreground);font:500 19px/1.2 var(--font-hand);letter-spacing:0;rotate:-2.5deg;box-shadow:0 0 0 1px rgb(26 34 48 / .08),0 2px 4px rgb(26 34 48 / .06)}
-.tag svg{width:15px;height:15px;flex:none}.tag[data-mode="asks"]{color:var(--pen);rotate:2deg}
+.tag{display:inline-flex;white-space:nowrap;align-items:center;gap:5px;padding:2px 11px 3px 8px;border:0;border-radius:999px;background:var(--surface);color:var(--foreground);font:500 19px/1.2 var(--font-hand);letter-spacing:0;rotate:-2.5deg;box-shadow:0 0 0 1px var(--hairline-strong),0 2px 4px rgb(26 34 48 / .06)}
+.tag svg{width:15px;height:15px;flex:none}.tag[data-mode="asks"]{color:var(--pen);rotate:2deg}.tag[data-mode="wait"]{color:var(--text-secondary);rotate:-1deg}.tag+.tag{margin-left:6px}
+.stk--wait .stk__img{opacity:.5;filter:grayscale(1)}.stk--wait::after{content:"";position:absolute;inset:-3px;border:1.5px dashed var(--text-secondary);border-radius:50%;opacity:.7;pointer-events:none}
+a.stk[data-held]{cursor:pointer;touch-action:auto}
 .pile{flex:1;display:flex;flex-wrap:wrap;align-items:center;align-content:center;row-gap:4px;padding:14px 4px 6px 10px}
 .pile .stk{--s:66px;margin-left:-18px}.pile .stk:first-child{margin-left:0}.pile .stk__name{font-size:21px}
 .basket--new{grid-column:var(--span3,auto);min-height:64px;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px;padding:10px 14px;background:none;border:1.5px dashed var(--border-strong);text-align:center}
@@ -2951,10 +4195,10 @@ a.stk:hover .stk__name,a.stk:focus-visible .stk__name,.stk.is-named .stk__name{c
 .nb__add{align-items:center;min-height:32px;padding:0 14px;border:0;border-radius:999px;background:var(--foreground);color:var(--background);font:inherit;font-weight:500;cursor:pointer}
 .people__how{margin:16px 4px 0;color:var(--text-secondary);font-size:var(--text-sm)}
 .basket-word{font-size:1.25em;line-height:1}
-.bmenu .iconbtn{width:30px;height:30px}.bmenu .menu{min-width:240px}
-.bmenu__mode{margin:0}.bmenu__mode button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%}.bmenu__mode button::after{content:"";flex:none;width:30px;height:18px;border-radius:999px;background:var(--border-strong) radial-gradient(circle at 9px 50%,#fff 6px,transparent 6.5px);transition:background-color var(--duration-fast) var(--ease-standard)}.bmenu__mode button[aria-checked="true"]::after{background:var(--pen) radial-gradient(circle at 21px 50%,#fff 6px,transparent 6.5px)}
+.bmenu .iconbtn{width:30px;height:30px}.bmenu .menu{min-width:240px;max-width:calc(100vw - 16px)}
+.bmenu__mode{margin:0}.bmenu__mode button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%}.bmenu__sw{position:relative;flex:none;width:30px;height:18px;border-radius:999px;background:var(--border-strong);transition:background-color var(--duration-fast) var(--ease-standard)}.bmenu__sw::after{content:"";position:absolute;top:3px;left:3px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgb(0 0 0 / .18);transition:transform var(--duration-spring) var(--ease-spring)}.bmenu__mode button[aria-checked="true"] .bmenu__sw{background:var(--pen)}.bmenu__mode button[aria-checked="true"] .bmenu__sw::after{transform:translateX(12px)}
 .bmenu__rename{display:flex;gap:6px;padding:4px}.bmenu__rename input{flex:1;height:36px}.more .menu .bmenu__rename button{width:auto;flex:none;background:var(--surface-muted)}
-.mv{position:absolute;z-index:90;min-width:210px;padding:6px;border-radius:var(--radius-panel);background:var(--surface);box-shadow:0 0 0 1px rgb(26 34 48 / .08),var(--shadow-floating);transform-origin:var(--ox,20px) 0;animation:menu-in 220ms var(--ease-standard)}
+.mv{position:absolute;z-index:90;min-width:210px;padding:6px;border-radius:var(--radius-panel);background:var(--surface);box-shadow:0 0 0 1px var(--hairline-strong),var(--shadow-floating);transform-origin:var(--ox,20px) 0;animation:menu-in 220ms var(--ease-standard)}
 .mv[hidden]{display:none}.mv__title{padding:8px 10px 6px;color:var(--text-secondary);font-size:13px}
 .mv [role^="menuitem"]{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:7px 10px;border:0;border-radius:10px;background:none;color:inherit;font:inherit;font-size:15px;text-align:left;text-decoration:none;cursor:pointer}
 .mv [role="menuitemradio"] .hand{margin-right:auto;font-size:22px;line-height:1.1}
@@ -2982,8 +4226,8 @@ a.stk:hover .stk__name,a.stk:focus-visible .stk__name,.stk.is-named .stk__name{c
 .tchips{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .tchip{display:inline-flex;align-items:center;gap:4px;height:34px;margin:0;padding:0 5px 0 13px;border-radius:999px;background:var(--surface);box-shadow:inset 0 0 0 1px var(--border)}
 .tchip button{display:grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:50%;background:none;color:var(--text-secondary);cursor:pointer}.tchip button svg{width:12px;height:12px}
-.tchip button:hover{background:var(--surface-muted);color:var(--foreground)}
-.tchip-add{margin:0}.tchip-add input{width:160px;height:34px;padding:0 13px;border:1.5px dashed var(--border-strong);border-radius:999px;background:none;font-size:var(--text-sm)}
+@media (hover:hover) and (pointer:fine){.tchip button:hover{background:var(--surface-muted);color:var(--foreground)}}
+.tchip-add{margin:0}.tchip-add input{width:160px;height:34px;padding:0 13px;border:1.5px dashed var(--border-strong);border-radius:999px;background:none;font-size:var(--text-sm)}@media (pointer:coarse){.tchip-add input{font-size:16px}}
 .tchip-add input:focus-visible{border-style:solid;border-color:var(--pen)}
 .rules{display:grid;gap:8px;margin:0;padding:0;list-style:none}
 .rule{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:4px 12px;padding:12px 12px 12px 16px;border-radius:16px;background:var(--surface-muted)}
@@ -2997,7 +4241,7 @@ a.stk:hover .stk__name,a.stk:focus-visible .stk__name,.stk.is-named .stk__name{c
 
 /* A question for you: a reply waiting for a yes, or a change the bot can't make alone */
 .asks-list{display:grid;gap:16px}
-.ask{position:relative;min-width:0;padding:20px;border-radius:22px;background:var(--surface);box-shadow:0 0 0 1px rgb(26 34 48 / .08),0 18px 40px -22px rgb(26 34 48 / .28),0 2px 6px rgb(26 34 48 / .04)}
+.ask{position:relative;min-width:0;padding:20px;border-radius:22px;background:var(--surface);box-shadow:0 0 0 1px var(--hairline-strong),0 18px 40px -22px rgb(26 34 48 / .28),0 2px 6px rgb(26 34 48 / .04)}
 .ask__top{display:flex;align-items:center;gap:14px;min-height:40px}.ask__top .stk{--s:64px}
 .ask__topic{margin:-4px 0 0;color:var(--text-secondary);font-size:var(--text-sm)}.ask__topic .hand{margin-right:6px;color:var(--pen);font-size:20px}
 .ask__who{display:grid}.ask__who .hand{color:var(--pen);font-size:24px;line-height:1.05}.ask__who time{color:var(--text-secondary);font-size:13px}

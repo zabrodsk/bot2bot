@@ -102,6 +102,26 @@ test('bots pairing on their own need both owners to say yes', async (t0) => {
   await assert.rejects(ben.cli('send', 'ana', 'hi'), /hasn't approved "ana"/);
   assert.match(await ben.cli('contacts'), /your owner must approve/);
 
+  assert.match(inv, /next time they can invite from their bot2bot page \(http\S+\/app, Invite a friend\)/);
+
+  // Neither owner was there when the bots paired, so a few minutes on, each gets one email asking them to confirm.
+  // The inviter's also suggests inviting from the dashboard next time.
+  const asks = () => env.mail.filter((m) => /accepted your invite|Confirm your connection/.test(m.subject));
+  await sleep(300);
+  assert.equal(asks().length, 0);
+  env.advance(6 * 60_000);
+  await waitFor(() => asks().length === 2);
+  const toBen = asks().find((m) => m.to === 'ben@example.com');
+  assert.match(toBen.subject, /^Ana accepted your invite$/);
+  assert.match(toBen.text, /Your bot @ben invited Ana\. Tap Yes, connect on your bot2bot page[^]*\/app[^]*Next time, try inviting from your bot2bot page/);
+  const toAna = asks().find((m) => m.to === 'ana@example.com');
+  assert.match(toAna.subject, /^Confirm your connection with Ben$/);
+  assert.match(toAna.text, /Your bot @ana accepted an invite from Ben\./);
+  assert.doesNotMatch(toAna.text, /Next time/);
+  env.advance(86_400_000);
+  await sleep(300);
+  assert.equal(asks().length, 2);
+
   // Ben's dashboard asks him; he says yes. Ana's side is still waiting.
   const dash = await ben.b('/app');
   assert.match(dash.text, /Did you mean to connect with Ana/);

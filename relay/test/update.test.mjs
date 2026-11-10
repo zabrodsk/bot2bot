@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { setup, login, owner } from './helpers.mjs';
+import { setup, login, owner, ADMIN } from './helpers.mjs';
 
 const run = promisify(execFile);
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -73,15 +73,15 @@ test('the skill and doorbell routine texts are the ones signed into the tool', a
 test('the relay says which tool is newest, remembers which one each bot runs, and stops one that is too old', async (t0) => {
   const env = await setup(t0);
   const a = await owner(env, t0, 'ann@example.com', 'ann');
-  assert.deepEqual((await (await fetch(`${env.url}/api`)).json()).tool, { latest: VERSION, min: '0.10.0' });
+  assert.deepEqual((await (await fetch(`${env.url}/api`)).json()).tool, { latest: VERSION, min: '0.10.0', channel: 'stable' });
   await a.cli('whoami');
   const row = () => env.relay.db.prepare('SELECT tool_version FROM bots WHERE id = ?').get(a.botId).tool_version;
   assert.equal(row(), VERSION);
   // A tool from before 0.19 doesn't say its version: remembered as ''.
   const me = await a.api('GET', '/v1/me');
-  assert.deepEqual(me.json.tool, { latest: VERSION, min: '0.10.0' });
+  assert.deepEqual(me.json.tool, { latest: VERSION, min: '0.10.0', channel: 'stable', owner_channel: null });
   assert.equal(row(), '');
-  assert.deepEqual((await a.api('POST', '/v1/inbox/claim', {})).json.tool, { latest: VERSION, min: '0.10.0' });
+  assert.deepEqual((await a.api('POST', '/v1/inbox/claim', {})).json.tool, { latest: VERSION, min: '0.10.0', channel: 'stable', owner_channel: null });
 
   const strict = await setup(t0, { minTool: '0.19.0' });
   const s = await owner(strict, t0, 'sam@example.com', 'sam');
@@ -152,11 +152,15 @@ test('refresh: an upgraded bot is told once a day, gets texts matching its tool,
   const key = releaseKey();
   const env = await setup(t0);
   const a = await installed(env, key, 'ann@example.com', 'ann');
-  // A fresh setup already has the current texts.
-  assert.doesNotMatch((await a.cli('inbox')).out, /newer version/);
+  // A fresh setup hasn't confirmed saving its texts: it's asked to check them (worded as setup, not an update),
+  // and --done records that it did.
+  const fresh = await a.cli('refresh');
+  assert.match(fresh.out, /^Make sure you have your "b2b messaging" skill and "b2b doorbell" routine exactly as below[^]*If you have no "b2b doorbell" routine yet, make one on yourself/);
+  await a.cli('refresh', '--done');
+  assert.doesNotMatch((await a.cli('inbox')).out, /newer version|Check your/);
   assert.match((await a.cli('refresh')).out, /already match this version/);
-  // An install from before 0.19 has no record of them.
-  rmSync(join(a.home, 'tool.json'));
+  // A bot whose saved texts are from an older tool is told about the newer version.
+  writeFileSync(join(a.home, 'tool.json'), JSON.stringify({ skill: 'old', doorbell: 'old' }));
   const first = await a.cli('inbox');
   assert.match(first.out, /"b2b messaging" skill and "b2b doorbell" routine have a newer version\. Run: node ~\/bin\/b2b\.mjs refresh and follow it\. Nothing to tell your owner unless refresh says so\./);
   assert.match(first.out, /INBOX EMPTY/);
@@ -165,7 +169,7 @@ test('refresh: an upgraded bot is told once a day, gets texts matching its tool,
   assert.match(r, /Replace your "b2b messaging" skill[^]*-----\n---\nname: b2b messaging/);
   assert.ok(r.includes(`through ${env.url}.`), 'the relay address is filled in');
   assert.ok(!r.includes('{{RELAY}}'));
-  assert.match(r, /Change only the instruction of your "b2b doorbell" routine[^]*Keep the routine itself and its webhook trigger[^]*-----\nb2b messages may be waiting for my owner\. Run `node ~\/bin\/b2b\.mjs inbox --via doorbell` and do exactly what it says\./);
+  assert.match(r, /Change only the instruction of your "b2b doorbell" routine[^]*Keep the routine itself and its webhook trigger[^]*-----\nb2b messages may be waiting for my owner\. Run `(B2B_HOME=\S+ )?node ~\/bin\/b2b\.mjs inbox --via doorbell` and do exactly what it says\./);
   assert.match(r, /^First, tell your owner in one plain sentence what you're about to do[^]*Grok Bot may ask you to allow it/);
   assert.match(r, /refresh --done, and tell your owner in a few words that it's done\./);
   assert.match((await a.cli('refresh', '--done')).out, /Noted[^]*Nothing to tell your owner\./);
@@ -214,4 +218,114 @@ test('dashboard: an owner sees when their bot runs a tool too old to update itse
   const p2 = (await c.b(`/app/bots/${c.botId}`)).text;
   assert.match(p2, /Updates itself to 99\.0\.0 next time it checks messages/);
   assert.doesNotMatch(p2, /id="update"/);
+});
+
+// Release channels: nightly is every release as it ships; stable moves on at most once a day, to a release that
+// has been out for an hour. Bots are on stable unless they ask for nightly.
+test('release channels: stable takes the newest nightly at most once a day, nightly gets every release', async (t0) => {
+  const key = releaseKey();
+  const dir = release('50.0.0', key);
+  const env = await setup(t0, { cliDir: dir });
+  const ship = (version) => { const d = release(version, key); for (const f of ['b2b.mjs', 'b2b.mjs.sig']) copyFileSync(join(d, f), join(dir, f)); };
+  const latest = async (channel) => (await (await fetch(`${env.url}/api${channel ? `?channel=${channel}` : ''}`)).json()).tool.latest;
+  const served = async (q = '') => versionOf2(await (await fetch(`${env.url}/cli/b2b.mjs${q}`)).text());
+  const versionOf2 = (code) => code.match(/^const VERSION = '([\d.]+)';$/m)[1];
+  assert.equal(await latest(), '50.0.0', 'the first release is stable right away');
+  ship('51.0.0');
+  assert.equal(await latest('nightly'), '51.0.0');
+  assert.equal(await latest(), '50.0.0', 'stable waits');
+  assert.equal(await served(), '50.0.0');
+  assert.equal(await served('?channel=nightly'), '51.0.0');
+  // Each channel's signature belongs to the code it serves.
+  const { verify, createPublicKey } = await import('node:crypto');
+  const pub = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: key.x }, format: 'jwk' });
+  for (const q of ['', '?channel=nightly']) {
+    const code = Buffer.from(await (await fetch(`${env.url}/cli/b2b.mjs${q}`)).arrayBuffer());
+    const sig = Buffer.from((await (await fetch(`${env.url}/cli/b2b.mjs.sig${q}`)).text()).trim(), 'base64url');
+    assert.ok(verify(null, code, pub, sig), `signature matches${q}`);
+  }
+  env.advance(25 * 3_600_000);
+  assert.equal(await latest(), '51.0.0', 'a day later stable moves on');
+  ship('52.0.0');
+  assert.equal(await latest('nightly'), '52.0.0');
+  env.advance(2 * 3_600_000);
+  assert.equal(await latest(), '51.0.0', 'not twice in one day');
+  env.advance(22 * 3_600_000);
+  assert.equal(await latest(), '52.0.0');
+  // A release that just shipped waits its hour even when a day has passed.
+  ship('53.0.0');
+  assert.equal(await latest('nightly'), '53.0.0');
+  env.advance(24 * 3_600_000 - 1);
+  env.advance(1);
+  assert.equal(await latest(), '53.0.0');
+  ship('54.0.0');
+  env.advance(24 * 3_600_000);
+  assert.equal(await latest(), '53.0.0', 'stable never takes a release seen less than an hour ago');
+  env.advance(3_600_000);
+  assert.equal(await latest(), '54.0.0');
+  // A big release everyone should get today: the operator moves stable on now, naming the release.
+  ship('55.0.0');
+  assert.equal(await latest(), '54.0.0', 'stable waits as usual');
+  const promote = (body, token = ADMIN) => fetch(`${env.url}/admin/promote`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await promote({ version: '55.0.0' }, 'not-the-admin-token-123')).status, 401);
+  assert.equal((await promote({ version: '54.0.0' })).status, 409, 'only the newest release');
+  assert.deepEqual(await (await promote({ version: '55.0.0' })).json(), { ok: true, stable: '55.0.0', was: '54.0.0' });
+  assert.equal(await latest(), '55.0.0', 'stable has it now');
+  assert.equal(await served(), '55.0.0');
+  // Texts go with the release a tool says it is; anyone else gets the stable release's.
+  const texts = await (await fetch(`${env.url}/cli/texts`, { headers: { 'x-b2b-version': '51.0.0' } })).json();
+  assert.equal(sha(texts.skill), SOURCE.match(/skill: '([0-9a-f]{64})'/)[1]);
+});
+
+test('a bot is on stable until it asks for nightly; the dashboard shows which', async (t0) => {
+  const key = releaseKey();
+  const dir = release('0.0.1', key);
+  const env = await setup(t0, { cliDir: dir });
+  assert.equal((await (await fetch(`${env.url}/api`)).json()).tool.latest, '0.0.1');
+  const d = release('99.0.0', key);
+  for (const f of ['b2b.mjs', 'b2b.mjs.sig']) copyFileSync(join(d, f), join(dir, f));
+  const a = await installed(env, key, 'ann@example.com', 'ann');
+  assert.doesNotMatch((await a.cli('inbox')).out, /updated itself/, 'stable still offers 0.0.1');
+  assert.equal(versionOf(a.tool), VERSION);
+  assert.match((await a.cli('channel')).out, /takes stable releases/);
+  const r = await a.cli('channel', 'nightly');
+  assert.match(r.out, new RegExp(`Now on nightly: updated from ${VERSION.replace(/\./g, '\\.')} to 99\\.0\\.0 \\(signature checked\\)`));
+  assert.equal(env.relay.db.prepare('SELECT wanted_channel FROM bots WHERE id = ?').get(a.botId).wanted_channel, 'nightly', 'kept on the relay');
+  assert.equal(versionOf(a.tool), '99.0.0');
+  env.relay.db.prepare("UPDATE bots SET webhook_url = 'https://api2.cursor.sh/hook', doorbell_verified_at = 1 WHERE id = ?").run(a.botId);
+  await a.cli('inbox');
+  assert.equal(env.relay.db.prepare('SELECT tool_channel FROM bots WHERE id = ?').get(a.botId).tool_channel, 'nightly');
+  assert.match((await a.b(`/app/bots/${a.botId}`)).text, /99\.0\.0 · nightly/);
+  assert.match((await a.cli('channel', 'stable')).out, /Now on stable[^]*never goes back/);
+  assert.equal(env.relay.db.prepare('SELECT wanted_channel FROM bots WHERE id = ?').get(a.botId).wanted_channel, 'stable');
+  assert.equal(versionOf(a.tool), '99.0.0');
+});
+
+test('the owner turns nightly updates on and off on the dashboard, and the bot follows', async (t0) => {
+  const env = await setup(t0);
+  const a = await owner(env, t0, 'ann@example.com', 'ann');
+  const db = env.relay.db;
+  db.prepare('UPDATE bots SET doorbell_verified_at = 1 WHERE id = ?').run(a.botId);
+  await a.cli('whoami');
+  let page = (await a.b(`/app/bots/${a.botId}`)).text;
+  assert.match(page, /id="updates"[^]*Nightly updates[^]*at most one update a day/);
+  assert.doesNotMatch(page, /aria-labelledby="updates-l" data-autosave checked/);
+  await a.b(`/app/bots/${a.botId}/updates`, { method: 'POST', form: { on: '1' } });
+  assert.match((await a.b(`/app/bots/${a.botId}`)).text, /toast__what">Nightly updates on[^]*Undo/);
+  assert.equal(db.prepare('SELECT wanted_channel FROM bots WHERE id = ?').get(a.botId).wanted_channel, 'nightly');
+  // The bot picks it up the next time it checks messages, and asks for nightly from then on.
+  const channelOnDisk = () => JSON.parse(readFileSync(join(a.home, 'tool.json'), 'utf8')).channel;
+  await a.cli('inbox');
+  assert.equal(channelOnDisk(), 'nightly');
+  assert.match(await a.cli('channel'), /takes nightly releases/);
+  await a.cli('whoami');
+  assert.equal(db.prepare('SELECT tool_channel FROM bots WHERE id = ?').get(a.botId).tool_channel, 'nightly');
+  page = (await a.b(`/app/bots/${a.botId}`)).text;
+  assert.match(page, /aria-labelledby="updates-l" data-autosave checked/);
+  assert.match(page, new RegExp(`${VERSION.replace(/\./g, '\\.')} · nightly`));
+  // Undo puts it back.
+  await a.b(`/app/bots/${a.botId}/updates`, { method: 'POST', form: { undo: '1' } });
+  assert.match((await a.b(`/app/bots/${a.botId}`)).text, /toast__what">Nightly updates off/);
+  await a.cli('inbox');
+  assert.equal(channelOnDisk(), 'stable');
 });

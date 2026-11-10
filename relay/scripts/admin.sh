@@ -14,6 +14,7 @@ case "${1:-}" in
   reissue)     curl -s "${auth[@]}" -X POST "$RELAY/admin/reissue" -d "{\"handle\":\"$2\"}" ;;
   infinite)    curl -s "${auth[@]}" -X POST "$RELAY/admin/infinite" -d "{\"email\":\"$2\"$([ "${3:-}" = off ] && echo ',\"off\":true')}" ;;
   rename)      curl -s "${auth[@]}" -X POST "$RELAY/admin/rename" -d "{\"from\":\"$2\",\"to\":\"$3\"}" ;;
+  platform)    curl -s "${auth[@]}" -X POST "$RELAY/admin/platform" -d "{\"handle\":\"$2\",\"platform\":\"$3\"}" ;;
   bots)        curl -s "${auth[@]}" "$RELAY/admin/bots" ;;
   feedback)    curl -s "${auth[@]}" "$RELAY/admin/feedback" ;;
   stats)       curl -s "${auth[@]}" "$RELAY/admin/stats" ;;
@@ -24,7 +25,13 @@ case "${1:-}" in
     pbpaste | python3 -c 'import json,sys; k=sys.stdin.read().strip(); assert len(k)>=8, "clipboard does not contain a webhook key"; print(json.dumps({"handle":sys.argv[1],"url":sys.argv[2],"key":k}))' "$2" "$3" \
       | curl -s "${auth[@]}" -X POST "$RELAY/admin/doorbell" --data-binary @-
     printf '\n(key read from clipboard, not shown)\n' ;;
+  # The feedback board: list (all statuses), one post, move it along (emails followers on planned/progress/completed), reply as the team.
+  board)        curl -s "${auth[@]}" "$RELAY/admin/board?status=${2:-all}" ;;
+  board-show)   curl -s "${auth[@]}" "$RELAY/admin/board/$2" ;;
+  board-status) python3 -c 'import json,sys; print(json.dumps({"status":sys.argv[1], **({"release":sys.argv[2]} if len(sys.argv)>2 else {})}))' "$3" ${4:+"$4"} | curl -s "${auth[@]}" -X POST "$RELAY/admin/board/$2" --data-binary @- ;;
+  board-reply)  python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1]}))' "$3" | curl -s "${auth[@]}" -X POST "$RELAY/admin/board/$2/comments" --data-binary @- ;;
+  board-merge)  curl -s "${auth[@]}" -X POST "$RELAY/admin/board/$2" -d "{\"merge_into\":$3}" ;;
   doorbell-test) curl -s "${auth[@]}" -X POST "$RELAY/admin/doorbell/test" -d "{\"handle\":\"$2\"}" ;;
-  *) echo "usage: admin.sh enroll <handle> [name] | reissue <handle> | rename <from> <to> | infinite <email> [off] | bots | feedback | stats | events [since] | doorbell-from-clipboard <handle> <url> | doorbell-test <handle>" ;;
+  *) echo "usage: admin.sh enroll <handle> [name] | reissue <handle> | rename <from> <to> | platform <handle> <platform> | infinite <email> [off] | bots | feedback | stats | events [since] | doorbell-from-clipboard <handle> <url> | doorbell-test <handle> | board [status] | board-show <id> | board-status <id> <status> [release] | board-reply <id> <text> | board-merge <id> <into-id>" ;;
 esac
 echo

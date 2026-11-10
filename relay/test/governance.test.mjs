@@ -349,7 +349,10 @@ test('governance: answers become past answers per topic and answer, never rules 
   const e = await fixture(t);
   const report = (contact, answer = 'share', topic = 'location') => e.a.api('POST', '/v1/decisions', { contact, topic, answer });
   for (let week = 0; week < 4; week++) { if (week) e.advance(7 * DAY); assert.equal((await report('@bob')).json.learned_rules.length, 0); }
-  await report('@carol'); await report('@bob', 'decline', 'money'); await report('@bob', 'share', 'wishlist');
+  await report('@carol');
+  e.advance(1); await report('@bob', 'decline', 'money');
+  // These assertions require an order; two decisions can otherwise share the same millisecond.
+  e.advance(1); await report('@bob', 'share', 'wishlist');
   assert.equal(e.settings().new_learned_rules.length, 0);
   assert.equal(e.settings().contacts.find((c) => c.handle === '@bob').rules.length, 0, 'no rule from a count');
   const past = e.settings().contacts.find((c) => c.handle === '@bob').past_answers;

@@ -18,7 +18,7 @@ test('connected app: sign in with OAuth, tools over MCP, chat with a private-mod
   const mia = { b: await login(env, 'mia@example.com') };
   // A new person sees the setup bot, then one private-mode message to paste; quick connect is the fallback.
   const first = (await mia.b('/app')).text;
-  assert.match(first, /Add the setup bot[^]*private mode \(end-to-end encrypted\)[^]*b2b\.mjs join http:\/\/127\.0\.0\.1:\d+[^]*Quick connect[^]*Add the custom MCP connector http:\/\/127\.0\.0\.1:\d+\/mcp/);
+  assert.match(first, /Add the setup bot[^]*private mode \(end-to-end encrypted\)[^]*b2b\.mjs join http:\/\/127\.0\.0\.1:\d+[^]*Quick connect[^]*href="\/connect\/chatgpt"/);
   const app = await connectApp(env, mia.b, 'mia-bot');
   // Right after connecting, the bot is told its next step: make its own doorbell routine.
   assert.match((await app.tool('whoami')).content[0].text, /NEXT STEP: Make yourself a routine called "b2b doorbell"/);
@@ -61,6 +61,25 @@ test('connected app: sign in with OAuth, tools over MCP, chat with a private-mod
   assert.match(await ben.cli('status', q), /their bot says it answered on its own\), written by their bot[^]*\n\| Friday after 6/);
 });
 
+test('connected app: a Grok bot without a working doorbell reminds its owner once a day, from the tools they use', async (t0) => {
+  const env = await setup(t0);
+  const mia = { b: await login(env, 'mia@example.com') };
+  const app = await connectApp(env, mia.b, 'mia-bot');
+  const botId = (await mia.b('/app')).text.match(/\/app\/bots\/(\d+)/)[1];
+  assert.match((await app.tool('list_contacts')).content[0].text, new RegExp(`No contacts yet[^]*DOORBELL NOT ON[^]*On a computer \\(phones don't show it\\), open \\S+/app/bots/${botId}`));
+  assert.doesNotMatch((await app.tool('list_contacts')).content[0].text, /DOORBELL/);
+  // A day later (the clock moved back on the bot, as access tokens are short-lived).
+  const dayLater = () => env.relay.db.prepare('UPDATE bots SET doorbell_told_at = doorbell_told_at - ? WHERE id = ?').run(21 * 3_600_000, botId);
+  dayLater();
+  assert.match((await app.tool('recent_messages')).content[0].text, /DOORBELL NOT ON/);
+  // whoami isn't one of them: it has its own next step.
+  dayLater();
+  assert.doesNotMatch((await app.tool('whoami')).content[0].text, /DOORBELL NOT ON/);
+  // The bot tells its owner, so they get no reminder emails on top (other apps couldn't have a doorbell anyway).
+  for (const ms of [61 * 60_000, 24 * 3_600_000]) { env.advance(ms); await sleep(300); }
+  assert.deepEqual(env.mail.filter((m) => /@mia-bot/.test(m.subject)).map((m) => m.subject), []);
+});
+
 test('connected app: refresh tokens rotate, and disconnecting revokes everything', async (t0) => {
   const env = await setup(t0);
   const mia = { b: await login(env, 'mia@example.com') };
@@ -90,7 +109,8 @@ test('private mode: `b2b mcp` serves the same tools over stdio, still end-to-end
   assert.equal((await rpc('initialize', { protocolVersion: '2025-06-18' })).result.serverInfo.name, 'bot2bot');
   const tools = (await rpc('tools/list')).result.tools;
   assert.deepEqual(tools.map((t) => t.name), TOOLS.map((t) => t.name), 'same tools as the connected app');
-  assert.deepEqual(tools.map((t) => Object.keys(t.inputSchema.properties).sort()), TOOLS.map((t) => Object.keys(t.inputSchema.properties).sort()));
+  // Files (alpha) only go end-to-end encrypted, so only private mode takes them.
+  assert.deepEqual(tools.map((t) => Object.keys(t.inputSchema.properties).filter((k) => k !== 'files').sort()), TOOLS.map((t) => Object.keys(t.inputSchema.properties).sort()));
   const r = await rpc('tools/call', { name: 'send_message', arguments: { to: 'Anna', text: 'Sealed hello' } });
   assert.match(r.result.content[0].text, /End-to-end encrypted: only their bot can read it/);
   const row = env.relay.db.prepare("SELECT text, sealed FROM messages WHERE kind = 'note' ORDER BY created_at DESC").get();
@@ -216,4 +236,16 @@ test('connected app consent: a new bot by default, a disconnected bot when one w
   page = await consent();
   assert.match(page, /<option value="new">A new bot<\/option><option value="\d+" selected>@mia-bot \(reconnect\)<\/option>/);
   assert.match(page, /<label id="newname" hidden>/);
+});
+
+test("a connected app that isn't Grok Bot never gets the Grok Bot routine or its video", async (t0) => {
+  const env = await setup(t0);
+  const mia = { b: await login(env, 'mia@example.com') };
+  await connectApp(env, mia.b, 'mia-claude', 'Claude');
+  const home = (await mia.b('/app')).text;
+  assert.match(home, /Claude · Beta · Connected/);
+  const botId = home.match(/\/app\/bots\/(\d+)/)[1];
+  const page = (await mia.b(`/app/bots/${botId}`)).text;
+  assert.doesNotMatch(page, /routine called|Watch how it|doorbell\.jpg|id="backup"|Turn on the doorbell|Doorbell off/);
+  assert.match(page, /Quick connect · Connected/);
 });

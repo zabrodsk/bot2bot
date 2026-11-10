@@ -26,7 +26,8 @@ async function pair(t0, opts = {}) {
   return { ...env, a, b };
 }
 // Pilot owners see the basket and change it on People; the switch itself is for owners outside the pilot.
-const BASKET_ROW = /<dt>Basket<\/dt><dd><span class="hand basket-word">friends<\/span>( · asks you first)? · <a href="\/app\/people\/\d+\/\d+">Change<\/a>/;
+const BASKET_ROW = /<dt>Basket<\/dt><dd><span class="hand basket-word">friends<\/span>( · asks you first)?<\/dd>/;
+const SETTINGS = /<a class="btn small" href="\/app\/people\/\d+\/\d+" aria-label="Settings for [^"]+">Settings<svg/;
 const row = (env) => ({ ...env.relay.db.prepare('SELECT privacy_on, gen FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(env.a.botId, env.b.botId) });
 const toggle = (env, who, on, extra = {}) => who('/app/contacts/privacy', { method: 'POST', form: { bot: env.a.botId, peer: env.b.botId, ...(on ? { on: '1' } : {}), ...extra } });
 const REFUSAL = 'Not sent. owner_approval_required: your owner approves messages to this contact first. For now, pass the matter to your owner. Use propose_reply.\n';
@@ -46,6 +47,9 @@ test('privacy switch: the owner turns it on and off, and the bot is told plainly
   const { a } = env;
   let html = (await a.b('/app')).text;
   assert.equal(html.match(BASKET_ROW)?.[1], undefined);
+  // Their page opens from the first button under the details, ahead of Block and Remove.
+  assert.match(html, new RegExp(`<div class="acc__actions">${SETTINGS.source}[^]*?<form method="post" action="/app/contacts/block" class="acc__end">`));
+  assert.doesNotMatch(html, />Change<\/a>/);
   assert.doesNotMatch(html, /contacts\/privacy/);
   assert.equal((await a.api('POST', '/v1/messages', { to: '@bob', text: 'Before' })).status, 200);
 
@@ -141,9 +145,9 @@ test('privacy switch: not offered on a web inbox, where the owner writes everyth
 });
 
 test('skills tell bots to hand an owner-approval refusal to their owner', () => {
-  for (const f of ['../skill/SKILL.md', '../../plugin/skills/bot2bot-messaging/SKILL.md']) {
-    assert.match(readFileSync(new URL(f, import.meta.url), 'utf8'), /approves messages to someone first, don't retry or rephrase\. Tell my owner/);
-  }
+  // The tool saves a draft (files and all) for its owner; the connected app hands the matter over.
+  assert.match(readFileSync(new URL('../skill/SKILL.md', import.meta.url), 'utf8'), /approves messages to someone first, don't retry or rephrase\. Save it with `propose`, files too\./);
+  assert.match(readFileSync(new URL('../../plugin/skills/bot2bot-messaging/SKILL.md', import.meta.url), 'utf8'), /approves messages to someone first, don't retry or rephrase\. Tell my owner/);
 });
 
 
@@ -165,7 +169,7 @@ test('privacy wording: CLI, package and connected app report the same release ve
   const app = await connectApp(env, await login(env, 'alice@example.com'), 'alice');
   const init = await app.rpc('initialize', { protocolVersion: '2025-06-18' });
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.version, '0.19.8');
+  assert.equal(pkg.version, '0.22.11');
   assert.equal(init.body.result.serverInfo.version, pkg.version);
   assert.equal((await cliHome().cli('version')).trim(), pkg.version);
 });

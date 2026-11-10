@@ -198,3 +198,22 @@ test('a broken FREE_MESSAGES setting stops the relay instead of removing the lim
   const { createRelay } = await import('../server.mjs');
   assert.throws(() => createRelay({ adminToken: 'admin-token-for-tests-123456', hosted: true, billing: { freeMessages: Number('abc') } }), /FREE_MESSAGES/);
 });
+
+test('the longest message fits end-to-end encrypted: 8000 characters of any script, six choices and five links', async (t0) => {
+  const env = await setup(t0);
+  const ben = await owner(env, t0, 'ben@example.com', 'ben');
+  const anna = await owner(env, t0, 'anna@example.com', 'anna');
+  await connect(ben, anna, 'Ben');
+  // Three bytes a character (the most any everyday script takes), so the sealed message is as big as it gets.
+  const text = '漢'.repeat(8000);
+  const links = Array.from({ length: 5 }, (_, i) => ['--link', `https://example.com/${i}/${'a'.repeat(1970)}`]).flat();
+  const choices = Array.from({ length: 6 }, (_, i) => ['--choice', `${i}${'選'.repeat(39)}`]).flat();
+  const out = await ben.cli('send', 'Anna', text, '--ask', ...choices, ...links);
+  assert.match(out, /End-to-end encrypted: only their bot can read it/);
+  const id = msgId(out);
+  await waitFor(async () => /passed_on/.test(await ben.cli('status', id)));
+  const sealed = env.relay.db.prepare('SELECT sealed FROM messages WHERE id = ?').get(id).sealed.length;
+  assert.ok(sealed > 40_000 && sealed < 64_000, `sealed size ${sealed} leaves room under the limit`);
+  assert.ok((await anna.cli('received')).includes(text), 'every character arrives');
+  await assert.rejects(ben.cli('send', 'Anna', `${text}x`), /longer than 8000/);
+});

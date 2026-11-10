@@ -1,5 +1,185 @@
 [
   {
+    "key": "titanium-laptop",
+    "name": "titanium hug",
+    "kind": "premium"
+  },
+  {
+    "key": "midnight-desktop",
+    "name": "midnight smile",
+    "kind": "premium"
+  },
+  {
+    "key": "marble-display",
+    "name": "marble muse",
+    "kind": "premium"
+  },
+  {
+    "key": "champagne-phone",
+    "name": "champagne wink",
+    "kind": "premium"
+  },
+  {
+    "key": "jade-tablet",
+    "name": "jade daydream",
+    "kind": "premium"
+  },
+  {
+    "key": "onyx-server",
+    "name": "onyx doze",
+    "kind": "premium"
+  },
+  {
+    "key": "crystal-chip",
+    "name": "crystal cloud",
+    "kind": "premium"
+  },
+  {
+    "key": "velvet-console",
+    "name": "velvet play",
+    "kind": "premium"
+  },
+  {
+    "key": "copper-router",
+    "name": "copper chirp",
+    "kind": "premium"
+  },
+  {
+    "key": "porcelain-mouse",
+    "name": "porcelain petal",
+    "kind": "premium"
+  },
+  {
+    "key": "emerald-terminal",
+    "name": "emerald hush",
+    "kind": "premium"
+  },
+  {
+    "key": "sapphire-watch",
+    "name": "sapphire hour",
+    "kind": "premium"
+  },
+  {
+    "key": "ivory-keycap",
+    "name": "ivory pebble",
+    "kind": "premium"
+  },
+  {
+    "key": "gold-floppy",
+    "name": "golden keepsake",
+    "kind": "premium"
+  },
+  {
+    "key": "aurora-orb",
+    "name": "aurora hum",
+    "kind": "premium"
+  },
+  {
+    "key": "noir-headset",
+    "name": "noir cuddle",
+    "kind": "premium"
+  },
+  {
+    "key": "retro-desktop",
+    "name": "little beige",
+    "kind": "computer"
+  },
+  {
+    "key": "laptop",
+    "name": "lilac wink",
+    "kind": "computer"
+  },
+  {
+    "key": "phone",
+    "name": "mint hello",
+    "kind": "computer"
+  },
+  {
+    "key": "terminal",
+    "name": "happy prompt",
+    "kind": "computer"
+  },
+  {
+    "key": "floppy",
+    "name": "blue save",
+    "kind": "computer"
+  },
+  {
+    "key": "chip",
+    "name": "tiny chip",
+    "kind": "computer"
+  },
+  {
+    "key": "server",
+    "name": "sleepy server",
+    "kind": "computer"
+  },
+  {
+    "key": "handheld",
+    "name": "game buddy",
+    "kind": "computer"
+  },
+  {
+    "key": "mouse",
+    "name": "shy click",
+    "kind": "computer"
+  },
+  {
+    "key": "router",
+    "name": "wifi song",
+    "kind": "computer"
+  },
+  {
+    "key": "pro-laptop",
+    "name": "space pal",
+    "kind": "premium"
+  },
+  {
+    "key": "studio-display",
+    "name": "pearl studio",
+    "kind": "premium"
+  },
+  {
+    "key": "black-terminal",
+    "name": "gold prompt",
+    "kind": "premium"
+  },
+  {
+    "key": "gold-chip",
+    "name": "golden pins",
+    "kind": "premium"
+  },
+  {
+    "key": "chrome-bot",
+    "name": "blue antenna",
+    "kind": "premium"
+  },
+  {
+    "key": "glass-tower",
+    "name": "frosty glow",
+    "kind": "premium"
+  },
+  {
+    "key": "smartwatch",
+    "name": "little wrist",
+    "kind": "premium"
+  },
+  {
+    "key": "tablet",
+    "name": "rosie",
+    "kind": "premium"
+  },
+  {
+    "key": "orb-speaker",
+    "name": "pearl orb",
+    "kind": "premium"
+  },
+  {
+    "key": "vr-visor",
+    "name": "visor buddy",
+    "kind": "premium"
+  },
+  {
     "key": "robot-wink",
     "name": "winky",
     "kind": "robot"

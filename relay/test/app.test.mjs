@@ -70,7 +70,7 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   assert.equal(evil.status, 403);
 
   const ben = await signup(env, 'ben.k@example.com');
-  assert.match((await ben('/app')).text, /Connect your Grok Bot[^]*Add the setup bot/);
+  assert.match((await ben('/app')).text, /Connect your bot[^]*Add the setup bot/);
   const benBot = await connectBot(env, ben, 'ben');
 
   // Doorbell: a fake GrokBot routine that runs the inbox when rung
@@ -87,9 +87,22 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   let done = false;
   t0.after(() => { done = true; hook.close(); });
   const botId = (await ben('/app')).text.match(/\/app\/bots\/(\d+)/)[1];
-  // A private-mode bot may never have made its routine: the page gives the owner the exact message for it.
-  assert.match((await ben(`/app/bots/${botId}`)).text, /Make a routine called &quot;b2b doorbell&quot; with a webhook trigger and this exact instruction: &quot;b2b messages may be waiting for my owner\. Run `node ~\/bin\/b2b\.mjs inbox --via doorbell`/);
+  // The page leads with the owner's one step (two values from the routine, on a computer), with a button to Grok Bot's
+  // routines; testing is part of it. A bot that never made its routine: the exact message for it, folded away.
+  const bell = (await ben(`/app/bots/${botId}`)).text;
+  assert.match(bell, /<ol class="stepper[^]*Connect your bot[^]*Turn on the doorbell[^]*<\/ol>/);
+  assert.doesNotMatch(bell.match(/<ol class="stepper[^]*?<\/ol>/)[0], /Test the doorbell/);
+  assert.match(bell, /class="phone-only"[^]*open this page on a computer/i);
+  assert.match(bell, /href="https:\/\/cursor\.com\/grok-bot\/link\/v1\/sidebar\?tab=routines"[^>]*>Open routines/);
+  // Its arrow is sized like the text, not stretched to the card's width.
+  assert.match(bell, /class="link" href="https:\/\/cursor\.com[^>]*>Open routines<svg/);
+  assert.match(bell, /\.link svg\{width:14px;height:14px/);
+  assert.match(bell, /Save and test[^]*<details class="diy"><summary>No b2b doorbell routine\?<\/summary>[^]*Make a routine called &quot;b2b doorbell&quot; with a webhook trigger and this exact instruction: &quot;b2b messages may be waiting for my owner\. Run `node ~\/bin\/b2b\.mjs inbox --via doorbell`/);
+  assert.match((await ben('/app')).text, /Set up @ben[^]*1 of 3 done/);
   assert.equal((await ben(`/app/bots/${botId}/doorbell`, { method: 'POST', form: { url: 'https://evil.example/x', key: 'k-12345678' } })).status, 400);
+  // The two boxes the wrong way round still work.
+  assert.equal((await ben(`/app/bots/${botId}/doorbell`, { method: 'POST', form: { url: 'k-12345678', key: `${hookUrl}/automations/webhook/1` } })).status, 303);
+  assert.equal(env.relay.db.prepare('SELECT webhook_url FROM bots WHERE id = ?').get(Number(botId)).webhook_url, `${hookUrl}/automations/webhook/1`);
   assert.equal((await ben(`/app/bots/${botId}/doorbell`, { method: 'POST', form: { url: `${hookUrl}/automations/webhook/1`, key: 'k-12345678' } })).status, 303);
   assert.match((await ben(`/app/bots/${botId}`)).text, /Test the doorbell/);
   const ringRes = (await ben(`/app/bots/${botId}/test`, { method: 'POST', json: {} })).json();
@@ -103,7 +116,7 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   const anon = browser(env.url);
   const landing = await anon(`/i/${link}`);
   assert.match(landing.text, /Ben K wants your bots to talk/);
-  assert.match(landing.text, /Add the setup bot[^]*accept_invite tool: code/);
+  assert.match(landing.text, /Add the setup bot[^]*href="\/connect\/chatgpt\?invite=[A-Z0-9]{4}-[A-Z0-9]{4}"/);
   assert.match(landing.text, /Email verified/);
 
   // Anna signs up, connects her bot, accepts the link
@@ -150,7 +163,7 @@ test('login codes: wrong code, attempts limit, rate limit, magic link', async (t
   assert.equal((await c('/login/link', { method: 'POST', form: { t: linkPath.split('t=')[1] } })).status, 303);
   assert.match((await c('/app')).location, /^\/app\/picture/, 'new people pick a picture first');
   await c('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
-  assert.match((await c('/app')).text, /Connect your Grok Bot/);
+  assert.match((await c('/app')).text, /Connect your bot/);
 });
 
 test('adding a second private-mode bot shows its setup code, and a bad name says why', async (t0) => {
@@ -172,8 +185,19 @@ test('adding a second private-mode bot shows its setup code, and a bad name says
   const dash = (await ben('/app')).text;
   assert.match(dash, /Connect @b2b-test/);
   assert.match(dash, /d\.bots>1/); // waits for the second bot, not the first
+  // The code message is Grok Bot's, in its own row; every other assistant follows, and other bots last.
+  assert.match(dash, /Connect @b2b-test[^]*<details class="diy" open><summary>[^]*Grok Bot<\/span><\/summary>[^]*Message for Grok Bot[^]*join with code[^]*Waiting for your bot to join[^]*Instinct[^]*OpenAI dots[^]*OpenClaw[^]*Claude Code[^]*Codex[^]*Hermes Agent[^]*Other bots[^]*\/mcp/);
+  assert.match(dash, /Other bots[^]*action="\/app\/bots\/cancel"[^]*Cancel setup/);
+  // Cancelling ends the setup with a toast whose Undo starts it again under the same name.
+  await ben('/app/bots/cancel', { method: 'POST' });
+  const cancelled = (await ben('/app')).text;
+  assert.doesNotMatch(cancelled, /Connect @b2b-test/);
+  assert.match(cancelled, /Setup cancelled[^]*action="\/app\/bots"[^]*name="handle" value="b2b-test"[^]*Undo/);
+  await ben('/app/bots', { method: 'POST', form: { handle: 'b2b-test', undo: '1' } });
+  const dash2 = (await ben('/app')).text;
+  assert.match(dash2, /Connect @b2b-test/);
   const home = mkdtempSync(join(tmpdir(), 'b2b-app-second-'));
-  await run(process.execPath, [CLI, 'enroll', env.url, dash.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]], { env: { ...process.env, B2B_HOME: home } });
+  await run(process.execPath, [CLI, 'enroll', env.url, dash2.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]], { env: { ...process.env, B2B_HOME: home } });
   const after = (await ben('/app')).text;
   assert.match(after, /@b2b-test/);
   assert.doesNotMatch(after, /Connect @b2b-test/);

@@ -60,7 +60,7 @@ test('web inbox: no bot needed to receive, answer and write back', async (t0) =>
   const link = (await ben('/app/invites', { method: 'POST', form: { bot: benBot } })).text.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
 
   // Logged out, the invite asks for a bot first: the setup bot, or one message to paste.
-  assert.match((await browser(url)(`/i/${link}`)).text, /Connect your Grok Bot first[^]*Add the setup bot/);
+  assert.match((await browser(url)(`/i/${link}`)).text, /Connect your bot first[^]*Add the setup bot/);
   // Gran signs in and connects with the web inbox.
   const gran = await login('gran@example.com');
   const inv = await gran(`/i/${link}`);
@@ -139,7 +139,7 @@ test('the web inbox is off by default: invites push a bot instead', async (t0) =
   await cli('enroll', url, (await ben('/app')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
   const benBot = (await ben('/app')).text.match(/\/app\/bots\/(\d+)/)[1];
   const made = (await ben('/app/invites', { method: 'POST', form: { bot: benBot } })).text;
-  assert.match(made, /Open my invite: http[^]*how to connect your Grok Bot first/);
+  assert.match(made, /Open my invite: http[^]*how to connect your bot first/);
   const link = made.match(/\/i\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
   const gran = await login('gran@example.com');
   const inv = (await gran(`/i/${link}`)).text;
@@ -147,6 +147,6 @@ test('the web inbox is off by default: invites push a bot instead', async (t0) =
   assert.match(inv, /Add the setup bot/);
   const r = await gran(`/i/${link}`, { method: 'POST', form: { web: '1', alias: 'Ben' } });
   assert.equal(r.status, 400);
-  assert.match(r.text, /Connect your Grok Bot first/);
+  assert.match(r.text, /Connect your bot first/);
   assert.doesNotMatch((await gran('/app')).text, /web inbox/i);
 });

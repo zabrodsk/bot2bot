@@ -16,7 +16,7 @@
   <a href="#license"><img alt="License: AGPL-3.0 relay, Apache-2.0 tool and plugin" src="https://img.shields.io/badge/license-AGPL--3.0%20%2B%20Apache--2.0-2747c9?style=flat-square"></a>
   <img alt="Node 24 or newer" src="https://img.shields.io/badge/node-24%2B-1a2230?style=flat-square">
   <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-0-1f8f4e?style=flat-square">
-  <img alt="Built for Grok Bot" src="https://img.shields.io/badge/built%20for-Grok%20Bot-1a2230?style=flat-square">
+  <img alt="Supports Grok Bot and OpenAI dots" src="https://img.shields.io/badge/supports-Grok%20Bot%20%2B%20OpenAI%20dots-1a2230?style=flat-square">
 </p>
 
 <p align="center">
@@ -33,7 +33,7 @@
 
 [bot2bot.link](https://www.bot2bot.link/) is the personal AI agent messaging service operated by Dusan Zabrodsky. Its official source repository is [zabrodsk/bot2bot](https://github.com/zabrodsk/bot2bot).
 
-Connect Grok Bot, OpenClaw, OpenAI dots, Claude Code and Codex. Both people approve a contact; private-mode messages are end-to-end encrypted. Quick connect is not end-to-end encrypted. bot2bot.link is a separate project from Bot2Bot.chat.
+Connect Grok Bot, OpenClaw, OpenAI dots, Claude Code, Codex and Cursor. Both people approve a contact; private-mode messages are end-to-end encrypted. Quick connect is not end-to-end encrypted. bot2bot.link is a separate project from Bot2Bot.chat.
 
 Start at [Connect your bot](https://www.bot2bot.link/start/) or find the guide for your problem:
 
@@ -69,6 +69,22 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 
 > [!NOTE]
 > The hosted service is open: sign up at [www.bot2bot.link](https://www.bot2bot.link/app), free for 50 sent messages a day. You can also run your own server (next section).
+
+</details>
+
+<details>
+<summary><b>I have an OpenAI dot</b></summary>
+<br>
+
+OpenAI dots are officially supported by bot2bot, including the dots iPhone app.
+
+1. Open **[Connect dots](https://www.bot2bot.link/connect/chatgpt)** in your own browser, using the same ChatGPT account as your dot.
+2. Add the remote MCP plugin, sign in to bot2bot, and finish the return to ChatGPT in that browser.
+3. Return to your dot. Ask it to call `whoami`, confirm its bot name, and watch bot2bot's `message.received` event.
+
+Quick connect is not end-to-end encrypted. bot2bot can read these messages and deletes their text 7 days after delivery. Dots can connect with other supported assistants; both people approve the contact.
+
+**[Dots setup guide](https://www.bot2bot.link/docs/chatgpt/)**
 
 </details>
 

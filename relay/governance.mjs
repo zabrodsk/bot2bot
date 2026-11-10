@@ -110,6 +110,8 @@ export function migrateGovernance(db) {
   add('privacy_requests', 'topic', 'TEXT');
   add('privacy_requests', 'decided_via', 'TEXT');
   add('settings_proposals', 'decided_via', 'TEXT');
+  // The files a draft carries (name and size only, so the owner knows what they okay; the bot keeps the files).
+  add('privacy_candidates', 'files', "TEXT NOT NULL DEFAULT '[]'");
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS decision_client ON owner_decisions(owner_bot, client_id) WHERE client_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS decision_learning ON owner_decisions(owner_bot, peer_bot, topic, answer, weekday, created_at);
     CREATE INDEX IF NOT EXISTS proposal_pending ON settings_proposals(owner_bot, state);`);
@@ -418,15 +420,17 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
 
   function candidate(draft) {
     if (!draft || typeof draft !== 'object' || Array.isArray(draft) || typeof draft.text !== 'string') fail('draft.text is required');
-    const text = draft.text.trim(), links = draft.links ?? [];
-    if ((!text && !links.length) || text.length > L.textMax || !Array.isArray(links) || links.length > L.linksMax) fail('draft is empty or too long');
+    const text = draft.text.trim(), links = draft.links ?? [], files = draft.files ?? [];
+    if (!Array.isArray(files) || files.length > 5) fail('a draft carries at most 5 files');
+    if ((!text && !links.length && !files.length) || text.length > L.textMax || !Array.isArray(links) || links.length > L.linksMax) fail('draft is empty or too long');
     for (const l of links) {
       let u; try { u = new URL(l); } catch { fail('invalid draft link'); }
       if (typeof l !== 'string' || !['https:', 'http:'].includes(u.protocol) || l.length > L.linkMax) fail('invalid draft link');
     }
-    return { text, links };
+    for (const f of files) if (!f || typeof f.name !== 'string' || !f.name.trim() || f.name.length > 200 || !Number.isInteger(f.size) || f.size < 0) fail('a draft file is a name and a size in bytes');
+    return { text, links, files: files.map((f) => ({ name: f.name.trim(), size: f.size })) };
   }
-  const latest = (r) => { const c = q('SELECT * FROM privacy_candidates WHERE request_id = ? AND revision = ?').get(r.id, r.revision); return c ? { text: c.text, links: JSON.parse(c.links) } : null; };
+  const latest = (r) => { const c = q('SELECT * FROM privacy_candidates WHERE request_id = ? AND revision = ?').get(r.id, r.revision); return c ? { text: c.text, links: JSON.parse(c.links), files: JSON.parse(c.files || '[]') } : null; };
   function requestView(r, owner = false) {
     return { ...r, approve_url: `${publicUrl}/app/requests/${r.id}`, ...(owner || r.state === 'APPROVED' ? { draft: latest(r) } : {}) };
   }
@@ -449,6 +453,8 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
       const b = bot(m.from_bot); c = resolveRecipient(me, `@${b.handle}`); inbound = m.id;
     } else c = resolveRecipient(me, body.to);
     const draft = candidate(body.draft);
+    // Files only go end-to-end encrypted, so the bot sends them itself once its owner okays the draft.
+    if (draft.files.length && !(me.box_pub && bot(c.peer_bot).box_pub)) fail("files only go in end-to-end encrypted chats, and this one isn't", 400);
     const question = body.question == null ? null : string(body.question, 280, 'question', true);
     const about = body.topic == null ? null : topic(body.topic);
     let r = inbound
@@ -465,7 +471,7 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
       q("UPDATE privacy_requests SET revision = revision + 1, contact_gen = ?, expires_at = CASE WHEN state IN ('CANCELLED','EXPIRED') THEN ? ELSE expires_at END, state = 'PENDING_OWNER', decided_at = NULL, question = ?, topic = ? WHERE id = ?").run(c.gen, clock() + DAY, question, about, r.id);
       r = q('SELECT * FROM privacy_requests WHERE id = ?').get(r.id);
     }
-    q('INSERT INTO privacy_candidates(request_id, revision, text, links, created_at) VALUES (?, ?, ?, ?, ?)').run(r.id, r.revision, draft.text, JSON.stringify(draft.links), clock());
+    q('INSERT INTO privacy_candidates(request_id, revision, text, links, files, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(r.id, r.revision, draft.text, JSON.stringify(draft.links), JSON.stringify(draft.files), clock());
     return requestView(r);
   }
   function decideRequestInTx(ownerBot, id, decision) {
@@ -483,16 +489,17 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
       q("UPDATE privacy_requests SET state = 'DECLINED', decided_at = ? WHERE id = ?").run(clock(), id);
       return getRequest(ownerBot, id, { owner: true });
     }
-    const final = decision.action === 'send' ? latest(r) : candidate(decision.draft);
+    // An edit or the owner's own words keep the files the bot attached.
+    const final = decision.action === 'send' ? latest(r) : { ...candidate({ ...decision.draft, files: undefined }), files: latest(r)?.files ?? [] };
     if (decision.action !== 'send') {
       q('UPDATE privacy_requests SET revision = revision + 1 WHERE id = ?').run(id);
       r = q('SELECT * FROM privacy_requests WHERE id = ?').get(id);
-      q('INSERT INTO privacy_candidates(request_id, revision, text, links, created_at) VALUES (?, ?, ?, ?, ?)').run(id, r.revision, final.text, JSON.stringify(final.links), clock());
+      q('INSERT INTO privacy_candidates(request_id, revision, text, links, files, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, r.revision, final.text, JSON.stringify(final.links), JSON.stringify(final.files), clock());
     }
     if (me.box_pub && bot(c.peer_bot).box_pub) {
       q("UPDATE privacy_requests SET state = 'APPROVED', decided_at = ? WHERE id = ?").run(clock(), id);
     } else {
-      const sent = enqueue(me, { to: `@${bot(c.peer_bot).handle}`, ...final, ...(r.inbound_message_id ? { kind: 'reply', reply_to: r.inbound_message_id } : {}), client_id: `privacy:${id}` }, { actor: 'owner_decision', decisionId: id });
+      const sent = enqueue(me, { to: `@${bot(c.peer_bot).handle}`, text: final.text, links: final.links, ...(r.inbound_message_id ? { kind: 'reply', reply_to: r.inbound_message_id } : {}), client_id: `privacy:${id}` }, { actor: 'owner_decision', decisionId: id });
       q("UPDATE privacy_requests SET state = 'ENQUEUED', decided_at = ?, outbound_message_id = ?, approval_used_at = ? WHERE id = ?").run(clock(), sent.id, clock(), id);
       q('UPDATE messages SET privacy_request_id = ? WHERE id = ?').run(id, sent.id);
       q('DELETE FROM privacy_candidates WHERE request_id = ?').run(id);

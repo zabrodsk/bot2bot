@@ -33,3 +33,11 @@ test('paying is there only with the hosted billing file', async (t0) => {
   const hook = await fetch(`${env.url}/billing/stripe`, { method: 'POST', headers: { 'stripe-signature': 't=1,v1=00' }, body: '{}' });
   assert.equal(hook.status, HOSTED_PARTS.billing ? 400 : 404);
 });
+
+test('invite links are there only with the hosted invites file', async (t0) => {
+  const env = await setup(t0, { hosted: true });
+  const ana = await login(env, 'ana.oc@example.com');
+  assert.equal((await ana('/app/gifts')).status, HOSTED_PARTS.invites ? 200 : 404);
+  assert.equal(/href="\/app\/gifts"/.test((await ana('/app')).text), HOSTED_PARTS.invites, 'menu link');
+  assert.equal((await ana('/gift/ABCD-EFGH')).status, 404);
+});

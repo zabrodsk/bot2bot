@@ -44,12 +44,13 @@ test('join: link, owner says yes, bot collects its token once, encrypted from th
   assert.match(page, /name="handle"[^>]*value="ben-bot"/);
   const yes = await ben(link, { method: 'POST', form: { decision: 'allow', bot: 'new', handle: 'ben-bot' } });
   assert.equal(yes.status, 303);
-  assert.match((await ben(link)).text, /Your bot is connected/);
+  assert.match((await ben(link)).text, /You said yes[^]*ask it to run its join command again/);
 
   const done = await cli('join');
   assert.equal(done.code, 0);
   assert.match(done.out, /Joined as @ben-bot[^]*end-to-end encrypted/);
   assert.ok(!existsSync(join(home, 'join.json')));
+  assert.match((await ben(link)).text, /Your bot is connected/);
   assert.match((await cli('whoami')).out, /@ben-bot[^]*Encryption: on/);
   const row = env.relay.db.prepare("SELECT * FROM bots WHERE handle = 'ben-bot'").get();
   assert.equal(row.vendor, 'grokbot');
@@ -154,7 +155,7 @@ test('backup carries the pinned contacts and restores them after a reset', async
   assert.ok(!('peers' in JSON.parse(readFileSync(join(fresh, 'config.json'), 'utf8'))));
 });
 
-test('join: the bot is handed its doorbell routine right away, reminded until it has one, and its owner gets one email', async (t0) => {
+test('join: the bot is handed its doorbell routine right away, reminded until it has one, and its owner gets a few emails', async (t0) => {
   const env = await setup(t0);
   const ben = await login(env, 'ben@example.com');
   const { home } = cliHome();
@@ -171,23 +172,73 @@ test('join: the bot is handed its doorbell routine right away, reminded until it
   assert.match((await cli('whoami')).out, steps);
   assert.match((await cli('doorbell', 'make')).out, steps);
 
-  // Checking messages reminds it at most once a day.
-  assert.match((await cli('inbox')).out, /You have no doorbell yet[^]*doorbell make/);
-  assert.doesNotMatch((await cli('inbox')).out, /You have no doorbell yet/);
-
-  // An hour in with no doorbell, its owner gets one email pointing to the bot's page. Never a second one.
+  // Checking messages reminds it at most once a day to tell its owner the computer step, with the bot's own page.
   const id = env.relay.db.prepare("SELECT id FROM bots WHERE handle = 'ben-bot'").get().id;
-  const reminders = () => env.mail.filter((m) => /One last step for @ben-bot/.test(m.subject));
+  assert.match((await cli('inbox')).out, new RegExp(`DOORBELL NOT ON[^]*Tell your owner[^]*On a computer \\(phones don't show it\\), open \\S+/app/bots/${id}[^]*POST to and key[^]*doorbell make`));
+  assert.doesNotMatch((await cli('inbox')).out, /DOORBELL NOT ON/);
+  // ...and that once a day is shared with everything else the owner asks for.
+  assert.doesNotMatch((await cli('contacts')).out, /DOORBELL NOT ON/);
+
+  // A day in with no doorbell, its owner gets one email, which opens with the setup video. Never another.
+  const reminders = () => env.mail.filter((m) => /@ben-bot/.test(m.subject) && /One last step|in one minute/.test(m.subject));
+  env.advance(2 * 3_600_000);
   await sleep(300);
-  assert.equal(reminders().length, 0);
-  env.advance(61 * 60_000);
+  assert.equal(reminders().length, 0, 'nothing an hour or two in');
+  env.advance(22 * 3_600_000 + 60_000);
   await waitFor(() => reminders().length === 1);
-  assert.match(reminders()[0].text, new RegExp(`can't wake it yet[^]*/app/bots/${id}`));
-  env.advance(3 * 3_600_000);
+  assert.match(reminders()[0].subject, /Set up @ben-bot in one minute/);
+  assert.match(reminders()[0].text, new RegExp(`whole setup in Grok Bot\\.\n\nWatch how it’s done in Grok Bot \\(1 min\\): https://www\\.loom\\.com/share/[^]*COMPUTER ONLY: This needs Grok Bot on a Mac or PC\\. Phones don't show the webhook[^]*/app/bots/${id}[^]*This is the only email about it`));
+  assert.match(reminders()[0].html, /<a href="https:\/\/www\.loom\.com\/share\/[^"]+"[^>]*><img src="[^"]*\/art\/doorbell\.jpg"[^]*Computer only[^]*This needs Grok Bot on a Mac or PC/);
+  assert.equal((await fetch(`${env.url}/art/doorbell.jpg`)).status, 200);
+  env.advance(6 * 86_400_000);
   await sleep(300);
   assert.equal(reminders().length, 1);
 
   // With its doorbell set, the steps stop.
   assert.equal((await cli('doorbell', 'set', `${env.url}/automations/webhook/1`, '--key', 'k-12345678')).code, 0);
   assert.doesNotMatch((await cli('whoami')).out, /NEXT STEP/);
+});
+
+test('doorbell reminder: a doorbell that never passed its test gets the test version, and a failed send is tried again', async (t0) => {
+  let failOnce = true;
+  const sent = [];
+  const env = await setup(t0, { mailer: async (m) => { if (/One last step/.test(m.subject) && failOnce) { failOnce = false; throw new Error('mail down'); } sent.push(m); } });
+  const ben = await login(env, 'ben@example.com');
+  const { home } = cliHome();
+  const cli = runIn(home);
+  const link = linkIn((await cli('join', env.url, '--name', 'ben-bot')).out);
+  await ben(link, { method: 'POST', form: { decision: 'allow', bot: 'new', handle: 'ben-bot' } });
+  await cli('join');
+  // A pasted "Authorization: Bearer …" header is taken as just the key.
+  assert.equal((await cli('doorbell', 'set', `${env.url}/automations/webhook/1`, '--key', 'Authorization: Bearer k-12345678')).code, 0);
+  const row = () => env.relay.db.prepare("SELECT * FROM bots WHERE handle = 'ben-bot'").get();
+  env.advance(24 * 3_600_000 + 60_000);
+  await waitFor(() => row().doorbell_nudge_fails === 1);
+  env.advance(61_000);
+  await waitFor(() => sent.some((m) => /One last step for @ben-bot/.test(m.subject)));
+  const mail = sent.find((m) => /One last step/.test(m.subject));
+  assert.match(mail.html, /One last step: test the doorbell/);
+  assert.doesNotMatch(mail.html, /art\/doorbell\.jpg/);
+  assert.match(mail.text, /hasn't answered a test ring yet[^]*Ring my bot/);
+  env.advance(3 * 3_600_000);
+  await sleep(300);
+  assert.equal(sent.filter((m) => /One last step/.test(m.subject)).length, 1);
+});
+
+test('doorbell reminder in chat: whatever the owner asks for, the bot reminds them once a day, with the computer step', async (t0) => {
+  const env = await setup(t0);
+  const ben = await login(env, 'ben@example.com');
+  const { home } = cliHome();
+  const cli = runIn(home);
+  const link = linkIn((await cli('join', env.url, '--name', 'ben-bot')).out);
+  await ben(link, { method: 'POST', form: { decision: 'allow', bot: 'new', handle: 'ben-bot' } });
+  await cli('join');
+  const id = env.relay.db.prepare("SELECT id FROM bots WHERE handle = 'ben-bot'").get().id;
+  const first = await cli('contacts');
+  assert.equal(first.code, 0);
+  assert.match(first.out, new RegExp(`No contacts yet[^]*DOORBELL NOT ON[^]*On a computer \\(phones don't show it\\), open \\S+/app/bots/${id}`));
+  assert.doesNotMatch((await cli('contacts')).out, /DOORBELL/);
+  // Set but never answered its test ring: whoami says how to test it from the bot's page.
+  assert.equal((await cli('doorbell', 'set', `${env.url}/automations/webhook/1`, '--key', 'k-12345678')).code, 0);
+  assert.match((await cli('whoami')).out, new RegExp(`DOORBELL NOT TESTED[^]*/app/bots/${id} and press Ring my bot`));
 });

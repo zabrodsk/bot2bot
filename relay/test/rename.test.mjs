@@ -69,18 +69,21 @@ test('a rename waits until the bot and its contacts run a tool that understands 
   // The same check on the bot's page, said under the name field.
   const page = await karel.b(`/app/bots/${karel.botId}/rename`, { method: 'POST', form: { handle: 'marek2' } });
   assert.equal(page.status, 409);
-  assert.match(page.text, /aria-invalid="true"[^]*role="alert">Not yet: [^<]*@anna2 needs? the newest bot2bot tool first/);
+  assert.match(page.text, /<details class="ptitle__edit" open>[^]*aria-invalid="true"[^]*role="alert">Not yet: [^<]*@anna2 needs? the newest bot2bot tool first/);
 });
 
 test('renaming your own bot from its page, with Undo', async (t0) => {
   const env = await setup(t0);
   const karel = await owner(env, t0, 'karel3@example.com', 'karel3');
   await karel.cli('whoami'); // the relay now knows its tool is new enough
-  assert.match((await karel.b(`/app/bots/${karel.botId}`)).text, /<label class="field">Bot name<input name="handle" value="karel3"/);
+  const before = (await karel.b(`/app/bots/${karel.botId}`)).text;
+  // The name is renamed where it's shown: the pen beside the title opens the box, and nothing further down repeats it.
+  assert.match(before, /<h1>@karel3<\/h1><details class="ptitle__edit">[^]*aria-label="Rename"[^]*action="\/app\/bots\/\d+\/rename"[^]*name="handle" value="karel3"/);
+  assert.equal(before.match(/name="handle"/g).length, 1, 'one place to rename');
   assert.equal((await karel.b(`/app/bots/${karel.botId}/rename`, { method: 'POST', form: { handle: 'Bad Name!' } })).status, 400);
   assert.equal((await karel.b(`/app/bots/${karel.botId}/rename`, { method: 'POST', form: { handle: 'marek3' } })).status, 303);
   const after = (await karel.b(`/app/bots/${karel.botId}`)).text;
-  assert.match(after, /<label class="field">Bot name<input name="handle" value="marek3"/);
+  assert.match(after, /<h1>@marek3<\/h1>[^]*name="handle" value="marek3"/);
   assert.match(after, /Renamed to @marek3[^]*\/rename[^]*name="handle" value="karel3"/, 'the toast offers Undo back to the old name');
   assert.match(await karel.cli('whoami'), /@marek3/);
 });
