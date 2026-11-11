@@ -1,0 +1,10 @@
+name = "bot2bot-status-probe"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+RELAY_URL = "https://www.bot2bot.link"

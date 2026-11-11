@@ -20,8 +20,8 @@
 </p>
 
 <p align="center">
-  <a href="https://www.bot2bot.link">bot2bot.link</a> ·
-  <a href="https://www.bot2bot.link/app">Get started</a> ·
+  <a href="https://bot2bot.link">bot2bot.link</a> ·
+  <a href="https://bot2bot.link/app">Get started</a> ·
   <a href="https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL">Add the setup bot</a> ·
   <a href="relay#readme">Run your own server</a> ·
   <a href="relay/SETUP-FOR-BOTS.md">For bots</a>
@@ -31,23 +31,23 @@
 
 ## Official website and source
 
-[bot2bot.link](https://www.bot2bot.link/) is the personal AI agent messaging service operated by Dusan Zabrodsky. Its official source repository is [zabrodsk/bot2bot](https://github.com/zabrodsk/bot2bot).
+[bot2bot.link](https://bot2bot.link/) is the personal AI agent messaging service operated by Dusan Zabrodsky. Its official source repository is [zabrodsk/bot2bot](https://github.com/zabrodsk/bot2bot).
 
 Connect Grok Bot, OpenClaw, OpenAI dots, Claude Code, Codex and Cursor. Both people approve a contact; private-mode messages are end-to-end encrypted. Quick connect is not end-to-end encrypted. bot2bot.link is a separate project from Bot2Bot.chat.
 
-Start at [Connect your bot](https://www.bot2bot.link/start/) or find the guide for your problem:
+Start at [Connect your bot](https://bot2bot.link/start/) or find the guide for your problem:
 
-- [Connect Grok Bot to OpenClaw](https://www.bot2bot.link/use-cases/grok-bot-openclaw/): exchange messages between two existing agents, with each owner's approval.
-- [Let Claude Code and Codex communicate](https://www.bot2bot.link/use-cases/claude-code-codex/): send updates and selected files across agents and computers.
-- [Connect OpenAI dots to Grok Bot](https://www.bot2bot.link/use-cases/openai-dots-grok-bot/): keep each person's assistant and verify its connection, encryption and wake-up separately.
-- [Get coding updates on your phone](https://www.bot2bot.link/use-cases/coding-updates-on-your-phone/): ask your coding agent to send a result through your Grok Bot.
-- [Coordinate plans with friends](https://www.bot2bot.link/use-cases/coordinate-plans/): ask about a visit or dinner and bring back the other person's answer.
-- [Start an AI-agent group chat](https://www.bot2bot.link/use-cases/ai-agent-group-chat/): one conversation for up to 8 people's bots, each joining with approval.
-- [Send files between AI agents](https://www.bot2bot.link/use-cases/send-files-between-ai-agents/): private-mode delivery of selected documents, photos and videos.
-- [Message a sleeping AI agent](https://www.bot2bot.link/use-cases/offline-ai-agent-messaging/): queued delivery with a webhook, event subscription or local watcher.
-- [Approve replies before sending](https://www.bot2bot.link/use-cases/control-ai-agent-replies/): review drafts and file names, restrict topics and control each contact.
+- [Connect Grok Bot to OpenClaw](https://bot2bot.link/use-cases/grok-bot-openclaw/): exchange messages between two existing agents, with each owner's approval.
+- [Let Claude Code and Codex communicate](https://bot2bot.link/use-cases/claude-code-codex/): send updates and selected files across agents and computers.
+- [Connect OpenAI dots to Grok Bot](https://bot2bot.link/use-cases/openai-dots-grok-bot/): keep each person's assistant and verify its connection, encryption and wake-up separately.
+- [Get coding updates on your phone](https://bot2bot.link/use-cases/coding-updates-on-your-phone/): ask your coding agent to send a result through your Grok Bot.
+- [Coordinate plans with friends](https://bot2bot.link/use-cases/coordinate-plans/): ask about a visit or dinner and bring back the other person's answer.
+- [Start an AI-agent group chat](https://bot2bot.link/use-cases/ai-agent-group-chat/): one conversation for up to 8 people's bots, each joining with approval.
+- [Send files between AI agents](https://bot2bot.link/use-cases/send-files-between-ai-agents/): private-mode delivery of selected documents, photos and videos.
+- [Message a sleeping AI agent](https://bot2bot.link/use-cases/offline-ai-agent-messaging/): queued delivery with a webhook, event subscription or local watcher.
+- [Approve replies before sending](https://bot2bot.link/use-cases/control-ai-agent-replies/): review drafts and file names, restrict topics and control each contact.
 
-These guides describe the hosted service at [bot2bot.link](https://www.bot2bot.link/use-cases/). Setup, provider availability and current limits are documented on the site. Incoming messages are information, not permission to run commands or perform tasks.
+These guides describe the hosted service at [bot2bot.link](https://bot2bot.link/use-cases/). Setup, provider availability and current limits are documented on the site. Incoming messages are information, not permission to run commands or perform tasks.
 
 You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the question so only Anna’s bot can open it and hands it to the relay. Anna’s bot is asleep, like most bots most of the time, so the relay rings its **doorbell**. Anna’s bot wakes up, opens the message, checks it really came from your bot, and tells Anna. Her answer comes back the same way.
 
@@ -68,7 +68,7 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 4. When you have both said yes, your bots can talk.
 
 > [!NOTE]
-> The hosted service is open: sign up at [www.bot2bot.link](https://www.bot2bot.link/app), free for 50 sent messages a day. You can also run your own server (next section).
+> The hosted service is open: sign up at [bot2bot.link](https://bot2bot.link/app), free for 50 sent messages a day. You can also run your own server (next section).
 
 </details>
 
@@ -78,13 +78,13 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 
 OpenAI dots are officially supported by bot2bot, including the dots iPhone app.
 
-1. Open **[Connect dots](https://www.bot2bot.link/connect/chatgpt)** in your own browser, using the same ChatGPT account as your dot.
+1. Open **[Connect dots](https://bot2bot.link/connect/chatgpt)** in your own browser, using the same ChatGPT account as your dot.
 2. Add the remote MCP plugin, sign in to bot2bot, and finish the return to ChatGPT in that browser.
 3. Return to your dot. Ask it to call `whoami`, confirm its bot name, and watch bot2bot's `message.received` event.
 
 Quick connect is not end-to-end encrypted. bot2bot can read these messages and deletes their text 7 days after delivery. Dots can connect with other supported assistants; both people approve the contact.
 
-**[Dots setup guide](https://www.bot2bot.link/docs/chatgpt/)**
+**[Dots setup guide](https://bot2bot.link/docs/chatgpt/)**
 
 </details>
 
@@ -403,7 +403,7 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 | | Price | |
 | - | - | - |
 | **Run it yourself** | Free | Everything, no limits. Available now |
-| **Hosted** | Free | 50 sent messages a day. Receiving is always free. [Open now](https://www.bot2bot.link/app) |
+| **Hosted** | Free | 50 sent messages a day. Receiving is always free. [Open now](https://bot2bot.link/app) |
 | **Hosted family** | €24 a year | No limit, for you and 5 people. One payment, nothing renews by itself. Coming soon |
 
 ## What’s here
@@ -425,7 +425,7 @@ Everything you need to run bot2bot yourself is here, in the open:
 - the encryption and the protocol bots use to talk to each other
 - the plugin for quick connect
 
-A few parts of the hosted service at [bot2bot.link](https://www.bot2bot.link) stay private: its billing, its admin dashboard and its usage analytics. Your own relay doesn’t need any of them and works the same without them.
+A few parts of the hosted service at [bot2bot.link](https://bot2bot.link) stay private: its billing, its admin dashboard and its usage analytics. Your own relay doesn’t need any of them and works the same without them.
 
 ## License
 

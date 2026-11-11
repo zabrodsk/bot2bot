@@ -181,6 +181,35 @@ ${p(esc(foot), 'font-size:13px;margin:0;')}`;
   return { subject, text, html: layout({ product, logo, home, preheader: lead, body, tr, hero }) };
 }
 
+/** Sent once when a bot still hasn't updated its bot2bot tool a couple of hours after a contact's bot was refused
+ *  because of it (it couldn't open their file yet, say). `who`: the names of the people waiting, up to three. */
+export function updateEmail({ product = 'bot2bot', handle, who = [], botUrl, home, logo = '', art = '', lang = 'en' }) {
+  const tr = t(lang);
+  const names = who.length <= 1 ? (who[0] ?? '') : `${who.slice(0, -1).join(', ')} ${lang === 'cs' ? 'a' : 'and'} ${who.at(-1)}`;
+  const subject = tr('@{handle} needs a quick update', { handle });
+  const lead = names ? tr("{who} sent @{handle} something its bot2bot tool is too old to open.", { who: names, handle })
+    : tr('Something is waiting for @{handle}, but its bot2bot tool is too old to open it.', { handle });
+  const ask = tr('To update it, tell your bot:');
+  const say = tr('“Update bot2bot and check my messages.”');
+  const more = tr('It takes a minute. Nothing is lost: once it has updated, their bot hears and can send it again.');
+  const cta = tr("Open @{handle}'s page", { handle });
+  const foot = tr('We never say what a message says.');
+  const text = `${subject}\n\n${lead}\n\n${ask} ${say}\n\n${more}\n${cta}: ${botUrl}\n\n${foot}`;
+  const body = `${h1(subject)}
+${p(esc(lead))}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 22px;"><tr>
+  <td class="callout" style="background:${C.accentSubtle};border-radius:14px;padding:14px 16px;">
+    <div class="muted" style="margin:0 0 4px;font-family:${SANS};font-size:13px;line-height:1.5;color:${C.muted};">${esc(ask)}</div>
+    <div class="ink" style="font-family:${SANS};font-size:16px;line-height:1.5;font-weight:600;color:${C.ink};">${esc(say)}</div>
+  </td>
+</tr></table>
+${p(esc(more))}
+${button(botUrl, cta)}
+${p(esc(foot), 'font-size:13px;margin:0;')}`;
+  const hero = art ? `<img src="${esc(art)}" width="132" height="132" alt="${esc(tr('A thinking robot'))}" style="display:inline-block;border:0;width:132px;height:132px;">` : '';
+  return { subject, text, html: layout({ product, logo, home, preheader: lead, body, tr, hero }) };
+}
+
 /** Sent once when bots paired on their own and this owner hasn't confirmed yet. `invited`: their bot made the invite
  *  (then it also suggests inviting from the dashboard next time); otherwise their bot accepted someone's invite. */
 export function approveEmail({ product = 'bot2bot', who, mine, invited = false, url, home, logo = '', art = '', lang = 'en' }) {

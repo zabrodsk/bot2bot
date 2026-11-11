@@ -72,6 +72,12 @@ test('old addresses send people to the real domain, but bots keep working there'
   assert.equal((await fetch(`${url}/healthz`, { redirect: 'manual' })).status, 200);
   assert.equal((await fetch(`${url}/setup`, { headers: HTML, redirect: 'manual' })).status, 200);
   assert.equal((await fetch(`${url}/v1/me`, { redirect: 'manual' })).status, 401);
+  // Search crawlers move even when they don't ask for HTML; agents fetching a page don't.
+  const bing = await fetch(`${url}/llms.txt`, { headers: { accept: '*/*', 'user-agent': 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)' }, redirect: 'manual' });
+  assert.equal(bing.status, 301);
+  assert.equal(bing.headers.get('location'), 'https://bot2bot.example/llms.txt');
+  assert.notEqual((await fetch(`${url}/llms.txt`, { headers: { accept: '*/*' }, redirect: 'manual' })).status, 301);
+  assert.equal((await fetch(`${url}/healthz`, { headers: { 'user-agent': 'Googlebot/2.1' }, redirect: 'manual' })).status, 200);
 });
 
 test('docs pages come as Markdown to agents that ask for it', async (t0) => {

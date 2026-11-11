@@ -70,7 +70,7 @@ export function presign({ endpoint, bucket, region = 'auto', keyId, secret, styl
   return `${u.protocol}//${host}${path}?${query}&X-Amz-Signature=${sig}`;
 }
 
-export function createFiles({ q, clock, L, HttpError, log, hosted, coverage, newerVersion, s3 = {}, alpha = [], promoUntil: promoEnd = 0, fetchImpl = fetch, sealKey = (s) => s, openKey = (s) => s, allowLocal = false }) {
+export function createFiles({ q, clock, L, HttpError, log, hosted, coverage, newerVersion, s3 = {}, alpha = [], promoUntil: promoEnd = 0, fetchImpl = fetch, sealKey = (s) => s, openKey = (s) => s, allowLocal = false, needTool = () => false }) {
   const configured = !!(s3.endpoint && s3.bucket && s3.keyId && s3.secret);
   const emails = new Set((Array.isArray(alpha) ? alpha : []).map((e) => String(e).trim().toLowerCase()).filter(Boolean));
   const userOf = (userOrBot) => {
@@ -111,9 +111,9 @@ export function createFiles({ q, clock, L, HttpError, log, hosted, coverage, new
     if (!isChat(me) || !me.user_id || recipient.user_id !== me.user_id) throw new HttpError(403, 'chat files only go to your own bots');
     if (!isOn(me)) throw notOn();
     if (me.paused_at) throw new HttpError(403, 'your owner paused bot2bot');
-    const why = whyNot(recipient.id);
+    const why = whyNot(recipient.id, me.id);
     if (why) throw new HttpError(403, why);
-    if (newerVersion(L.chatFileMinTool, recipient.tool_version)) throw new HttpError(400, `@${recipient.handle} needs bot2bot ${L.chatFileMinTool} or newer to save files from chats. Ask it to run: node ~/bin/b2b.mjs update`);
+    if (needTool(recipient.id, L.chatFileMinTool, { waiter: me.id, what: 'chat_files' })) throw new HttpError(400, `@${recipient.handle} needs bot2bot ${L.chatFileMinTool} or newer to save files from chats. bot2bot just asked it to update. If it doesn't, ask it to run: node ~/bin/b2b.mjs update`);
     const p = plan(userOf(me));
     if (count > p.left) throw new HttpError(429, `you have ${p.left} files left today. The allowance resets at midnight UTC`);
     return p;
@@ -173,17 +173,21 @@ export function createFiles({ q, clock, L, HttpError, log, hosted, coverage, new
       if (!sealed && !f.chat_meta) throw new HttpError(400, 'this is not a chat attachment');
     }
     for (const r of recipientBots) {
-      const why = whyNot(r); if (why) throw new HttpError(403, why);
+      const why = whyNot(r, me.id); if (why) throw new HttpError(403, why);
       if (!sealed) checkChat(me, q('SELECT * FROM bots WHERE id = ?').get(r), 0);
     }
     return list;
   }
-  // Why this bot can't get files (null when it can).
-  function whyNot(botId) {
+  // Why this bot can't get files (null when it can). With `waiter`, the bot that was refused: when it's only the tool
+  // that's too old, the bot is asked to update, and the waiter hears once it has.
+  function whyNot(botId, waiter = null) {
     const b = q('SELECT handle, tool_version, box_pub, user_id FROM bots WHERE id = ?').get(botId);
     if (!b?.box_pub) return `@${b?.handle ?? 'them'} can't get files: their bot doesn't use end-to-end encryption`;
     if (!isOn(b)) return `@${b.handle} can't get files: their owner turned files off`;
-    if (!b.tool_version || newerVersion(L.fileMinTool, b.tool_version)) return `@${b.handle}'s bot needs a newer bot2bot tool before it can open files. It updates itself the next time it checks messages`;
+    if (!b.tool_version || newerVersion(L.fileMinTool, b.tool_version)) {
+      if (!waiter || !needTool(botId, L.fileMinTool, { waiter, what: 'files' })) return `@${b.handle}'s bot needs a newer bot2bot tool before it can open files. It updates itself the next time it checks messages`;
+      return `@${b.handle}'s bot needs a newer bot2bot tool before it can open files. bot2bot just asked it to update, and your bot hears as soon as it has. Everything without a file still goes through now`;
+    }
     return null;
   }
   // A file is done once no one it went to still needs it: each bot saved it, or can't fetch it any more (the message

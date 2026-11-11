@@ -8,7 +8,8 @@
 // - HTTP answers: 5xx from pages, from the bot API (/v1) and from connected apps (/mcp);
 // - doorbell rings: only failures that are ours (network errors, timeouts and 5xx across several bots). One owner's
 //   paused or broken routine answers 4xx and is their business, not an outage;
-// - emails: the mailer is wrapped, so a failed send is counted.
+// - emails: the mailer is wrapped, so a failed send is counted;
+// - the outside check, when one is set up: its pings to /healthz stopping means nobody outside gets through.
 // Minutes with no heartbeat at all (the relay was down or restarting) count as down for everything once it is back,
 // except short gaps, which are a deploy's restart.
 
@@ -20,6 +21,8 @@ const IMPACTS = ['minor', 'major'];
 const MIN = 60_000, DAY = 86_400_000;
 const WINDOW_MS = 5 * MIN;        // the signals the current state is judged on
 const GRACE_MIN = 2;              // a gap of this many missing minutes or fewer is a restart, not an outage
+const PROBE_LATE_MS = 4 * MIN;    // the outside check pings every minute; this long without one, nobody gets through
+const PROBE_RETIRED_MS = 6 * 60 * MIN;
 const KEEP_MINUTES_MS = 2 * DAY;  // per-minute heartbeats; older ones live on as per-day counts
 const KEEP_DAYS = 92;
 const SHOWN_DAYS = 90, PAST_DAYS = 14;
@@ -94,6 +97,13 @@ export function createStatus({ q, tx, clock, HttpError, log = () => {}, product 
     rings.push({ t, bot: bot.id, bad: !httpStatus || httpStatus >= 500 });
     while (rings.length && (rings[0].t <= t - WINDOW_MS || rings.length > 5000)) rings.shift();
   }
+  // The outside check: a pinger somewhere else (status-probe/worker.js) asks for /healthz once a minute, through the
+  // public address. It counts once the answer is sent. When its pings stop arriving while we're running, people
+  // can't reach us either (DNS, the host's edge) or we're stuck. Probing that stopped hours ago is a retired
+  // pinger, not an outage.
+  let probedAt = 0;
+  const probed = (t = clock()) => { probedAt = t; };
+  const unreachable = (t) => probedAt > t - PROBE_RETIRED_MS && probedAt <= t - PROBE_LATE_MS;
 
   // How each part looks from the signals alone. A few failures are noise; a part is slow when failures are a real
   // share of the traffic, and down when most of it fails.
@@ -113,6 +123,8 @@ export function createStatus({ q, tx, clock, HttpError, log = () => {}, product 
     };
     // The heartbeat couldn't be written: the database isn't taking writes, so nothing that saves anything works.
     if (writeFailedAt > t - WINDOW_MS) s.website = s.messages = 'down';
+    // Nobody outside gets through: pages, bots and connected apps all come in that way.
+    if (unreachable(t)) s.website = s.messages = s.apps = 'down';
     return s;
   }
 
@@ -291,7 +303,7 @@ ${list.map(entry).join('\n')}
 </feed>`;
   }
 
-  return { beat, request, rang, wrapMailer, current, measured, view, json, feed, routes, page: (tr) => statusPage(view(), tr) };
+  return { beat, request, rang, probed, wrapMailer, current, measured, view, json, feed, routes, page: (tr) => statusPage(view(), tr) };
 }
 
 // ───── the page ─────

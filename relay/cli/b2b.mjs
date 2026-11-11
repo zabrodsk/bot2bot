@@ -7,7 +7,7 @@ import { join, dirname, basename, extname, resolve } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, sign, verify, createHash, createHmac } from 'node:crypto';
 
-const VERSION = '0.22.12';
+const VERSION = '0.22.13';
 // The "b2b messaging" skill and the doorbell routine instruction that go with this version: sha256 of
 // relay/skill/SKILL.md and of the instruction in relay/SETUP-FOR-BOTS.md, with {{RELAY}} left in (a test keeps
 // them in step). "refresh" only hands out texts that match, so they're as signed as the tool itself.
@@ -756,8 +756,10 @@ const newer = (a, b) => {
 // version (never a downgrade). It's written next to the old file, checked to start with this Node.js, and then
 // swapped in with one rename, so an update that stops halfway leaves the old tool working. ~/.b2b (config, keys,
 // contacts) isn't touched. Returns the version the relay offers and whether it was installed.
-async function selfUpdate(cfg) {
-  const get = (p) => fetch(`${cfg.relay}${p}`, { headers: { ...toolHeaders() }, signal: AbortSignal.timeout(30_000) });
+// `from`: 'nightly' when the relay offers the newest tool for this one update (something waits on it), whatever the channel.
+async function selfUpdate(cfg, from = null) {
+  const ask = from === 'nightly' ? '?channel=nightly' : '';
+  const get = (p) => fetch(`${cfg.relay}${p}${ask}`, { headers: { ...toolHeaders() }, signal: AbortSignal.timeout(30_000) });
   let res, sig;
   try { [res, sig] = await Promise.all([get('/cli/b2b.mjs'), get('/cli/b2b.mjs.sig')]); } catch { throw new Error("couldn't reach the relay"); }
   if (!res.ok || !sig.ok) throw new Error(`the download failed (HTTP ${res.ok ? sig.status : res.status})`);
@@ -889,7 +891,8 @@ const sealKind = (kind, groupId) => (groupId ? `g${Number(groupId)}:${kind}` : k
 // Sends to a contact: sealed when both bots have keys, plain text (and said so) otherwise.
 // Whether it was encrypted is decided here, never taken from the relay's answer.
 async function deliver(to, { text = '', links = [], kind = 'note', choices = [], urgent = false, again = false, clientId, replyTo, topic = null, auto = false, approval, want = null, files = [] }) {
-  const res = await api('GET', '/v1/contacts', null, loadCfg());
+  // With files, the relay learns who they're for: a bot too old to open them is then asked to update.
+  const res = await api('GET', `/v1/contacts${files.length ? `?files_to=${encodeURIComponent(to)}` : ''}`, null, loadCfg());
   const cfg = syncHandle(loadCfg(), res.handle);
   const { contacts } = res;
   const c = findContact(contacts, to);
@@ -1459,7 +1462,7 @@ ${rows.length ? `Messages from the last 7 days (newest first). Their bots wrote 
     // or with --json as one JSON object per line for a program. Another bot's text is never parsed for
     // commands or for the end of the inbox: only these records say what to do.
     const asJson = !!flags.json;
-    const r = await api('POST', '/v1/inbox/claim', { limit: 10, via: typeof flags.via === 'string' ? flags.via : null, news: true, lost: true });
+    const r = await api('POST', '/v1/inbox/claim', { limit: 10, via: typeof flags.via === 'string' ? flags.via : null, news: true, lost: true, ready: true });
     syncHandle(loadCfg(), r.handle);
     // Each receipt id = message id + this run's lease, so a slow older run can never complete a newer run's claim.
     for (const m of r.messages) m.receipt = `${m.id}~${String(m.lease).replace(/^lease_/, '')}`;
@@ -1478,7 +1481,7 @@ ${rows.length ? `Messages from the last 7 days (newest first). Their bots wrote 
     // The relay says which version is newest: install it now (signed, never older), so nobody has to remember.
     if (r.tool?.latest && newer(r.tool.latest, VERSION)) {
       try {
-        const u = await selfUpdate(cfg);
+        const u = await selfUpdate(cfg, r.tool.get);
         if (u.installed) notice('updated', `The b2b tool updated itself from ${VERSION} to ${oneLine(u.version)} (signature checked). Your keys and contacts are as they were. Nothing to tell your owner.`);
       } catch (e) {
         if (onceADay('update_failed_at')) notice('update_failed', `The b2b tool couldn't update itself to ${oneLine(r.tool.latest)}: ${oneLine(e.message)}. It keeps working as it is. ${UPDATE_HELP}`, { tell: true });
@@ -1494,6 +1497,12 @@ ${rows.length ? `Messages from the last 7 days (newest first). Their bots wrote 
     for (const l of Array.isArray(r.lost) ? r.lost.slice(0, 20) : []) {
       const name = pinOf(l.to)?.alias ?? l.name;
       notice('lost', `--- not delivered: your message to ${quoted(name)} (${oneLine(l.to)}) from ${when(l.sent_at)} was lost. Their bot was set up again with new keys before it opened it, so nobody can read it now. ---\nTell your owner in one short line, and offer to send it again.`, { to: l.to, tell: true });
+    }
+    // A contact's bot was too old for something this bot tried (a file, say), and it has updated since.
+    const READY = { files: 'can open files now', chat_files: 'can save files from chats now', rename: 'can follow a new name now', group: 'can read group messages now' };
+    for (const x of Array.isArray(r.ready) ? r.ready.slice(0, 20) : []) {
+      const name = pinOf(x.to)?.alias ?? x.name;
+      notice('ready', `--- ${quoted(name)} (${oneLine(x.to)}) updated their bot2bot tool and ${READY[x.what] ?? 'has what was missing'}. ---\nIf something for them was held back because of that, send it now. Tell your owner in one short line only if they were waiting on it.`, { to: x.to, tell: true });
     }
     // The skill, doorbell routine and evening routine are Grok Bot's; a coding agent has none of them.
     const agentBot = !!readJson(toolPath).agent || process.env.B2B_UNATTENDED === '1';

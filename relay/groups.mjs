@@ -1,3 +1,4 @@
+import { messagePlatform } from './message-metadata.mjs';
 // Group chats (0.21): a few people's bots in one shared chat. Anyone in it can post a message or a question with
 // answer buttons; everyone sees who's in it and what's said.
 //
@@ -57,7 +58,7 @@ export function migrateGroups(db) {
   if (!cols('circles').includes('hidden')) db.exec('ALTER TABLE circles ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
 }
 
-export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files = null, allowanceLeft, kick }) {
+export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files = null, allowanceLeft, kick, needTool = () => false }) {
   const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
   const bot = (id) => q('SELECT * FROM bots WHERE id = ?').get(id);
   const group = (id) => q('SELECT * FROM chat_groups WHERE id = ?').get(Number(id));
@@ -71,8 +72,12 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
   // End-to-end encrypted only while every member who'd receive something has keys.
   const encrypted = (gid) => { const js = joined(gid).filter(live); return js.length > 0 && js.every((m) => !!m.box_pub); };
   const nameOf = (m) => m.person || m.display_name || `@${m.handle}`;
-  // A tool too old to open group messages: it updates on its own (or its owner asks it to), then joins.
-  const toolReady = (b) => b.vendor !== 'grokbot' || !b.tool_version || !newer(GROUP_TOOL, b.tool_version);
+  // A tool too old to open group messages: it's asked to update (or its owner asks it to), then joins.
+  const toolReady = (b) => {
+    const ready = b.vendor !== 'grokbot' || !b.tool_version || !newer(GROUP_TOOL, b.tool_version);
+    if (!ready) needTool(b.id, GROUP_TOOL, { what: 'group' });
+    return ready;
+  };
   const blockedBetween = (a, b) => !!q('SELECT 1 FROM contacts WHERE ((owner_bot = ? AND peer_bot = ?) OR (owner_bot = ? AND peer_bot = ?)) AND blocked = 1').get(a, b, b, a);
   const cleanName = (v) => String(v ?? '').normalize('NFC').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
   const checkName = (v) => { const n = cleanName(v); if (!NAME_RE.test(n)) throw new HttpError(400, 'a group name is 1 to 40 characters'); return n; };
@@ -458,7 +463,7 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
           c.sealed || !choices.length ? null : JSON.stringify(choices), ownerWeb ? 'web' : 'bot', c.sealed, c.sealed ? tag : null, gid, postId, mentioned ? 1 : 0, clientId && i === 0 ? clientId : null);
         files?.attach(fileIds, msgId);
       }
-      log(me.id, 'group_sent', { group: gid, post: postId, to: copies.length, encrypted: allSealed });
+      log(me.id, 'group_sent', { route: 'group', platform: messagePlatform(me), group: gid, post: postId, to: copies.length, encrypted: allSealed });
       kick();
       return { id: postId, group: g.name, to: copies.length, encrypted: allSealed, woken: copies.filter((c) => c.r.wake !== 'muted').length };
     });

@@ -1,3 +1,5 @@
+import { isHeadPage } from './page-request.mjs';
+
 // Pilot governance. No bot-supplied authority flags are accepted here.
 // See GOVERNANCE.md for the API and the owner-only, transaction-compatible helpers.
 export function migrateGovernance(db) {
@@ -121,7 +123,7 @@ const DAY = 86_400_000;
 const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const TOPIC = /^[\p{L}\p{N}][\p{L}\p{N} '&-]{0,39}$/u;
 export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl, privacyPilot,
-  resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L }) {
+  resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L, filesFor = () => null }) {
   const fail = (message, status = 400) => { throw new HttpError(status, message); };
   const bot = (id) => q('SELECT * FROM bots WHERE id = ?').get(id) || fail('bot not found', 404);
   const emails = new Set((Array.isArray(privacyPilot) ? privacyPilot : []).map((s) => String(s).trim().toLowerCase()));
@@ -141,7 +143,7 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     return c.mode_override ?? (c.circle_id ? q('SELECT mode FROM circles WHERE id = ? AND owner_bot = ?').get(c.circle_id, c.owner_bot)?.mode : null) ?? 'asks';
   }
   function ensureCircles(ownerBot, pilot = inPilot(ownerBot)) {
-    if (!pilot) return;
+    if (!pilot || isHeadPage()) return;
     for (const [position, name] of ['family', 'friends', 'work'].entries()) {
       q(`INSERT INTO circles(owner_bot, name, name_key, mode, is_default, position, created_at)
          SELECT ?, ?, ?, 'handles', 1, ?, ? WHERE NOT EXISTS (SELECT 1 FROM circles WHERE owner_bot = ? AND is_default = 1 AND position = ?)`)
@@ -197,6 +199,7 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     return q('SELECT * FROM contact_rules WHERE owner_bot = ? AND id = ? AND removed_at IS NULL').get(id, value) || fail('rule not found', 404);
   }
   function expire(t = clock()) {
+    if (isHeadPage()) return;
     q("UPDATE privacy_requests SET state = 'EXPIRED', decided_at = ? WHERE state IN ('PENDING_OWNER','APPROVED') AND expires_at <= ?").run(t, t);
     q(`UPDATE privacy_requests SET state = 'CANCELLED', decided_at = ? WHERE state IN ('PENDING_OWNER','APPROVED')
        AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.owner_bot = privacy_requests.owner_bot AND c.peer_bot = privacy_requests.peer_bot AND c.gen = privacy_requests.contact_gen)`).run(t);
@@ -455,6 +458,8 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     const draft = candidate(body.draft);
     // Files only go end-to-end encrypted, so the bot sends them itself once its owner okays the draft.
     if (draft.files.length && !(me.box_pub && bot(c.peer_bot).box_pub)) fail("files only go in end-to-end encrypted chats, and this one isn't", 400);
+    // A bot too old to open them is asked to update now, so it's ready by the time the owner says yes.
+    if (draft.files.length) filesFor(c.peer_bot, ownerBot);
     const question = body.question == null ? null : string(body.question, 280, 'question', true);
     const about = body.topic == null ? null : topic(body.topic);
     let r = inbound

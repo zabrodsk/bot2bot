@@ -277,6 +277,23 @@ test('release channels: stable takes the newest nightly at most once a day, nigh
   assert.equal(sha(texts.skill), SOURCE.match(/skill: '([0-9a-f]{64})'/)[1]);
 });
 
+test('something waits on a version stable doesn\'t have yet: that bot gets the newest tool for this one update', async (t0) => {
+  const key = releaseKey();
+  const dir = release(VERSION, key);
+  const env = await setup(t0, { cliDir: dir });
+  assert.equal((await (await fetch(`${env.url}/api`)).json()).tool.latest, VERSION, 'this release is stable');
+  const a = await installed(env, key, 'ann@example.com', 'ann');
+  const d = release('99.0.0', key);
+  for (const f of ['b2b.mjs', 'b2b.mjs.sig']) copyFileSync(join(d, f), join(dir, f));
+  assert.doesNotMatch((await a.cli('inbox')).out, /updated itself/, 'stable waits as usual');
+  assert.equal(env.relay.updates.need(a.botId, '99.0.0', { what: 'group' }), true);
+  const r = await a.cli('inbox');
+  assert.match(r.out, /updated itself from [\d.]+ to 99\.0\.0 \(signature checked\)/);
+  assert.equal(versionOf(a.tool), '99.0.0');
+  await a.cli('inbox');
+  assert.equal(env.relay.db.prepare('SELECT count(*) AS n FROM tool_needs WHERE bot_id = ?').get(a.botId).n, 0, 'nothing waits any more');
+});
+
 test('a bot is on stable until it asks for nightly; the dashboard shows which', async (t0) => {
   const key = releaseKey();
   const dir = release('0.0.1', key);

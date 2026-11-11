@@ -53,7 +53,7 @@ test('invite by chat: the bot gets a link, the friend connects, the owner says y
   const path = new URL(link).pathname;
   assert.match(out, /Open my invite: http[^]*If you don't have bot2bot yet, it shows you how to connect your bot first\./);
   const invitation = (await gran(path)).text;
-  assert.match(invitation, /wants your bots to talk[^]*Grok Bot[^]*I have a bot2bot invite: http[^]*Add the setup bot[^]*OpenAI dots[^]*href="\/connect\/chatgpt\?invite=[A-Z0-9]{4}-[A-Z0-9]{4}"[^]*OpenClaw[^]*Claude Code[^]*--agent claude-code[^]*Codex[^]*--agent codex[^]*Hermes Agent[^]*Message for Hermes Agent[^]*--agent hermes[^]*Other bots[^]*\/mcp/);
+  assert.match(invitation, /wants your bots to talk[^]*Grok Bot[^]*Add the setup bot[^]*Message for your bot[^]*accept [A-Z0-9]{4}-[A-Z0-9]{4}[^]*OpenAI dots[^]*href="\/connect\/chatgpt\?invite=[A-Z0-9]{4}-[A-Z0-9]{4}"[^]*OpenClaw[^]*Hermes Agent[^]*Message for Hermes Agent[^]*--agent hermes[^]*Instinct[^]*Claude Code[^]*--agent claude-code[^]*Codex[^]*--agent codex[^]*Other bots[^]*\/mcp/);
   const chatgptGuide = invitation.match(/href="(\/connect\/chatgpt\?invite=[A-Z0-9-]+)"/)[1];
   assert.equal(new URL(chatgptGuide, env.url).searchParams.get('invite'), path.split('/').at(-1));
   assert.match((await gran(chatgptGuide)).text, new RegExp(`href="${path}"`));
@@ -113,18 +113,22 @@ test('the skill, the backup check, the setup checklist and the bot tiles', async
   assert.match((await ben.b(`/app/bots/${ben.botId}`)).text, /<dt>Backup check<\/dt><dd><b>Off<\/b>/);
 });
 
-test('profile pictures: picked before the dashboard, shown to friends who said yes, never to strangers', async (t0) => {
+test('profile pictures: picked once there\'s a bot, shown to friends who said yes, never to strangers', async (t0) => {
   const env = await setup(t0);
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   const anna = await owner(env, t0, 'anna@example.com', 'anna');
   const zoe = await owner(env, t0, 'zoe@example.com', 'zoe');
   await connect(ben, anna, 'Ben');
 
-  // Someone new picks a picture first, then lands where they were going.
+  // Someone new connects a bot first. Without a picture, giving away links or having a bot asks for one, then goes on.
   const b = browser(env.url);
   await b('/login', { method: 'POST', form: { email: 'new@example.com' } });
   await b('/login/verify', { method: 'POST', form: { email: 'new@example.com', code: env.mail.at(-1).text.match(/code is (\d{6})/)[1] } });
-  assert.equal((await b('/app/activity')).location, '/app/picture?next=%2Fapp%2Factivity');
+  assert.equal((await b('/app/activity')).status, 200, 'no bot yet: no picture needed');
+  assert.match((await b('/app')).text, /Connect your bot/);
+  env.relay.db.prepare("UPDATE users SET photo_at = NULL WHERE email = 'zoe@example.com'").run();
+  assert.equal((await zoe.b('/app/activity')).location, '/app/picture?next=%2Fapp%2Factivity');
+  await zoe.b('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
   const picker = (await b('/app/picture?next=/app/activity')).text;
   assert.match(picker, /Your name and picture/);
   assert.equal((picker.match(/name="avatar" value="[a-z]+"/g) || []).length, 0, 'the drawn robots are no longer offered');

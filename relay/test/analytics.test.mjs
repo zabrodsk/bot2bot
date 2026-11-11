@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { consentMarkup, privacyOptions, captureConnectedBots, replayPage, ANALYTICS_CSP } from '../analytics.mjs';
+import { consentMarkup, privacyOptions, sanitizeAnalyticsPath, captureConnectedBots, replayPage, ANALYTICS_CSP } from '../analytics.mjs';
 import { t } from '../i18n.mjs';
 import { setup, login } from './helpers.mjs';
 
@@ -229,4 +229,24 @@ test('dashboard marks connected bots, excluding setup, paused, disconnected and 
     const details = await b(`/app/bots/${bot.id}`);
     assert.equal(details.text.includes('<span hidden data-analytics-connected='), handle.startsWith('ready-'), handle);
   }
+});
+
+
+test('public landing paths survive while token routes and IDs stay redacted', () => {
+  globalThis.location = { origin: 'https://www.bot2bot.link' };
+  const config = privacyOptions();
+  const slugsFile = new URL('../../site/v2/simple/src/data/use-cases.ts', import.meta.url);
+  const slugs = existsSync(slugsFile) ? [...readFileSync(slugsFile, 'utf8').matchAll(/slug: '([^']+)'/g)].map((m) => m[1]) : ['claude-code-codex'];
+  for (const path of [...slugs.map((s) => `/use-cases/${s}/`), '/send/', '/founder/', '/cs/', '/docs/claude-code/', '/docs/codex.md', '/docs/files/', '/docs/groups/', '/agents/']) {
+    assert.equal(sanitizeAnalyticsPath(path), path);
+    assert.equal(config.before_send({ event: '$pageview', properties: { $pathname: path + '?token=SECRET#CODE' } }).properties.$pathname, path);
+  }
+  for (const prefix of ['i', 'g', 'gift', 'link']) for (const code of ['secret-code', 'docs', '123', 'ABCD-EFGH']) {
+    assert.equal(sanitizeAnalyticsPath(`/${prefix}/${code}/`), '/[redacted]/[redacted]/');
+  }
+  assert.equal(sanitizeAnalyticsPath('/app/bots/123'), '/app/bots/[redacted]');
+  assert.equal(sanitizeAnalyticsPath('/docs/secret_token/123'), '/docs/[redacted]/[redacted]');
+  assert.equal(sanitizeAnalyticsPath('/send/secret-token'), '/send/[redacted]');
+  assert.equal(sanitizeAnalyticsPath('/app/link/docs'), '/app/[redacted]/[redacted]');
+  delete globalThis.location;
 });

@@ -1,5 +1,24 @@
+// Public paths share one rule between pageviews and consented first-touch attribution.
+// Dynamic token routes never inherit public words from later segments.
+export function sanitizeAnalyticsPath(path) {
+  const parts = String(path).split('/');
+  const publicPages = /^(pricing|privacy|cookies|security|start|agents|bots|terms|legal|changelog|faq|agent-to-agent|send|founder|feedback|setup-bot)$/;
+  const slug = /^[a-z]+(?:-[a-z]+)*$/;
+  let offset = parts[1] === 'cs' ? 2 : 1;
+  const root = parts[offset] || '';
+  return parts.map((part, i) => {
+    if (!part) return '';
+    if (i === 1 && offset === 2) return 'cs';
+    if (i === offset && (publicPages.test(part) || ['docs', 'use-cases', 'compare', 'app'].includes(part))) return part;
+    if (i === offset + 1 && ['docs', 'use-cases'].includes(root) && slug.test(part.replace(/\.md$/, ''))) return part;
+    if (i === offset + 1 && root === 'compare' && part === 'a2a') return part;
+    if (offset === 1 && root === 'app' && i === 2 && /^(account|activity|people|bots|inbox|billing|feedback)$/.test(part)) return part;
+    return '[redacted]';
+  }).join('/');
+}
+
 // Shared browser privacy controls. Keep this function self-contained for the relay's inline script.
-export function privacyOptions(dashboard = false) {
+export function privacyOptions(dashboard = false, sanitizePath = sanitizeAnalyticsPath) {
   // Only campaign slugs, never free text, identifiers from ad platforms or first-touch profiles.
   const utms = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content'];
   const validUtm = (value) => typeof value === 'string' && /^[a-z0-9][a-z0-9_-]{0,99}$/.test(value);
@@ -9,7 +28,7 @@ export function privacyOptions(dashboard = false) {
       const u = new URL(raw, location.origin);
       if (u.origin !== location.origin) return '[redacted]';
       // Keep public page names only. Dashboard IDs, all queries and fragments are unnecessary.
-      if (!/^\/(?:_astro|fonts|images|art|stickers)\//.test(u.pathname)) u.pathname = u.pathname.split('/').map((s) => /^(app|account|activity|people|bots|inbox|billing|feedback|docs|pricing|privacy|cookies|security|start|agents|terms|legal|changelog|faq|agent-to-agent|compare|a2a|how-it-works|mcp|limits|troubleshooting|invites|quickstart|baskets|api|setup-bot|chatgpt|self-host|messages|openclaw|coding-agents|encryption|keys|doorbell|cli|connect|)$/.test(s) ? s : '[redacted]').join('/');
+      if (!/^\/(?:_astro|fonts|images|art|stickers)\//.test(u.pathname)) u.pathname = sanitizePath(u.pathname);
       u.search = ''; u.hash = ''; u.username = ''; u.password = '';
       return u.toString();
     } catch { return ''; }
@@ -123,6 +142,7 @@ function dashboardConsent(config, privacyOptions, clearPostHogStorage, captureCo
   const apply = (next) => {
     const old = choice;
     choice = next || {};
+    if (choice.analytics !== true) document.cookie = 'b2b_src=; Max-Age=0; Path=/; SameSite=Lax';
     if ((old.analytics && !choice.analytics) || (old.replay && !choice.replay)) {
       ph?.stopSessionRecording(); ph?.opt_out_capturing(); clearPostHogStorage();
       if (ph && (choice.analytics || choice.replay)) { location.reload(); return; }
@@ -192,7 +212,7 @@ export function consentMarkup(tr, key) {
 <label><input type="checkbox" name="replay"> ${tr('Session recordings: find usability problems. Typed text and dashboard content are masked. Kept for 30 days.')}</label>
 <p><a href="/cookies/">${tr('Cookie policy')}</a></p>
 <div class="cc-actions"><button class="btn secondary small" value="reject">${tr('Reject all')}</button><button class="btn secondary small" value="accept">${tr('Accept all')}</button><button class="btn small" value="save">${tr('Save choices')}</button></div>
-</form></section><script>(${dashboardConsent.toString()})(${JSON.stringify({ key })}, ${privacyOptions.toString()}, ${clearPostHogStorage.toString()}, ${captureConnectedBots.toString()});</script>`;
+</form></section><script>(${dashboardConsent.toString()})(${JSON.stringify({ key })}, (dashboard) => (${privacyOptions.toString()})(dashboard, ${sanitizeAnalyticsPath.toString()}), ${clearPostHogStorage.toString()}, ${captureConnectedBots.toString()});</script>`;
 }
 
 export const ANALYTICS_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' https://eu-assets.i.posthog.com; connect-src 'self' https://eu.i.posthog.com https://eu-assets.i.posthog.com; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";

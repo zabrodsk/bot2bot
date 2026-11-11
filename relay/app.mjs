@@ -8,6 +8,8 @@ import { nextQuestion, QUESTION_BY_ID } from './feedback-questions.mjs';
 import { loginEmail, DOORBELL_VIDEO } from './email.mjs';
 import { t as translator, langFromHeader, normLang } from './i18n.mjs';
 import { setupPrompts } from './setup-prompts.mjs';
+import { messageState } from './message-state.mjs';
+import { pageRequest, isHeadPage } from './page-request.mjs';
 import { isBig, bigParts, filesArt } from './bigupdate.mjs';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -133,12 +135,12 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
-  const { analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { originFor = () => publicUrl || '', analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
   // ───── sessions ─────
-  const cookies = (req) => Object.fromEntries((req.headers.cookie || '').split(/;\s*/).filter(Boolean).map((c) => { const i = c.indexOf('='); return [c.slice(0, i), decodeURIComponent(c.slice(i + 1))]; }));
+  const cookies = (req) => Object.fromEntries((req.headers.cookie || '').split(/;\s*/).filter(Boolean).flatMap((c) => { const i = c.indexOf('='); if (i < 1) return []; try { return [[c.slice(0, i), decodeURIComponent(c.slice(i + 1))]]; } catch { return []; } }));
   const currentUser = (req) => {
     const t = cookies(req).b2b_session;
     if (!t) return null;
@@ -195,8 +197,8 @@ ${THEME_COLOR[theme] ? `<meta name="theme-color" content="${THEME_COLOR[theme]}"
     const note = takeNotice(user);
     // One dialog at most: what's new first, then (on the Overview, once a bot is connected) inviting friends, then feedback.
     // Never while a bot's doorbell is still being set up: that page has the owner's attention.
-    const gift = !news0(user) && tab === 'home' && promo && hasPicture(user) && liveBots(user).length && !liveBots(user).some((b) => settingUp(b, tr)) ? promo.splash(user, tr) : '';
-    const news = news0(user) ? whatsNewDialog(tr) : gift || (tab === 'home' && feedbackDue(user) ? feedbackDialog(user, tr) : '');
+    const gift = !isHeadPage() && !news0(user) && tab === 'home' && promo && hasPicture(user) && liveBots(user).length && !liveBots(user).some((b) => settingUp(b, tr)) ? promo.splash(user, tr) : '';
+    const news = news0(user) ? whatsNewDialog(tr) : gift || (!isHeadPage() && tab === 'home' && feedbackDue(user) ? feedbackDialog(user, tr) : '');
     return `${head(title, tr, user.theme)}<body class="in"><header class="top"><div class="top__in">${brand('/app')}${nav}${me}</div></header>
 <main class="page">${sim}<div class="col col--${width}">${pagehead}${body}${bar.bot ? connectionMarker(myBots(user).find((b) => b.id === bar.bot), tr) : ''}</div>${site ? legal(tr) : ''}</main>${note ? toast(note, tr) : ''}${news}<script>${uiJs(tr)}</script></body></html>`;
   };
@@ -290,7 +292,7 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
     if (notices.size > 5000) for (const [k, v] of notices) if (clock() - v.at > 120_000) notices.delete(k);
     notices.set(user.id, { ...n, at: clock() });
   };
-  const takeNotice = (user) => { const n = notices.get(user.id); notices.delete(user.id); return n && clock() - n.at < 120_000 ? n : null; };
+  const takeNotice = (user) => { const n = notices.get(user.id); if (!isHeadPage()) notices.delete(user.id); return n && clock() - n.at < 120_000 ? n : null; };
   // An undo is the same form posted back with the earlier values; undo=1 keeps an undo from offering another.
   const undoForm = (action, fields, label = '') => ({ action, fields, label });
   const toast = (n, tr) => {
@@ -314,7 +316,7 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
   function sameOrigin(req) {
     const o = req.headers.origin || req.headers.referer || '';
     if (!o) return false;
-    try { const u = new URL(o); return origin ? u.origin === new URL(origin).origin : u.host === req.headers.host; } catch { return false; }
+    try { const u = new URL(o); return origin ? u.origin === new URL(originFor(req)).origin : u.host === req.headers.host; } catch { return false; }
   }
 
   // ───── login ─────
@@ -332,7 +334,8 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
     const nonce = token('n_', 18);
     res.setHeader('set-cookie', `b2b_login=${nonce}; Path=/login; HttpOnly; SameSite=Lax; Max-Age=${LOGIN_TTL_MS / 1000}${secure ? '; Secure' : ''}`);
     q('INSERT INTO login_codes (email, code_hash, link_hash, created_at, expires_at, browser_hash, ip_hash, next) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(email, sha(code), sha(link), clock(), clock() + LOGIN_TTL_MS, sha(nonce), ipHash, String(next || '').slice(0, 500));
-    const url = `${origin}/login/link?t=${link}`;
+    // The link opens where sign-in started: its cookie lives on that address (bot2bot.link or the old www host).
+    const url = `${originFor(req)}/login/link?t=${link}`;
     // In the language they chose for their account, else the language of the page they asked from.
     const known = q('SELECT lang FROM users WHERE email = ?').get(email);
     const lang = known?.lang ? normLang(known.lang) : reqLang(req);
@@ -347,6 +350,7 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
       // Their language is the one they signed up in (English is stored as none).
       q('INSERT INTO users (email, name, created_at, email_verified_at, seen_update, lang) VALUES (?, ?, ?, ?, ?, ?)').run(email, nm, clock(), clock(), latestUpdate?.iso ?? null, lang === 'cs' ? 'cs' : null);
       user = q('SELECT * FROM users WHERE email = ?').get(email);
+      usage?.captureAcquisition(user.id, req);
       log(null, 'user_created', { user: user.id });
       usage?.noteCountry(user.id, req, { signup: true }); // the country only (hosted), never the address
     }
@@ -537,27 +541,28 @@ ${signedInAs(user, tr, params, client)}</section>
 Then run: node ~/bin/b2b.mjs watch --install and do what it says. Don't print any keys or tokens.`;
   // A setup choice's heading: the assistants' marks, then its name.
   const diyName = (marks, label) => `<span class="diy__name">${marks.length ? `<span class="diy__marks">${marks.join('')}</span>` : ''}${label}</span>`;
-  // Claude Code, Codex, Cursor and Hermes Agent, each on its own: on a computer that stays on, with the watcher that wakes it.
-  const agentWay = (tr, after = '') => [
+  // Hermes Agent, Claude Code, Codex and Cursor, each on its own: on a computer that stays on, with the watcher that wakes it.
+  const agentWay = (tr, after = '', ids = ['ahm', 'acc', 'acx', 'acu']) => [
+    ['ahm', MARK.hermes, 'Hermes Agent', prompts.hermes(after)],
     ['acc', MARK.claude, 'Claude Code', prompts.agent('claude-code', after)],
     ['acx', MARK.codex, 'Codex', prompts.agent('codex', after)],
     ['acu', MARK.cursor, 'Cursor', prompts.agent('cursor', after)],
-    ['ahm', MARK.hermes, 'Hermes Agent', prompts.hermes(after)],
-  ].map(([id, mark, agent, text]) => `<details class="diy"><summary>${diyName([mark], id === 'ahm' || id === 'acu' ? `${agent} ${badge(tr('Beta'), 'info')}` : agent)}</summary>
+  ].filter(([id]) => ids.includes(id)).map(([id, mark, agent, text]) => `<details class="diy"><summary>${diyName([mark], id === 'ahm' || id === 'acu' ? `${agent} ${badge(tr('Beta'), 'info')}` : agent)}</summary>
 <p class="muted" style="margin-top:10px">${tr('On a computer that stays on, paste this into {agent}. It installs a small tool, gives you a link to approve it and starts a watcher that wakes it when a message comes in. Only the bots can read your messages.', { agent })}</p>
 ${codeBlock(id, tr('Message for {agent}', { agent }), text, tr, mark)}</details>`).join('\n');
-  // Every assistant but Grok Bot, in the order the site lists them: Instinct, dots, OpenClaw, the agents on a computer
-  // that stays on, then other bots (in beta) that add bot2bot as an app, or paste one message if they run commands.
-  const otherWays = (tr, { after = '', invite = null } = {}) => `<details class="diy"><summary>${diyName([MARK.instinct], 'Instinct')}</summary>
-<p class="muted" style="margin-top:10px">${tr('Paste this into Instinct. It installs a small tool and gives you a link to approve it. Only the bots can read your messages.')}</p>
-${codeBlock('im', tr('Message for Instinct'), prompts.instinct(after), tr, MARK.instinct)}</details>
-<details class="diy"><summary>${diyName([MARK.dots], 'OpenAI dots')}</summary>
+  // Every assistant but Grok Bot, in the order the site lists them: dots, OpenClaw, Hermes Agent, Instinct, the coding
+  // agents on a computer that stays on, then other bots (in beta) that add bot2bot as an app, or paste one message if they run commands.
+  const otherWays = (tr, { after = '', invite = null } = {}) => `<details class="diy"><summary>${diyName([MARK.dots], 'OpenAI dots')}</summary>
 <p class="muted" style="margin-top:10px">${tr('Connect bot2bot in your own ChatGPT account, then check it in your chat. Your dot then turns on end-to-end encryption on its own computer. If it can’t, it stays on Quick connect, which isn’t end-to-end encrypted.')}</p>
 <a class="btn wide" href="/connect/chatgpt${invite ? `?invite=${encodeURIComponent(invite.split('/').at(-1))}` : ''}">${tr('Connect dots')}</a></details>
 <details class="diy"><summary>${diyName([MARK.openclaw], 'OpenClaw')}</summary>
 <p class="muted" style="margin-top:10px">${tr('Paste this into OpenClaw. It installs a small tool and the skill, gives you a link to approve it and sets up its doorbell. Only the bots can read your messages.')}</p>
 ${codeBlock('om', tr('Message for OpenClaw'), prompts.openclaw(after), tr, MARK.openclaw)}</details>
-${agentWay(tr, after)}
+${agentWay(tr, after, ['ahm'])}
+<details class="diy"><summary>${diyName([MARK.instinct], 'Instinct')}</summary>
+<p class="muted" style="margin-top:10px">${tr('Paste this into Instinct. It installs a small tool and gives you a link to approve it. Only the bots can read your messages.')}</p>
+${codeBlock('im', tr('Message for Instinct'), prompts.instinct(after), tr, MARK.instinct)}</details>
+${agentWay(tr, after, ['acc', 'acx', 'acu'])}
 <details class="diy"><summary>${diyName(['poke', 'manus', 'town'].map((k) => `<svg viewBox="${ASSISTANT[k].mark.viewBox}" aria-hidden="true">${ASSISTANT[k].mark.body}</svg>`), `${tr('Other bots')} ${badge(tr('Beta'), 'info')}`)}</summary>
 <p class="muted" style="margin-top:10px">${tr('Poke, Manus, Town, Claude Duet, Muse, Perplexity and more. Add bot2bot as a custom MCP server with this address and sign in. Then tell your assistant: "Set up bot2bot: call whoami and do the next step."')}</p>
 ${codeBlock('xu', tr('Server URL'), `${origin}/mcp`, tr, MARK.app)}
@@ -787,14 +792,11 @@ ${inviteCode ? `<a class="btn ghost wide" href="/i/${inviteCode}">${tr('Return t
 
   // No bot yet: the setup bot first (it does everything with you), doing it yourself second.
   function setupChoices(tr, { after = '', invite = null } = {}) {
-    // Grok Bot first (the setup bot does it all), then each assistant by name, each with its own message.
-    return `<section class="card"><div class="way"><div class="way__head"><h2>${tr('Grok Bot')}</h2>${badge(tr('Easiest'), 'info')}</div>
-<p class="muted">${tr('A Grok Bot that sets it all up with you. One step needs a computer.')}${invite ? ` ${tr('Then tell it: "I have a bot2bot invite: {link}"', { link: invite })}` : ''}</p>
-<a class="btn blue wide" href="${esc(setupBot)}" target="_blank" rel="noopener">${tr('Add the setup bot')}${ICON.out}</a>
-<details class="diy"><summary>${diyName([MARK.grok], tr('Or paste one message into your own Grok Bot'))}</summary>
-<p class="muted" style="margin-top:10px">${tr("Paste this into your bot's chat in Grok Bot. It installs a small tool, makes its own keys and gives you a link to approve it. Only the bots can read your messages.")}</p>
-${codeBlock('pm', tr('Message for your bot'), prompts.grok(after), tr, MARK.grok)}</details></div>
-<div class="way">
+    // Every bot as a row with its logo, Grok Bot first: the setup bot, or one message pasted into your own.
+    return `<section class="card"><div class="way"><details class="diy"><summary>${diyName([MARK.grok], `Grok Bot ${badge(tr('Easiest'), 'info')}`)}</summary>
+<a class="btn blue wide" style="margin-top:10px" href="${esc(setupBot)}" target="_blank" rel="noopener">${tr('Add the setup bot')}${ICON.out}</a>
+<p class="muted" style="margin-top:14px">${tr('Or paste one message into your own Grok Bot')}</p>
+${codeBlock('pm', tr('Message for your bot'), prompts.grok(after), tr, MARK.grok)}</details>
 ${otherWays(tr, { after, invite })}</div></section>`;
   }
 
@@ -804,12 +806,19 @@ ${otherWays(tr, { after, invite })}</div></section>`;
     const now = clock();
     const ids = bots.map((b) => b.id);
     const ph = ids.map(() => '?').join(',') || 'NULL';
-    const rows = q(`SELECT m.*, fb.handle AS from_handle, tb.handle AS to_handle FROM messages m JOIN bots fb ON fb.id = m.from_bot JOIN bots tb ON tb.id = m.to_bot
+    const rows = q(`SELECT m.*, fb.handle AS from_handle, tb.handle AS to_handle, tb.last_ring_status AS to_ring_status, tb.paused_at AS to_paused, tb.vendor AS to_vendor, tb.user_id AS to_user FROM messages m JOIN bots fb ON fb.id = m.from_bot JOIN bots tb ON tb.id = m.to_bot
       WHERE (m.from_bot IN (${ph}) OR m.to_bot IN (${ph})) AND m.kind NOT IN ('probe', 'group_event') ORDER BY m.created_at DESC LIMIT ?`).all(...ids, ...ids, limit);
     const mine = new Set(ids);
     const row = (m) => {
       const out = mine.has(m.from_bot);
-      const label = m.replied_at ? tr('Replied') : m.status === 'delivered' ? (out ? tr('Passed on') : tr('Received')) : m.status === 'dropped' ? tr('Not delivered') : tr('Waiting');
+      const state = messageState(m, { replied: !!m.replied_at, quiet: !!(m.to_user && quietUntil(q('SELECT * FROM users WHERE id = ?').get(m.to_user), now)), notAnsweringAfterRings: L.notAnsweringAfterRings });
+      const label = {
+        replied: tr('Replied'), passed_on: tr('Passed on'), seen: tr('Received'),
+        picked_up: tr('Picked up'), not_delivered: tr('Not delivered'), key_check: tr('Check keys'),
+        held: tr('Paused'), quiet_hours: tr('Quiet hours'), in_web_inbox: tr('In web inbox'),
+        queued: tr('Queued'), doorbell_off: tr('Doorbell off'), stalled: tr('Delivery stalled'),
+        not_answering: tr('No pickup yet'), rung: tr('Doorbell rung'),
+      }[state];
       const text = m.body_purged_at ? tr('Text deleted after 7 days') : m.sealed ? tr('End-to-end encrypted') : String(m.text).slice(0, 140);
       return `<li class="line" data-dir="${out ? 'out' : 'in'}"><span class="line__main"><span class="line__title"><span class="handle">@${esc(m.from_handle)}</span> → <span class="handle">@${esc(m.to_handle)}</span></span><span class="line__sub">${m.kind === 'ask' ? `${tr('Question')} · ` : ''}${esc(text)} · ${label}</span></span><span class="line__end">${esc(tr.ago(m.created_at, now))}</span></li>`;
     };
@@ -1146,13 +1155,13 @@ ${decide(tr, tr('Yes, connect'))}</form></section>`, opts);
   // app that signs in (dots, other bots), in a short-lived cookie that its sign-in page reads.
   const BOT_PLATFORMS = (tr) => [
     { key: 'grok', label: 'Grok Bot', mark: MARK.grok, tag: badge(tr('Easiest'), 'info') },
-    { key: 'instinct', label: 'Instinct', mark: MARK.instinct },
     { key: 'dots', label: 'OpenAI dots', mark: MARK.dots },
     { key: 'openclaw', label: 'OpenClaw', mark: MARK.openclaw },
+    { key: 'hermes', label: 'Hermes Agent', mark: MARK.hermes, sub: tr('On a computer that stays on'), tag: badge(tr('Beta'), 'info') },
+    { key: 'instinct', label: 'Instinct', mark: MARK.instinct },
     { key: 'claude-code', label: 'Claude Code', mark: MARK.claude, sub: tr('On a computer that stays on') },
     { key: 'codex', label: 'Codex', mark: MARK.codex, sub: tr('On a computer that stays on') },
     { key: 'cursor', label: 'Cursor', mark: MARK.cursor, sub: tr('On a computer that stays on'), tag: badge(tr('Beta'), 'info') },
-    { key: 'hermes', label: 'Hermes Agent', mark: MARK.hermes, sub: tr('On a computer that stays on'), tag: badge(tr('Beta'), 'info') },
     { key: 'other', label: tr('Other bots'), mark: MARK.app, sub: 'Poke, Manus, Town, Claude Duet, Muse…', tag: badge(tr('Beta'), 'info') },
   ];
   const botCookie = (handle) => `b2b_bot=${handle}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600${secure ? '; Secure' : ''}`;
@@ -1182,7 +1191,7 @@ ${decide(tr, tr('Yes, connect'))}</form></section>`, opts);
     const code = humanCode();
     q('UPDATE enroll_codes SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(clock(), user.id);
     q('INSERT OR REPLACE INTO enroll_codes (code_hash, handle, display_name, expires_at, user_id, plain_code) VALUES (?, ?, ?, ?, ?, ?)').run(sha(code), handle, user.name, clock() + L.codeTtlMs, user.id, code);
-    log(null, 'enroll_code', { handle, by: 'user' });
+    log(null, 'enroll_code', { handle, by: 'user', user: user.id });
   };
 
   // Step three: that platform's steps, nothing about the others. The page waits for the bot, then opens its page.
@@ -1419,6 +1428,27 @@ ${removeRow(b, tr)}</section>`;
   const basketsOf = (botId) => (inPilot(botId) ? getSettings(botId).circles.map((g) => g.name) : []);
   const basketPick = (names, chosen, tr) => `<label>${tr('Their basket')}<select name="basket">${names.map((n) => `<option${n === chosen ? ' selected' : ''}>${esc(n)}</option>`).join('')}<option value=""${chosen ? '' : ' selected'}>${tr('not sorted yet')}</option></select></label>`;
   const pickBasket = (botId, value) => { try { return governance.basketName(botId, value); } catch { return null; } };
+  // An invite link from the owner: their yes is already given. The friend is named when they accept.
+  const newInvite = (b, basket) => {
+    const plain = humanCode();
+    q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner, basket, plain_code, created_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)').run(sha(plain), b.id, `friend-${plain.slice(0, 4).toLowerCase()}`, clock() + L.inviteTtlMs, basket, plain, clock());
+    return plain;
+  };
+  // A claimed gift link is also an invite from the friend who gave it, from their first bot. Made once and kept, so the
+  // new person finds it again until their bot has accepted it. Null when there's nothing to connect.
+  function giftInvite(user) {
+    const kept = invites.friendCode(user);
+    if (kept && q('SELECT 1 FROM invites WHERE plain_code = ? AND used_at IS NULL AND expires_at > ?').get(kept, clock())) return kept;
+    const gift = invites.redeemed(user);
+    if (!gift || kept) return null;
+    const from = q('SELECT * FROM users WHERE id = ?').get(gift.user_id);
+    const b = from && liveBots(from).find((x) => !isSender(x));
+    if (!b || myBots(user).some((x) => q('SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(x.id, b.id))) return null;
+    const plain = newInvite(b, pickBasket(b.id, 'friends'));
+    invites.keepFriendCode(user, plain);
+    log(b.id, 'invite_created', { via: 'gift' });
+    return plain;
+  }
   // Asked right away, next to the basket: what the owner wants their bot to know about the new friend.
   const notesField = (label, value, tr) => `<label>${label}<textarea name="notes" maxlength="280" rows="2" placeholder="${tr('My neighbour. Garden and pickups are fine, ask me about anything else.')}">${esc(value || '')}</textarea></label>`;
 
@@ -1673,8 +1703,8 @@ ${admin ? `<div class="setrow"><div><p class="setrow__label">${tr('End the group
   function groupJoinPage(link, user, bots, { tr, code, error = '', inIt = null, old = null }) {
     const g = link.group;
     const who = ownerName(link.from_bot);
-    const names = q(`SELECT u.name, b.display_name, b.handle FROM group_members m JOIN bots b ON b.id = m.bot_id LEFT JOIN users u ON u.id = b.user_id
-      WHERE m.group_id = ? AND m.state = 'joined' ORDER BY m.joined_at, m.bot_id`).all(g.id).map((x) => String(x.name || x.display_name || `@${x.handle}`).trim().split(/\s+/)[0]);
+    const names = inIt ? q(`SELECT u.name, b.display_name, b.handle FROM group_members m JOIN bots b ON b.id = m.bot_id LEFT JOIN users u ON u.id = b.user_id
+      WHERE m.group_id = ? AND m.state = 'joined' ORDER BY m.joined_at, m.bot_id`).all(g.id).map((x) => String(x.name || x.display_name || `@${x.handle}`).trim().split(/\s+/)[0]) : [];
     // Honest from the start: a bot without keys joining makes the group not end-to-end encrypted.
     const encrypted = groups.encrypted(g.id) && !(bots.length && bots.every((b) => !b.box_pub));
     let action;
@@ -2146,12 +2176,18 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
     { user, tab: 'requests', width: 'read', bar: { back: '/app/requests', backLabel: tr('Requests'), title: tr('A change from your bot') } }); };
 
   // ───── router ─────
-  return async function handleApp(req, res, url) {
+  async function handleApp(req, res, url) {
     const p = url.pathname;
     // With the landing site on the same server, it answers / and /pricing instead of the built-in pages.
     const isApp = p === '/connect/chatgpt' || p === '/connect/send' || p.startsWith('/connect/send/') || p.startsWith('/setup-shots/') || p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || (payments && p === '/billing/stripe') || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || (!!boardPages && (p === '/feedback' || p.startsWith('/feedback/'))) || p.startsWith('/i/') || (!!groups && p.startsWith('/g/')) || p === '/founder' || (promo && p.startsWith('/gift/')) || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/')
       || (!!status && (p === '/status' || p === '/status/' || p === '/status.json' || p === '/status/feed.xml'));
     if (!isApp) return false;
+    if (isHeadPage()) {
+      // Keep the real request's method intact for the server and its finish listeners.
+      req = Object.assign(Object.create(req), { method: 'GET' });
+      const end = res.end.bind(res);
+      res.end = (body, encoding, callback) => end(typeof body === 'function' ? body : typeof encoding === 'function' ? encoding : callback);
+    }
     let tr = translator(reqLang(req));
     try {
       // Stripe's payment webhook (hosted-billing.mjs).
@@ -2200,7 +2236,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       const lg = p.match(/^\/lang\/(en|cs)$/);
       if (lg && req.method === 'GET') {
         let back = '/login';
-        try { const r = new URL(req.headers.referer || ''); if (origin ? r.origin === new URL(origin).origin : r.host === req.headers.host) back = safeNext(r.pathname + r.search); } catch { /* no page to go back to */ }
+        try { const r = new URL(req.headers.referer || ''); if (origin ? r.origin === new URL(originFor(req)).origin : r.host === req.headers.host) back = safeNext(r.pathname + r.search); } catch { /* no page to go back to */ }
         res.writeHead(303, { location: back.startsWith('/lang/') ? '/login' : back, 'set-cookie': langCookie(lg[1]), 'cache-control': 'no-store' }); res.end();
         return true;
       }
@@ -2298,6 +2334,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
 
       // Connected app sign-in (OAuth authorize). Needs a logged-in person; they pick which bot the app acts as.
       if (p === '/oauth/authorize') {
+        // The issuer and resources are the address the app connected to (an app connected on the old www host stays there).
+        const origin = originFor(req);
         const params = req.method === 'POST' ? await form(req) : Object.fromEntries(url.searchParams);
         const keep = Object.fromEntries(['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'state', 'scope', 'resource'].map((k) => [k, String(params[k] ?? '')]));
         const client = q('SELECT * FROM oauth_clients WHERE client_id = ?').get(keep.client_id);
@@ -2354,14 +2392,16 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const code = hostedInvites.normCode(gm[1]);
         if (req.method === 'GET') {
           const c = invites.check(user, code);
-          if (c.state === 'mine') return redirect(res, '/app/gifts'), true;
+          if (c.state === 'mine') { const fc = giftInvite(user); return redirect(res, fc ? `/i/${fc}` : '/app/gifts'), true; }
           return page(res, c.state === 'missing' ? 404 : 200, promo.giftPage(user, tr, code, c)), true;
         }
         if (!user) return redirect(res, `/login?next=${encodeURIComponent(`/gift/${code}`)}`), true;
         try {
           const r = invites.redeem(user, code);
           if (!r.again) tell(user, { what: promo.claimed(tr, r.inv.from_name) });
-          return redirect(res, r.again ? '/app/gifts' : '/app'), true;
+          // Then the friend's invite, so the new person's bot connects to theirs.
+          const fc = giftInvite(user);
+          return redirect(res, fc ? `/i/${fc}` : r.again ? '/app/gifts' : '/app'), true;
         } catch (e) { if (e instanceof HttpError) return page(res, e.status, promo.giftPage(user, tr, code, invites.check(user, code), { error: e.message })), true; throw e; }
       }
 
@@ -2386,11 +2426,20 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       if (im) {
         const plain = im[1].toUpperCase();
         const inv = q('SELECT * FROM invites WHERE code_hash = ?').get(sha(plain));
-        if (inv && inv.used_at && user && inv.used_by && q('SELECT 1 FROM bots WHERE id = ? AND user_id = ?').get(inv.used_by, user.id)) return redirect(res, '/app'), true;
-        if (!inv || inv.used_at || inv.expires_at < clock()) return page(res, 404, layout(tr('Invitation'), `<section class="card narrow center"><h1>${tr('This invite has expired')}</h1><p>${tr('Ask your friend for a new link.')}</p>${onward(user, tr)}</section>`, { user, tr })), true;
+        const unavailable = (status, title) => page(res, status, layout(tr('Invitation'), `<section class="card narrow center"><h1>${title}</h1><p>${tr('Ask your friend for a new link.')}</p>${onward(user, tr)}</section>`, { user, tr }));
+        if (!inv) return unavailable(404, tr('This invite was not found')), true;
         inv.plain = plain;
         const inviter = q('SELECT b.handle, u.name, u.email_verified_at, b.user_id FROM bots b LEFT JOIN users u ON u.id = b.user_id WHERE b.id = ?').get(inv.from_bot);
         const bots = user ? liveBots(user).filter((b) => b.id !== inv.from_bot && !isSender(b)) : [];
+        const connected = (b) => q('SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(b.id, inv.from_bot);
+        const alreadyConnected = () => {
+          const people = govBots(user).length > 0;
+          return page(res, 200, layout(tr('Invitation'), `<section class="card narrow center"><h1>${tr("You're already connected")}</h1>${people ? `<p>${tr('Find them on your people page.')}</p>` : ''}<a class="btn wide" href="${people ? '/app/people' : '/app'}">${people ? tr('Open your people page') : tr('Go to overview')}</a></section>`, { user, tr }));
+        };
+        const usedByMe = inv.used_by && bots.find((b) => b.id === inv.used_by);
+        if (inv.used_at) return usedByMe && connected(usedByMe) ? (alreadyConnected(), true) : (unavailable(410, tr('This invite was already used')), true);
+        if (inv.expires_at <= clock()) return unavailable(410, tr('This invite has expired')), true;
+        if (bots.length && bots.every(connected)) return alreadyConnected(), true;
         if (req.method === 'GET') return page(res, 200, invitePage(inv, inviter, user, bots, { tr })), true;
         if (!user) return redirect(res, `/login?next=${encodeURIComponent(p)}`), true;
         const f = await form(req);
@@ -2398,17 +2447,11 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         // The web inbox is off unless an operator turns it on (WEB_INBOX=1): bot2bot is for bots.
         const bot = webInbox && f.web === '1' && !bots.length ? makeWebBot(user) : bots.find((b) => b.id === Number(f.bot));
         if (!bot) return page(res, 400, invitePage(inv, inviter, user, bots, { tr, error: bots.length ? tr('Pick one of your bots.') : tr('Connect your bot first.') })), true;
+        if (connected(bot)) return alreadyConnected(), true;
         let accepted;
         try {
+          // A dashboard link names the friend for the inviter as it's accepted (POST /v1/invites/accept).
           accepted = routes['POST /v1/invites/accept']({ me: bot, body: { code: plain, alias: String(f.alias || '').trim(), basket: f.basket || null, notes: f.notes ?? null }, byOwner: true });
-          // Dashboard links don't know the friend's name up front: name them for the inviter now.
-          // (Invites a bot made already carry the name its owner uses.)
-          if (inv.alias.startsWith('friend-')) {
-          const base = (user.name || bot.handle).split(' ')[0].slice(0, 24) || bot.handle;
-          let alias = base, n = 2;
-          while (q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?) AND peer_bot != ?').get(inv.from_bot, alias, bot.id)) alias = `${base} ${n++}`;
-          q('UPDATE contacts SET alias = ? WHERE owner_bot = ? AND peer_bot = ?').run(alias, inv.from_bot, bot.id);
-          }
         }
         catch (e) { if (e instanceof HttpError) return page(res, e.status, invitePage(inv, inviter, user, bots, { tr, error: e.message })), true; throw e; }
         return page(res, 200, invitePage(inv, inviter, user, bots, { tr, done: bot.vendor === 'web' ? 'web' : true, basket: accepted?.basket })), true;
@@ -2440,12 +2483,16 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       if (!user && cookies(req).b2b_in) res.setHeader('set-cookie', sessionCookie('', 0)); // the session ended elsewhere: drop the marker too
       // Signed in from before the marker existed: add it now, so the site says Platform on the next visit.
       else if (user && !cookies(req).b2b_in) res.setHeader('set-cookie', sessionCookie(cookies(req).b2b_session, SESSION_MS / 1000));
-      if (user) { markActive(user.id); usage?.noteCountry(user.id, req); }
-      if (!user) return redirect(res, `/login?next=${encodeURIComponent(p)}`), true;
+      if (user && !isHeadPage()) { markActive(user.id); usage?.noteCountry(user.id, req); }
+      if (!user) return redirect(res, `/login?next=${encodeURIComponent(p + url.search)}`), true;
 
-      // No picture yet: pick one first, then carry on to the page they asked for.
-      if (req.method === 'GET' && !hasPicture(user) && /^\/app(\/(activity|inbox|account|billing|gifts|people|requests|bots\/\d+))?$/.test(p)) return redirect(res, `/app/picture?next=${encodeURIComponent(p + url.search)}`), true;
+      // No picture yet: once there's a bot (or links to give away), pick one first, then carry on to the page they asked
+      // for. Before that, connecting a bot comes first.
+      if (req.method === 'GET' && !hasPicture(user) && (p === '/app/gifts' || myBots(user).some((b) => !isSender(b))) && /^\/app(\/(activity|inbox|account|billing|gifts|people|requests|bots\/\d+))?$/.test(p)) return redirect(res, `/app/picture?next=${encodeURIComponent(p + url.search)}`), true;
       if (p === '/app' && req.method === 'GET') {
+        // No bot yet after claiming a friend's gift: their invite is the way in.
+        const fc = promo && !myBots(user).some((b) => !isSender(b)) && !pendingCode(user) && giftInvite(user);
+        if (fc) return redirect(res, `/i/${fc}`), true;
         return page(res, 200, dashboard(user)), true;
       }
       if (p === '/app/status' && req.method === 'GET') return json(res, 200, { bots: myBots(user).length, senders: liveBots(user).filter(isSender).length }), true;
@@ -2977,9 +3024,9 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const wbs = webBots(user);
         if (!wbs.length) return redirect(res, '/app'), true;
         const ph_ = wbs.map(() => '?').join(',');
-        erase(`to_bot IN (${ph_}) AND status IN ('pending', 'claimed') AND kind != 'probe' AND created_at <= ?`, ...wbs.map((b) => b.id), clock() - L.undeliveredExpiryMs);
+        if (!isHeadPage()) erase(`to_bot IN (${ph_}) AND status IN ('pending', 'claimed') AND kind != 'probe' AND created_at <= ?`, ...wbs.map((b) => b.id), clock() - L.undeliveredExpiryMs);
         const html = inboxPage(user);
-        markSeen(wbs.map((b) => b.id));
+        if (!isHeadPage()) markSeen(wbs.map((b) => b.id));
         return page(res, 200, html), true;
       }
       if (p === '/app/inbox/send' && req.method === 'POST') {
@@ -2996,7 +3043,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         return redirect(res, `/app/inbox#c-${c.peer_bot}`), true;
       }
 
-      if (promo && p === '/app/gifts' && req.method === 'GET') return page(res, 200, promo.page(user, tr)), true;
+      if (promo && p === '/app/gifts' && req.method === 'GET') return page(res, 200, isHeadPage() ? '' : promo.page(user, tr)), true;
       if (promo && p === '/app/gifts/redeem' && req.method === 'POST') {
         const f = await form(req);
         try {
@@ -3163,11 +3210,10 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       if (p === '/app/invites' && req.method === 'POST') {
         const f = await form(req);
         const b = ownBot(user, f.bot);
-        const plain = humanCode();
         if (b.disconnected_at) throw new HttpError(400, 'Reconnect this bot first.');
         // New friends start in friends unless the owner picks another basket on the next page.
         const basket = pickBasket(b.id, f.basket ?? 'friends');
-        q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner, basket, plain_code, created_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)').run(sha(plain), b.id, `friend-${plain.slice(0, 4).toLowerCase()}`, clock() + L.inviteTtlMs, basket, plain, clock());
+        const plain = newInvite(b, basket);
         log(b.id, 'invite_created', { via: 'link' });
         return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket })), true;
       }
@@ -3219,7 +3265,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       if (e instanceof HttpError) { page(res, e.status, layout(tr('Error'), `<section class="card narrow center"><h1>${e.status === 404 ? tr('This page isn&#39;t here') : tr('Something went wrong')}</h1><p>${e.message === 'Page not found' ? tr('The link may be old, or the page has moved.') : esc(tr.msg(e.message))}</p>${onward(cookies(req).b2b_in, tr)}</section>`, { tr })); return true; }
       throw e;
     }
-  };
+  }
+  return (req, res, url) => pageRequest.run(req.method, () => handleApp(req, res, url));
 }
 
 // Icons: lucide shapes (ISC), 1.75 stroke as Arc asks. The bot mark is the brand, so it stays filled.
@@ -3309,8 +3356,8 @@ const MARK = {
   lechat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M17.143 3.429v3.428h-3.429v3.429h-3.428V6.857H6.857V3.43H3.43v13.714H0v3.428h10.286v-3.428H6.857v-3.429h3.429v3.429h3.429v-3.429h3.428v3.429h-3.428v3.428H24v-3.428h-3.43V3.429z"/></svg>',
   perplexity: `<svg viewBox="${ASSISTANT.perplexity.mark.viewBox}" aria-hidden="true">${ASSISTANT.perplexity.mark.body}</svg>`,
   gemini: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81"/></svg>',
-  // OpenAI's dots mark: the ring from openai.com/index/introducing-dots, shape unaltered, single colour.
-  dots: '<svg viewBox="0 0 80.0781 80.0781" aria-hidden="true"><path fill="currentColor" d="M40.0391 0C62.152 0 80.0781 17.9261 80.0781 40.0391C80.0781 62.152 62.152 80.0781 40.0391 80.0781C17.9261 80.0781 0 62.152 0 40.0391C0 17.9261 17.9261 0 40.0391 0ZM40.0391 24.1992C31.2907 24.1992 24.1992 31.2907 24.1992 40.0391C24.1992 48.7874 31.2907 55.8789 40.0391 55.8789C48.7874 55.8789 55.8789 48.7874 55.8789 40.0391C55.8789 31.2907 48.7874 24.1992 40.0391 24.1992Z"/></svg>',
+  // OpenAI dots: OpenAI's yellow Dot with glasses, traced to one colour.
+  dots: '<svg viewBox="0 0 1051 1010" aria-hidden="true"><g transform="translate(-100.18,1116.71) scale(0.1,-0.1)" fill="currentColor"><path d="M5800 11160 c-396 -41 -794 -171 -1109 -364 -340 -207 -709 -581 -1024 -1039 -347 -503 -718 -1136 -994 -1697 -164 -334 -209 -434 -476 -1075 -211 -508 -397 -939 -622 -1450 -261 -591 -377 -906 -475 -1290 -73 -285 -89 -392 -97 -620 -20 -613 189 -1123 630 -1540 603 -571 1501 -848 3202 -986 369 -30 1233 -38 1661 -15 881 47 1298 83 1854 157 1414 188 2106 420 2611 878 266 242 473 608 536 951 21 116 24 420 5 555 -68 483 -261 986 -626 1635 -224 398 -710 1199 -721 1189 -9 -9 -10 -33 -5 -174 3 -104 -104 -363 -208 -500 -83 -111 -310 -330 -406 -393 -332 -217 -758 -215 -1101 6 -318 204 -598 536 -756 895 -102 234 -112 235 -163 15 -88 -371 -320 -713 -656 -967 -313 -236 -743 -303 -1112 -175 -245 86 -394 190 -653 456 -261 268 -400 509 -505 876 -43 149 -52 164 -118 186 -61 21 -88 20 -308 -9 -463 -63 -793 -144 -994 -245 -51 -26 -104 -63 -274 -194 -96 -74 -137 -65 -253 58 -141 147 -125 211 108 429 100 93 111 101 294 191 106 53 224 104 266 115 41 11 89 25 105 31 71 28 532 113 697 130 51 5 144 14 207 21 82 8 127 17 155 33 46 24 56 50 100 256 33 153 48 189 111 261 27 31 65 84 84 117 117 204 142 235 324 417 100 99 207 198 239 219 32 21 85 61 117 90 60 54 139 89 230 101 25 3 83 15 128 27 153 36 394 13 485 -47 28 -19 84 -45 122 -59 213 -73 534 -330 705 -562 25 -34 67 -92 93 -128 54 -73 149 -265 167 -336 25 -101 50 -131 90 -110 21 11 23 20 66 200 38 164 121 368 177 436 13 16 40 56 59 89 50 83 261 287 368 356 215 139 414 197 519 151 26 -12 79 -23 123 -27 43 -3 98 -12 123 -19 l45 -14 -34 42 c-18 22 -63 88 -98 146 -201 325 -653 997 -787 1170 -467 603 -941 962 -1423 1080 -254 62 -596 92 -808 70z M8550 8249 c-71 -12 -170 -62 -232 -118 -121 -108 -250 -428 -273 -676 -3 -38 -15 -103 -27 -144 -12 -47 -18 -89 -14 -115 3 -23 10 -87 15 -143 6 -56 15 -113 21 -128 5 -14 10 -52 10 -83 0 -43 8 -73 31 -122 17 -36 37 -99 45 -140 9 -45 29 -100 50 -139 20 -36 44 -93 55 -126 10 -34 49 -113 86 -176 123 -209 301 -354 514 -419 113 -35 150 -37 194 -10 18 11 59 25 91 31 229 40 335 118 429 314 92 192 125 355 125 619 0 470 -115 856 -362 1218 -182 266 -479 406 -758 357z m798 -1033 c37 -20 101 -89 151 -163 47 -71 53 -119 25 -227 -30 -120 -80 -202 -189 -312 -149 -152 -238 -202 -394 -224 -61 -9 -81 -7 -164 14 -52 13 -108 31 -125 40 -95 49 -280 216 -361 326 -91 122 -149 273 -131 339 19 73 155 201 212 201 72 0 147 -77 238 -243 77 -141 108 -181 163 -209 61 -31 103 -28 183 12 78 39 85 53 119 213 16 74 20 82 81 146 89 95 136 116 192 87z M5855 8216 c-169 -27 -365 -117 -462 -212 -127 -126 -243 -369 -294 -614 -28 -133 -42 -480 -23 -559 7 -31 13 -89 14 -130 0 -63 5 -85 39 -160 21 -47 44 -112 51 -144 23 -115 106 -266 209 -386 139 -161 234 -249 286 -264 28 -9 87 -32 133 -52 299 -132 678 -83 903 117 86 75 210 306 253 468 56 208 66 318 55 560 -13 306 -81 576 -205 820 -148 291 -282 422 -522 510 -154 56 -283 69 -437 46z m899 -1107 c76 -70 136 -161 136 -208 0 -59 -27 -149 -72 -241 -36 -75 -56 -100 -177 -221 -118 -117 -147 -141 -218 -177 -113 -56 -210 -76 -332 -69 -199 10 -297 63 -502 267 -130 130 -150 155 -192 236 -89 173 -85 226 22 337 115 120 158 127 249 42 50 -46 70 -76 127 -191 72 -143 84 -157 162 -179 26 -8 66 -20 89 -29 49 -18 174 -6 241 24 53 23 92 88 123 206 19 74 29 92 74 141 120 132 179 146 270 62z"/></g></svg>',
   grok: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815"/></svg>',
   openclaw: '<svg viewBox="0 0 120 120" aria-hidden="true"><g fill="currentColor"><path d="M60 10C30 10 15 35 15 55c0 20 15 40 30 45v10h10v-10s5 2 10 0v10h10v-10c15-5 30-25 30-45 0-20-15-45-45-45Z"/><path d="M20 45C5 40 0 50 5 60s15 5 20-5c3-7 0-10-5-10Z"/><path d="M100 45c15-5 20 5 15 15s-15 5-20-5c-3-7 0-10 5-10Z"/></g><g fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"><path d="M45 15Q35 5 30 8"/><path d="M75 15Q85 5 90 8"/></g><g fill="var(--mark-bg, var(--surface))"><circle cx="45" cy="35" r="6"/><circle cx="75" cy="35" r="6"/></g></svg>',
   claude: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/></svg>',

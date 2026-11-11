@@ -402,7 +402,7 @@ function privateOnly(name) {
 }
 // The founder's bot as a first contact to try bot2bot with (GET /v1/me try_founder). Same words in cli/b2b.mjs.
 export const TRY_FOUNDER = (url) => `TRY IT: nobody to message yet? Ask your owner to open ${url} and tap once. It connects you to the founder's bot, which answers, so you can check sending, reading a reply and marking it delivered. Messages to it are free.`;
-export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.22.12' };
+export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.22.13' };
 // How the inbox text tells a connected-app bot to act on a message.
 const CONNECTOR_HINTS = {
   group: (id) => `call send_to_group with group=${id}`,
@@ -524,7 +524,7 @@ export async function mcpDispatch(msg, call, ext = {}) {
   return fail(-32601, `method not found: ${msg.method}`);
 }
 
-export function createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, files, HttpError, L, privateDoorbell, trustProxy = false, events = null, markActive = () => {}, domainProofs = {} }) {
+export function createConnector({ q, tx, log, clock, publicUrl, aliasUrls = [], originFor = () => publicUrl, sha, token, humanCode, routes, files, HttpError, L, privateDoorbell, trustProxy = false, events = null, markActive = () => {}, domainProofs = {} }) {
   const base = publicUrl;
   const clientIp = (req) => (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket?.remoteAddress || '';
   const json = (res, status, data, headers = {}) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers }); res.end(JSON.stringify(data)); };
@@ -536,7 +536,10 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
   // A dot in private mode does, for wake-ups only: call() refuses every tool that reads or sends a message.
   // A token issued for a resource (RFC 8707, which ChatGPT sends) only works for this server. Older tokens
   // (Grok Bot doesn't send one) have none and still work.
-  const ourResource = (r) => r === `${base}/mcp` || r === base || r === `${base}/`;
+  // Tokens made on an earlier address of this server (aliasUrls) are ours too.
+  const origins = [base, ...aliasUrls];
+  const ourResource = (r) => origins.some((o) => r === `${o}/mcp` || r === o || r === `${o}/`);
+  const isSend = (r) => origins.some((o) => r === `${o}/send`);
   function botByAccess(raw) {
     if (!raw) return null;
     const t = q("SELECT * FROM oauth_tokens WHERE token_hash = ? AND kind = 'access'").get(sha(raw));
@@ -882,7 +885,6 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
   }
 
   // Send only: the two tools an ordinary chat gets. Its owner's own bots, nothing else.
-  const SEND = `${base}/send`;
   function myBotsFor(me) {
     return q(`SELECT id, handle, platform, vendor, user_id, box_pub, tool_version FROM bots WHERE user_id = ? AND id != ? AND vendor != 'web' AND coalesce(platform, '') != ?
       AND removed_at IS NULL AND disconnected_at IS NULL ORDER BY created_at`).all(me.user_id, me.id, SENDER);
@@ -978,23 +980,25 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
     if (!raw) return null;
     const t = q("SELECT * FROM oauth_tokens WHERE token_hash = ? AND kind = 'access'").get(sha(raw));
     // A client that sends no resource (Gemini) gets a token without one; the bot it's for decides.
-    if (!t || t.revoked_at || t.expires_at <= clock() || (t.resource && t.resource !== SEND)) return null;
+    if (!t || t.revoked_at || t.expires_at <= clock() || (t.resource && !isSend(t.resource))) return null;
     const b = q('SELECT * FROM bots WHERE id = ?').get(t.bot_id);
     return isSender(b) && !b.disconnected_at && !b.removed_at ? b : null;
   }
 
   return async function handle(req, res, url) {
     const p = url.pathname;
+    // Each app is told about the address it called (bot2bot.link, or the old www host it was connected on).
+    const here = originFor(req);
     if (req.method === 'GET' && (p === '/.well-known/oauth-protected-resource' || p === '/.well-known/oauth-protected-resource/mcp')) {
-      return json(res, 200, { resource: `${base}/mcp`, authorization_servers: [base], bearer_methods_supported: ['header'], resource_name: 'bot2bot' }), true;
+      return json(res, 200, { resource: `${here}/mcp`, authorization_servers: [here], bearer_methods_supported: ['header'], resource_name: 'bot2bot' }), true;
     }
     const proof = req.method === 'GET' && p.startsWith('/.well-known/') && domainProofs[p.slice(13)];
     if (proof) { res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }); res.end(proof); return true; }
     if (req.method === 'GET' && p === '/.well-known/oauth-protected-resource/send') {
-      return json(res, 200, { resource: SEND, authorization_servers: [base], bearer_methods_supported: ['header'], resource_name: 'bot2bot (send to my bots)' }), true;
+      return json(res, 200, { resource: `${here}/send`, authorization_servers: [here], bearer_methods_supported: ['header'], resource_name: 'bot2bot (send to my bots)' }), true;
     }
     if (req.method === 'GET' && p === '/.well-known/oauth-authorization-server') {
-      return json(res, 200, { issuer: base, authorization_endpoint: `${base}/oauth/authorize`, token_endpoint: `${base}/oauth/token`, registration_endpoint: `${base}/oauth/register`,
+      return json(res, 200, { issuer: here, authorization_endpoint: `${here}/oauth/authorize`, token_endpoint: `${here}/oauth/token`, registration_endpoint: `${here}/oauth/register`,
         response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'],
         token_endpoint_auth_methods_supported: ['none'], scopes_supported: ['bot2bot'], authorization_response_iss_parameter_supported: true }), true;
     }
@@ -1023,7 +1027,7 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
         const out = tx(() => {
           const c = q('SELECT * FROM oauth_codes WHERE code_hash = ?').get(sha(String(f.code || '')));
           if (!c || c.used_at || c.expires_at <= clock() || c.client_id !== client.client_id || c.redirect_uri !== String(f.redirect_uri || '')) return null;
-          if (f.resource && (!(ourResource(String(f.resource)) || String(f.resource) === SEND) || (c.resource && c.resource !== String(f.resource)))) return null;
+          if (f.resource && (!(ourResource(String(f.resource)) || isSend(String(f.resource))) || (c.resource && c.resource !== String(f.resource)))) return null;
           const verifier = String(f.code_verifier || '');
           if (verifier.length < 43 || createHash('sha256').update(verifier).digest('base64url') !== c.challenge) return null;
           q('UPDATE oauth_codes SET used_at = ? WHERE code_hash = ?').run(clock(), c.code_hash);
@@ -1038,7 +1042,7 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
           if (!t || t.revoked_at || t.expires_at <= clock() || t.client_id !== client.client_id) return null;
           const bot = q('SELECT * FROM bots WHERE id = ?').get(t.bot_id);
           if (!bot || bot.disconnected_at || !(bot.vendor === 'connector' || wakeOnly(bot))) return null;
-          if (f.resource && (!(ourResource(String(f.resource)) || String(f.resource) === SEND) || (t.resource && t.resource !== String(f.resource)))) return null;
+          if (f.resource && (!(ourResource(String(f.resource)) || isSend(String(f.resource))) || (t.resource && t.resource !== String(f.resource)))) return null;
           // Google's connected apps want the same refresh token back ("avoid rotating"), so theirs is extended instead.
           if (isGoogleApp(client)) {
             q('UPDATE oauth_tokens SET expires_at = ? WHERE token_hash = ?').run(clock() + REFRESH_MS, t.token_hash);
@@ -1057,7 +1061,7 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
       if (!me) {
         // Someone opening the address in a browser gets the page that explains it.
         if (req.method === 'GET' && /text\/html/.test(String(req.headers.accept || ''))) { res.writeHead(302, { location: '/connect/send' }); res.end(); return true; }
-        res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/send"` });
+        res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': `Bearer resource_metadata="${here}/.well-known/oauth-protected-resource/send"` });
         res.end(JSON.stringify({ error: 'sign in to bot2bot first' }));
         return true;
       }
@@ -1079,7 +1083,7 @@ export function createConnector({ q, tx, log, clock, publicUrl, sha, token, huma
     if (p === '/mcp') {
       const me = botByAccess((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
       if (!me) {
-        res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"` });
+        res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': `Bearer resource_metadata="${here}/.well-known/oauth-protected-resource"` });
         res.end(JSON.stringify({ error: 'sign in to bot2bot first' }));
         return true;
       }

@@ -125,6 +125,31 @@ test('failed emails mark login emails, and it clears once they go out again', as
   assert.equal((await env.part('email')).status, 'operational');
 });
 
+test('the outside check: when its pings stop reaching a running relay, pages, bots and apps are down', async (t0) => {
+  const env = await make(t0, { probeToken: 'probe-secret-123' });
+  const ping = (token = 'probe-secret-123') => fetch(`${env.url}/healthz`, { headers: { 'x-status-probe': token } });
+  assert.equal((await ping()).status, 200);
+  env.advance(3 * MIN);
+  await ping('wrong');
+  assert.equal((await env.json()).status.state, 'operational', 'a missed ping or two is fine');
+  env.advance(2 * MIN);
+  const parts = Object.fromEntries((await env.json()).components.map((c) => [c.id, c.status]));
+  assert.deepEqual(parts, { website: 'down', messages: 'down', wake: 'operational', email: 'operational', apps: 'down' }, 'a wrong token is no ping');
+  env.relay.status.beat();
+  assert.equal(minutes(env.relay).at(-1).states, 'dduud', 'the minute is kept as down');
+  await ping();
+  assert.equal((await env.json()).status.state, 'operational', 'back once pings arrive again');
+  env.advance(7 * 60 * MIN);
+  assert.equal((await env.json()).status.state, 'operational', 'a pinger gone for hours was retired, not an outage');
+});
+
+test('without an outside check set up, /healthz pings change nothing', async (t0) => {
+  const env = await make(t0);
+  await fetch(`${env.url}/healthz`, { headers: { 'x-status-probe': '' } });
+  env.advance(10 * MIN);
+  assert.equal((await env.json()).status.state, 'operational');
+});
+
 test('incidents: the operator opens, updates and resolves one with the admin token, and the page, JSON and feed follow', async (t0) => {
   const env = await make(t0);
   env.relay.status.beat();

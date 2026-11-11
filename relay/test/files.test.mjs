@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setup, owner, connect, listen } from './helpers.mjs';
+import { setup, owner, connect, listen, waitFor } from './helpers.mjs';
 import { presign } from '../files.mjs';
 
 const DAY = 86_400_000;
@@ -140,6 +140,54 @@ test("an okayed draft whose file can't go yet (their bot is too old) gives way t
   assert.deepEqual(r.draft.files, []);
   assert.match(await ben.cli('request', id, '--approve'), /Sent it as msg_[\w-]+\. End-to-end encrypted\./);
   assert.match(await anna.cli('inbox'), /The video is at/);
+});
+
+test('their bot is too old for the file: it is asked to update once, and when it has, the sender\'s bot hears and the okayed draft goes', async (t0) => {
+  const { env, ben, anna } = await pair(t0, { privacyPilot: true });
+  await turnOn(ben); await turnOn(anna);
+  await anna.cli('inbox');
+  ben.routine.status = 503;
+  const id = (await ben.cli('propose', 'anna', 'The video', '--file', note('video.mp4', 'frames'))).match(/Draft saved as (req_[\w-]+)/)[1];
+  env.relay.db.prepare("UPDATE bots SET tool_version = '0.1.0' WHERE id = ?").run(Number(anna.botId));
+  const rung = anna.rings.length;
+  await assert.rejects(ben.cli('request', id, '--approve'), (e) => /bot2bot just asked it to update, and your bot hears as soon as it has/.test(e.stderr));
+  await waitFor(() => anna.rings.length > rung);
+  // Trying again doesn't ring it again within the hour.
+  await assert.rejects(ben.cli('request', id, '--approve'), (e) => /needs a newer bot2bot tool/.test(e.stderr));
+  const asked = () => env.relay.db.prepare("SELECT count(*) AS n FROM events WHERE kind = 'update_needed' AND bot = ?").get(Number(anna.botId)).n;
+  assert.equal(asked(), 1);
+  // Anna's bot runs (and so says which tool it has): Ben's bot is rung, and its inbox says it can go ahead.
+  const benRung = ben.rings.length;
+  await anna.cli('inbox');
+  await waitFor(() => ben.rings.length > benRung);
+  const out = await ben.cli('inbox');
+  assert.match(out, /\(@anna\) updated their bot2bot tool and can open files now/);
+  assert.match(out, new RegExp(`okayed your draft ${id}\\. Send it now`));
+  assert.doesNotMatch(await ben.cli('inbox'), /updated their bot2bot tool/, 'said once');
+  assert.match(await ben.cli('request', id, '--approve'), /Sent it as msg_[\w-]+ with the file\./);
+  assert.match(await anna.cli('inbox'), /file: "video\.mp4"/);
+});
+
+test('a bot that still has not updated a couple of hours later: its owner gets one email saying who is waiting', async (t0) => {
+  const { env, ben, anna } = await pair(t0);
+  await turnOn(ben); await turnOn(anna);
+  await anna.cli('inbox');
+  env.relay.db.prepare("UPDATE bots SET tool_version = '0.1.0' WHERE id = ?").run(Number(anna.botId));
+  await assert.rejects(ben.cli('send', 'anna', 'The video', '--file', note('video.mp4', 'frames')), (e) => /just asked it to update/.test(e.stderr));
+  const mails = () => env.mail.filter((m) => m.to === 'anna@example.com' && /needs a quick update/.test(m.subject));
+  env.advance(3_600_000);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(mails().length, 0, 'not after an hour');
+  env.advance(3_600_000 + 61_000);
+  await waitFor(() => mails().length === 1);
+  const m = mails()[0];
+  assert.equal(m.subject, '@anna needs a quick update');
+  assert.match(m.text, /Ben sent @anna something its bot2bot tool is too old to open\./);
+  assert.match(m.text, /“Update bot2bot and check my messages\.”/);
+  assert.doesNotMatch(m.text, /frames|video/, 'never what was sent');
+  env.advance(25 * 3_600_000);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(mails().length, 1, 'once');
 });
 
 test('a draft with files only goes to an end-to-end encrypted chat, and needs the files still on the computer', async (t0) => {

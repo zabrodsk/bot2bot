@@ -127,8 +127,8 @@ test('owner journey: login, connect bot, doorbell, invite link, friend accepts, 
   const accepted = await anna(`/i/${link}`, { method: 'POST', form: { bot: (await anna('/app')).text.match(/\/app\/bots\/(\d+)/)[1], alias: 'Ben' } });
   assert.match(accepted.text, /You're connected/);
   assert.match((await ben('/app')).text, /item__title">Anna</);   // inviter sees the friend's real name, not "friend-xxxx"
-  assert.equal((await anna(`/i/${link}`)).location, '/app');    // one-time: used, so it goes home
-  assert.equal((await browser(env.url)(`/i/${link}`)).status, 404);
+  assert.match((await anna(`/i/${link}`)).text, /already connected[^]*Go to overview/);
+  assert.equal((await browser(env.url)(`/i/${link}`)).status, 410);
 
   // Anna's bot messages Ben's: Ben's bot sees who it really is
   await annaBot.cli('send', 'Ben', 'Recipe for tonight', '--link', 'https://example.com/pasta');
@@ -162,8 +162,7 @@ test('login codes: wrong code, attempts limit, rate limit, magic link', async (t
   assert.match((await c(linkPath)).text, /Continue to/);                 // GET only shows a button
   assert.match((await browser(env2.url)(linkPath)).text, /same browser/);  // another browser can't use it
   assert.equal((await c('/login/link', { method: 'POST', form: { t: linkPath.split('t=')[1] } })).status, 303);
-  assert.match((await c('/app')).location, /^\/app\/picture/, 'new people pick a picture first');
-  await c('/app/picture', { method: 'POST', form: { avatar: 'classic' } });
+  // New people connect a bot first; their name and picture come after.
   assert.match((await c('/app')).text, /Connect your bot/);
 });
 
@@ -176,7 +175,7 @@ test('adding a bot is a page of its own: pick the platform, name it, then only i
   assert.match((await ben('/app')).text, /href="\/app\/bots\/add"[^>]*>[^]*Add a bot/);
   assert.equal((await ben('/app/bots/new', { method: 'POST' })).location, '/app/bots/add');
   const pick = (await ben('/app/bots/add')).text;
-  assert.match(pick, /Which bot\?[^]*href="\/app\/bots\/add\/grok"[^]*Grok Bot[^]*href="\/app\/bots\/add\/instinct"[^]*href="\/app\/bots\/add\/dots"[^]*href="\/app\/bots\/add\/openclaw"[^]*href="\/app\/bots\/add\/claude-code"[^]*href="\/app\/bots\/add\/codex"[^]*href="\/app\/bots\/add\/cursor"[^]*href="\/app\/bots\/add\/hermes"[^]*href="\/app\/bots\/add\/other"/);
+  assert.match(pick, /Which bot\?[^]*href="\/app\/bots\/add\/grok"[^]*Grok Bot[^]*href="\/app\/bots\/add\/dots"[^]*href="\/app\/bots\/add\/openclaw"[^]*href="\/app\/bots\/add\/hermes"[^]*href="\/app\/bots\/add\/instinct"[^]*href="\/app\/bots\/add\/claude-code"[^]*href="\/app\/bots\/add\/codex"[^]*href="\/app\/bots\/add\/cursor"[^]*href="\/app\/bots\/add\/other"/);
   assert.match((await ben('/app/bots/add/grok')).text, /What should your bot be called\?[^]*name="handle"/);
 
   // A bad name says why; a taken one too.

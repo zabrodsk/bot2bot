@@ -1,5 +1,6 @@
 // b2b relay: stores messages between paired bots and wakes the recipient's bot
 // through its webhook routine (the "doorbell"). Zero dependencies (node:sqlite).
+import { messageRoute, messagePlatform } from './message-metadata.mjs';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, timingSafeEqual, createCipheriv, createDecipheriv, createPublicKey } from 'node:crypto';
@@ -7,13 +8,15 @@ import { readFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve, sep, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp, migrateApp } from './app.mjs';
+import { messageState } from './message-state.mjs';
 import { createConnector, migrateConnector, SENDER } from './connector.mjs';
-import { messageEmail, doorbellEmail, approveEmail, waitingEmail } from './email.mjs';
+import { messageEmail, doorbellEmail, approveEmail, waitingEmail, updateEmail } from './email.mjs';
 import { migrateGovernance, createGovernance } from './governance.mjs';
 import { migrateEvents, createEvents } from './events.mjs';
 import { migrateGroups, createGroups } from './groups.mjs';
 import { migrateStatus, createStatus } from './status.mjs';
 import { migrateFiles, createFiles, FILE_LIMITS } from './files.mjs';
+import { migrateUpdates, createUpdates, UPDATE_LIMITS } from './updates.mjs';
 import { createSafePost, checkCallbackUrl, webhookKey, AGENTS, AGENT_NAMES, agentPlatform, JOIN_AS, joinPlatform } from './doorbells.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -86,6 +89,7 @@ export const LIMITS = {
   newsMaxAgeMs: 14 * 86_400_000,  // a bot tells its owner what's new on bot2bot only for updates this recent...
   newsGapMs: 3 * 86_400_000,      // ...and at most this often, unless it's a big update
   ...FILE_LIMITS,                // files, see files.mjs
+  ...UPDATE_LIMITS,              // bots that need a newer tool for something, see updates.mjs
 };
 
 const sha = (s) => createHash('sha256').update(String(s)).digest('hex');
@@ -245,7 +249,7 @@ export function openDb(path) {
   return db;
 }
 
-export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, invites: invitesOn = true, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', analyticsKey = '', stickersDir, redirectHosts = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', changelog = null, feedbackTo = '', adminEmails = [], founderBot = '', dbPath = ':memory:', adminToken, publicUrl = '', files: filesCfg = {}, webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, domainProofs = {}, reviewLogin = null, fetchImpl = fetch, clock = now } = {}) {
+export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, invites: invitesOn = true, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', analyticsKey = '', stickersDir, redirectHosts = [], aliasUrls = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', changelog = null, feedbackTo = '', adminEmails = [], internalEmails = [], founderBot = '', dbPath = ':memory:', adminToken, publicUrl = '', files: filesCfg = {}, webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, domainProofs = {}, probeToken = '', reviewLogin = null, fetchImpl = fetch, clock = now } = {}) {
   if (!adminToken || adminToken.length < 16) throw new Error('ADMIN_TOKEN (16+ chars) is required');
   const L = { ...LIMITS, ...limits };
   // What an owner sends a friend: the invite link first. The invite page signs in people who already have
@@ -325,6 +329,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   migrateGroups(db);
   migrateStatus(db);
   migrateFiles(db);
+  migrateUpdates(db);
   hostedUsage?.migrateUsage(db);
   hostedBilling?.migrateBilling(db);
   hostedInvites?.migrateInvites(db);
@@ -333,15 +338,17 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   const tx = (fn) => { db.exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
   // The public status page (status.mjs): a heartbeat a minute, the signals fed in below, and the operator's incidents.
   const status = createStatus({ q, tx, clock, HttpError, log: (...a) => log(...a), product: productName });
+  // Anything refused because a bot's tool is too old asks it to update, and tells whoever waited once it has.
+  const updates = createUpdates({ q, clock, L, newerVersion, ring: (...a) => ring(...a), mailer: (m) => mailer(m), updateEmail, publicUrl, productName, siteDir, log: (...a) => log(...a) });
   // Files: encrypted blobs in an outside store; off unless it's configured.
-  const files = createFiles({ q, clock, L, HttpError, log: (...a) => log(...a), hosted, coverage, newerVersion, fetchImpl, sealKey, openKey, allowLocal: allowLocalWebhooks, ...filesCfg });
+  const files = createFiles({ q, clock, L, HttpError, log: (...a) => log(...a), hosted, coverage, newerVersion, fetchImpl, sealKey, openKey, allowLocal: allowLocalWebhooks, needTool: updates.need, ...filesCfg });
   // Every email goes out through here, so the status page knows when sending fails.
   mailer = status.wrapMailer(mailer);
   // Invite links (hosted only, INVITES=0 turns them off): three per person, and a bonus for both sides when one is used.
   const invites = hostedInvites && hosted && invitesOn ? hostedInvites.createInvites({ q, tx, clock, log: (...a) => log(...a), humanCode, HttpError, publicUrl,
     mailer: (m) => mailer(m), product: productName, logo: siteDir ? `${publicUrl}/icon-192.png` : '', art: publicUrl ? `${publicUrl}/stickers/robot-party.png` : '', nudgeGapMs: L.nudgeGapMs }) : null;
   // Usage analytics (hosted only): which days an account was active, and anonymous daily counts.
-  const usage = hostedUsage ? hostedUsage.createUsage({ q, tx, clock, HttpError, trustProxy }) : null;
+  const usage = hostedUsage ? hostedUsage.createUsage({ q, tx, clock, HttpError, trustProxy, adminEmails, internalEmails, reviewLogin, founderBot, metadataRetentionMs: L.metadataRetentionMs }) : null;
   const markActive = usage ? usage.markActive : () => {};
   // The one place that erases message content. Waiting messages become "not delivered".
   // Every content column is listed here so a new one can't be forgotten in some other path.
@@ -511,7 +518,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   }
 
   // One scheduler pass: release expired leases, then ring every bot with due messages.
-  let lastOwnLink = 0;
+  let lastOwnLink = 0, draftsChecked = false;
   async function tick() {
     const t = clock();
     status.beat(t);
@@ -520,6 +527,14 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     void nudgeDoorbells(t);
     void nudgeApprovals(t);
     void nudgeWaiting(t);
+    void updates.nudge(t);
+    // Once after starting: drafts with files for a bot too old to open them (from tools that don't say who files
+    // are for) ask that bot to update too.
+    if (!draftsChecked) {
+      draftsChecked = true;
+      for (const r of q(`SELECT DISTINCT r.owner_bot, r.peer_bot FROM privacy_requests r JOIN privacy_candidates c ON c.request_id = r.id AND c.revision = r.revision
+                         WHERE r.state IN ('PENDING_OWNER', 'APPROVED') AND r.expires_at > ? AND c.files != '[]'`).all(t)) files.whyNot(r.peer_bot, r.owner_bot);
+    }
     void invites?.nudge(t).catch(() => {});
     if (t - lastOwnLink >= 10_000) { lastOwnLink = t; linkOwnBots(); }
     const expired = q("SELECT id, to_bot FROM messages WHERE status = 'claimed' AND lease_until <= ?").all(t);
@@ -867,7 +882,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     files.attach(fileIds, id);
     if (approval) governance.consumeApproval(approval, id);
     if (replyTo) q('UPDATE messages SET replied_at = ? WHERE id = ?').run(t, replyTo);
-    log(me.id, 'sent', { message: id, to: peer.handle, kind, encrypted: sealed !== null, ...(fileIds.length ? { files: fileIds.length } : {}) });
+    log(me.id, 'sent', { message: id, route: messageRoute(me, recipient), platform: messagePlatform(me), kind, encrypted: sealed !== null, ...(fileIds.length ? { files: fileIds.length } : {}) });
     return { id, status: 'queued', to: `@${peer.handle}`, encrypted: sealed !== null, recipient_can_be_woken: !!recipient.webhook_url, recipient_uses_web_inbox: recipient.vendor === 'web' };
   }
 
@@ -1135,7 +1150,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       const notes = inviteNotes(body.notes);
       const code = humanCode();
       q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner, basket, notes) VALUES (?, ?, ?, ?, 0, ?, ?)').run(sha(code), me.id, alias, clock() + L.inviteTtlMs, basket, notes);
-      log(me.id, 'invite_created', { alias, by: 'bot' });
+      log(me.id, 'invite_created', { by: 'bot' });
       const link = `${publicUrl}/i/${code}`;
       return { code, alias, link, message: inviteMessage(link), expires_at: iso(clock() + L.inviteTtlMs), owner_must_approve: !!me.user_id, ...(basket ? { basket } : {}) };
     },
@@ -1164,7 +1179,14 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       const t = clock();
       const inviterOk = !inviter.user_id || inv.by_owner ? t : null;
       const mineOk = !me.user_id || byOwner ? t : null;
-      q('INSERT INTO contacts (owner_bot, peer_bot, alias, created_at, approved_at, gen, privacy_on) VALUES (?, ?, ?, ?, ?, ?, ?)').run(inv.from_bot, me.id, inv.alias, t, inviterOk, t, governance.inPilot(inviter) ? 1 : 0);
+      // A dashboard link doesn't know the friend's name: the inviter gets their owner's first name now (else the bot's).
+      let theirAlias = inv.alias;
+      if (theirAlias.startsWith('friend-')) {
+        const base = String((me.user_id && q('SELECT name FROM users WHERE id = ?').get(me.user_id)?.name) || me.handle).trim().split(/\s+/)[0].slice(0, 24) || me.handle;
+        theirAlias = base;
+        for (let n = 2; q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?)').get(inv.from_bot, theirAlias); n++) theirAlias = `${base} ${n}`;
+      }
+      q('INSERT INTO contacts (owner_bot, peer_bot, alias, created_at, approved_at, gen, privacy_on) VALUES (?, ?, ?, ?, ?, ?, ?)').run(inv.from_bot, me.id, theirAlias, t, inviterOk, t, governance.inPilot(inviter) ? 1 : 0);
       q('INSERT INTO contacts (owner_bot, peer_bot, alias, created_at, approved_at, gen, privacy_on) VALUES (?, ?, ?, ?, ?, ?, ?)').run(me.id, inv.from_bot, alias, t, mineOk, t, governance.inPilot(me) ? 1 : 0);
       governance.placeInBasket(inv.from_bot, me.id, inv.basket);
       governance.placeInBasket(me.id, inv.from_bot, basket);
@@ -1196,18 +1218,23 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       return out;
     }),
 
-    'GET /v1/contacts': ({ me }) => ({
-      handle: me.handle,
-      try_founder: tryFounder(me),
-      contacts: q(`SELECT c.*, b.handle, b.display_name, b.vendor, b.user_id AS peer_user, b.sign_pub, b.box_pub, b.keys_at, c.codes_compared_at, c.privacy_on, c.can_ask, back.can_ask AS they_let_me_ask, c.blocked, c.approved_at, back.approved_at AS their_ok, b.webhook_url IS NOT NULL AS has_doorbell
-                   FROM contacts c JOIN bots b ON b.id = c.peer_bot LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot
-                   WHERE c.owner_bot = ? ORDER BY c.alias`).all(me.id)
-        .map((c) => ({ alias: c.alias, handle: `@${c.handle}`, display_name: c.display_name, ...(me.user_id && c.peer_user === me.user_id ? { your_own_bot: true } : {}), blocked: !!c.blocked, owner_approves_first: governance.inPilot(me) ? governance.effectiveMode(c) === 'asks' : !!c.privacy_on, can_wake: !!c.has_doorbell,
-          uses: c.vendor === 'web' ? 'web_inbox' : c.vendor === 'connector' ? 'connected_app' : 'bot', keys: c.box_pub ? { sign: c.sign_pub, box: c.box_pub } : null, keys_since: iso(c.keys_at), codes_compared: !!c.codes_compared_at,
-          may_ask_you_about: JSON.parse(c.can_ask || '[]'), you_may_ask_about: JSON.parse(c.they_let_me_ask || '[]'),
-          ...(files.isOn(me) ? { files: files.whyNot(c.peer_bot) ?? 'yes' } : {}),
-          status: c.blocked ? 'blocked' : !c.approved_at ? 'waiting_for_your_owner' : !c.their_ok ? 'waiting_for_them' : 'active' })),
-    }),
+    'GET /v1/contacts': ({ me, url }) => {
+      // A bot about to send files names who to (tools 0.22.13+), so a contact too old to open them is asked to update.
+      const filesTo = String(url?.searchParams.get('files_to') || '').replace(/^@/, '').toLowerCase();
+      const sendsFiles = (c) => !!filesTo && (c.handle === filesTo || c.alias.toLowerCase() === filesTo);
+      return {
+        handle: me.handle,
+        try_founder: tryFounder(me),
+        contacts: q(`SELECT c.*, b.handle, b.display_name, b.vendor, b.user_id AS peer_user, b.sign_pub, b.box_pub, b.keys_at, c.codes_compared_at, c.privacy_on, c.can_ask, back.can_ask AS they_let_me_ask, c.blocked, c.approved_at, back.approved_at AS their_ok, b.webhook_url IS NOT NULL AS has_doorbell
+                     FROM contacts c JOIN bots b ON b.id = c.peer_bot LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot
+                     WHERE c.owner_bot = ? ORDER BY c.alias`).all(me.id)
+          .map((c) => ({ alias: c.alias, handle: `@${c.handle}`, display_name: c.display_name, ...(me.user_id && c.peer_user === me.user_id ? { your_own_bot: true } : {}), blocked: !!c.blocked, owner_approves_first: governance.inPilot(me) ? governance.effectiveMode(c) === 'asks' : !!c.privacy_on, can_wake: !!c.has_doorbell,
+            uses: c.vendor === 'web' ? 'web_inbox' : c.vendor === 'connector' ? 'connected_app' : 'bot', keys: c.box_pub ? { sign: c.sign_pub, box: c.box_pub } : null, keys_since: iso(c.keys_at), codes_compared: !!c.codes_compared_at,
+            may_ask_you_about: JSON.parse(c.can_ask || '[]'), you_may_ask_about: JSON.parse(c.they_let_me_ask || '[]'),
+            ...(files.isOn(me) ? { files: files.whyNot(c.peer_bot, sendsFiles(c) ? me.id : null) ?? 'yes' } : {}),
+            status: c.blocked ? 'blocked' : !c.approved_at ? 'waiting_for_your_owner' : !c.their_ok ? 'waiting_for_them' : 'active' })),
+      };
+    },
 
     'POST /v1/contacts/block': ({ me, body }) => tx(() => {
       const c = resolveContactLoose(me, body.contact);
@@ -1270,18 +1297,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       const reply = visibleReply(m.id, me.id);
       return {
         id: m.id, from: `@${m.from_handle}`, to: `@${m.to_handle}`, kind: m.kind, encrypted: !!m.sealed, reply_to: m.reply_to,
-        status: reply ? 'replied'
-          : m.status === 'delivered' ? (m.to_vendor === 'web' ? 'seen' : 'passed_on')
-          : m.status === 'claimed' ? 'picked_up'
-          : m.status === 'dropped' ? 'not_delivered'
-          : m.status === 'pending' && m.note === 'key_check' ? 'key_check'
-          : m.to_paused ? 'held'
-          : m.status === 'pending' && m.to_user && quietUntil(q('SELECT * FROM users WHERE id = ?').get(m.to_user), clock()) ? 'quiet_hours'
-          : m.to_vendor === 'web' ? 'in_web_inbox'
-          : !m.first_rung_at ? 'queued'
-          : m.to_ring_status !== null && (m.to_ring_status < 200 || m.to_ring_status >= 300) ? 'doorbell_off'
-          : m.next_ring_at === null ? 'stalled'
-          : m.ring_count >= L.notAnsweringAfterRings ? 'not_answering' : 'rung',
+        status: messageState(m, { replied: !!reply, quiet: !!(m.to_user && quietUntil(q('SELECT * FROM users WHERE id = ?').get(m.to_user), clock())), notAnsweringAfterRings: L.notAnsweringAfterRings }),
         choices: m.choices && !m.body_purged_at && (m.from_bot === me.id || m.status === 'delivered') ? JSON.parse(m.choices) : undefined,
         created_at: iso(m.created_at), first_rung_at: iso(m.first_rung_at), ring_count: m.ring_count,
         first_claimed_at: iso(m.first_claimed_at), delivered_at: iso(m.delivered_at), note: m.note === 'key_check' ? null : m.note,
@@ -1317,6 +1333,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       if (news) q('UPDATE users SET bot_news = ?, bot_news_at = ? WHERE id = ?').run(news.id, t, me.user_id);
       // Only tools that say what to do with it ask, so an older one never uses it up unseen.
       const lost = body.lost === true ? lostFor(me) : [];
+      const ready = body.ready === true ? updates.readyFor(me) : [];
       const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 25);
       q("UPDATE messages SET status = 'pending', lease_until = NULL WHERE to_bot = ? AND status = 'claimed' AND lease_until <= ?").run(me.id, t);
       // Re-check permission at delivery time: messages from contacts blocked since sending are dropped, and group
@@ -1347,6 +1364,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         ...(files.isOn(me) ? { files: files.statusFor(me) } : {}),
         ...(news ? { news } : {}),
         ...(lost.length ? { lost } : {}),
+        ...(ready.length ? { ready } : {}),
         messages: rows.map((m) => ({
           from_person: m.kind === 'probe' ? null : (m.from_person ?? null), from_verified: !!m.from_verified,
           id: m.id, lease: m.lease, kind: m.kind, from: m.kind === 'probe' ? 'b2b relay' : (m.from_alias ?? `@${m.from_handle}`), from_handle: `@${m.from_handle}`,
@@ -1531,7 +1549,14 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   // Tools before 0.19.12 don't follow a choice made on the dashboard, so they keep the one their tool says.
   const FOLLOWS_CHOICE = '0.19.12';
   const channelFor = (b) => (b.wanted_channel && !newerVersion(FOLLOWS_CHOICE, b.tool_version || SILENT_TOOL) ? b.wanted_channel : channelOf(b.tool_channel));
-  const botToolInfo = (b) => ({ ...toolInfo(channelFor(b)), owner_channel: b.wanted_channel || null });
+  // Something waits on this bot running a version its channel doesn't have yet: offer it the newest, for this update.
+  const botToolInfo = (b) => {
+    const info = { ...toolInfo(channelFor(b)), owner_channel: b.wanted_channel || null };
+    const want = updates.wanted(b);
+    if (!want || !newerVersion(want, info.latest || '0.0.0') || info.channel === 'nightly') return info;
+    const top = nightlyRelease();
+    return top && !newerVersion(want, top.version) ? { ...info, latest: top.version, get: 'nightly' } : info;
+  };
   // The texts that go with a release: the one this tool says it is, else the stable one.
   const textsFor = (version) => {
     const r = (TOOL_VERSION_RE.test(version || '') && q('SELECT skill, doorbell FROM tool_releases WHERE version = ?').get(version)) || stableRelease();
@@ -1548,6 +1573,9 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     if (q('SELECT 1 FROM bots WHERE handle = ?').get(to)) throw new HttpError(409, `@${to} is taken.`);
     const behind = [b, ...q('SELECT b.* FROM contacts c JOIN bots b ON b.id = c.owner_bot WHERE c.peer_bot = ?').all(b.id)]
       .filter((x) => x.box_pub && x.vendor !== 'connector' && newerVersion('0.19.1', x.tool_version || SILENT_TOOL)).map((x) => `@${x.handle}`);
+    if (behind.length && !force) for (const x of [b, ...q('SELECT b.* FROM contacts c JOIN bots b ON b.id = c.owner_bot WHERE c.peer_bot = ?').all(b.id)]) {
+      if (behind.includes(`@${x.handle}`)) updates.need(x.id, '0.19.1', { waiter: x.id === b.id ? 0 : b.id, what: 'rename' });
+    }
     if (behind.length && !force) throw new HttpError(409, `Not yet: ${behind.join(', ')} ${behind.length === 1 ? 'needs' : 'need'} the newest bot2bot tool first. Bots get it by themselves the next time they check messages.`);
     tx(() => {
       q('UPDATE bots SET handle = ? WHERE id = ?').run(to, b.id);
@@ -1572,7 +1600,13 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
 
   // The private-mode doorbell instruction, straight from the guide, so a bot switching from quick connect uses the same words.
   const privateDoorbell = () => textsFor().doorbell.replaceAll('{{RELAY}}', publicUrl);
-  const handleConnector = createConnector({ q, tx, log, clock, publicUrl, sha, token, humanCode, routes, files, HttpError, L, privateDoorbell, trustProxy, markActive, domainProofs,
+  // Old addresses of this same server (www.bot2bot.link before the site moved to bot2bot.link). Apps connected there,
+  // and sign-ins started there, are answered with the address they came in on, so their tokens and links keep working.
+  const aliases = aliasUrls.map((u) => String(u).trim().replace(/\/$/, '')).filter(Boolean);
+  const hostOf = (u) => { try { return new URL(u).host.toLowerCase(); } catch { return ''; } };
+  const aliasHosts = new Set(aliases.map(hostOf).filter(Boolean));
+  const originFor = (req) => aliases.find((o) => hostOf(o) === String(req.headers.host || '').toLowerCase()) || publicUrl;
+  const handleConnector = createConnector({ q, tx, log, clock, publicUrl, aliasUrls: aliases, originFor, sha, token, humanCode, routes, files, HttpError, L, privateDoorbell, trustProxy, markActive, domainProofs,
     // MCP Events store signing secrets: only offered when they can be encrypted at rest (or in local tests).
     events: keySecret || allowLocalWebhooks ? events : null });
   const site = makeSite(siteDir);
@@ -1610,12 +1644,12 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   if (board) Object.assign(routes, board.routes);
   const redirects = new Set(redirectHosts.map((h) => h.trim().toLowerCase()).filter(Boolean));
   const governance = createGovernance({ db, q, tx, clock, token, HttpError, publicUrl, privacyPilot,
-    resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L });
+    resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L, filesFor: (to, from) => files.whyNot(to, from) });
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
   const groups = createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files,
     allowanceLeft: (me, t) => { if (!hosted || me.vendor === 'web') return null; const a = allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me, t); return a.limited ? a.left : null; },
-    kick: () => setImmediate(() => { void tick(); }) });
+    kick: () => setImmediate(() => { void tick(); }), needTool: updates.need });
   Object.assign(routes, groups.routes);
   Object.assign(routes, files.routes);
   Object.assign(routes, status.routes);
@@ -1668,9 +1702,10 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     return missing.length;
   }
   linkOwnBots();
-  const handleApp = createApp({ analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
+  const handleApp = createApp({ originFor, aliasUrls: aliases, analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
     decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, status, files, toolInfo, channelFor, toolTooOld, privateDoorbell, renameBot, latestUpdate, board, feedbackTo, markActive, usage, hostedAdmin, payments, invites, hostedInvites: invites ? hostedInvites : null, adminEmails, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, watching, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
+  const probeHash = probeToken ? sha(probeToken) : null;
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay');
     // Every answer counts toward the status page: 5xx from pages, the bot API and connected apps.
@@ -1680,15 +1715,21 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       res.end(type === 'application/json' ? JSON.stringify(data, null, 2) : data);
     };
     try {
-      // Old addresses (www, the Railway one) send people to the real domain. Bots and API calls keep working on any address.
-      if (redirects.size && publicUrl && redirects.has(String(req.headers.host || '').toLowerCase()) && isPageVisit(req, url)) {
+      // Old addresses send people to the canonical host. Bots and API calls keep working on any address, and on an alias
+      // (the old www host) sign-in, the dashboard and connected-app consent stay put, so a connection started there finishes there.
+      const host = String(req.headers.host || '').toLowerCase();
+      if (redirects.size && publicUrl && redirects.has(host) && (isPageVisit(req, url) || isCrawl(req, url)) && !(aliasHosts.has(host) && STAYS.test(url.pathname))) {
         res.writeHead(301, { location: publicUrl + url.pathname + url.search }); return res.end();
       }
       if (await handleConnector(req, res, url)) return;
       if (await handleApp(req, res, url)) return;
       const askedChannel = channelOf(url.searchParams.get('channel') || String(req.headers['x-b2b-channel'] || ''));
       if (req.method === 'GET' && url.pathname === '/api') return send(200, { service: 'b2b relay', cli: `${publicUrl}/cli/b2b.mjs`, setup: `${publicUrl}/setup`, tool: toolInfo(askedChannel) });
-      if (req.method === 'GET' && url.pathname === '/healthz') return send(200, { ok: true });
+      if (req.method === 'GET' && url.pathname === '/healthz') {
+        // The status page's outside check (STATUS_PROBE_TOKEN) counts once the answer is out.
+        if (probeHash && sha(String(req.headers['x-status-probe'] || '')) === probeHash) res.on('finish', () => status.probed());
+        return send(200, { ok: true });
+      }
       if (req.method === 'GET' && url.pathname === '/cli/b2b.mjs') return send(200, releaseOn(askedChannel)?.code ?? cliSource(), 'text/javascript; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/cli/b2b.mjs.sig') {
         const sig = releaseOn(askedChannel)?.sig;
@@ -1724,6 +1765,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         const v = TOOL_VERSION_RE.test(said) ? said : '';
         const ch = channelOf(String(req.headers['x-b2b-channel'] || ''));
         if (me.tool_version !== v || me.tool_channel !== ch) q('UPDATE bots SET tool_version = ?, tool_channel = ? WHERE id = ?').run(v, ch, me.id);
+        if (me.tool_version !== v && v) { me.tool_version = v; updates.seen(me, v); }
         me.tool_channel = ch;
         if (toolTooOld(v)) throw new HttpError(426, updateFirst());
       }
@@ -1736,13 +1778,14 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     }
   }
 
-  return { handle, tick, db, ring, status, enqueue, setKeys, governance, groups, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, setPrivacy, setPrivacyInTx, retention: (t = clock()) => { lastRetention = 0; retention(t); } };
+  return { handle, tick, db, ring, status, enqueue, setKeys, updates, governance, groups, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, setPrivacy, setPrivacyInTx, retention: (t = clock()) => { lastRetention = 0; retention(t); } };
 }
 
 // ───── the landing site ─────
 // The hosted server also serves the static website (built from site/v2/simple) on the same domain as the dashboard.
 // Server routes always win; the site only answers paths nothing else handled.
 const SITE_TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.webmanifest': 'application/manifest+json', '.xml': 'application/xml; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.json': 'application/json', '.md': 'text/markdown; charset=utf-8' };
+const STAYS = /^\/(login|logout|app|connect|i|g|setup-shots)(\/|$)/;
 const MACHINE = /^\/(v1|admin|mcp|oauth|\.well-known|cli|billing)(\/|$)|^\/(setup|skill|healthz|api)$/;
 // A person's browser asking for a page, not a bot or an API client.
 // AI agents can ask for a docs page as Markdown: Accept: text/markdown, ranked above text/html (or without it).
@@ -1755,6 +1798,10 @@ const wantsMarkdown = (req) => {
 // /docs/quickstart/ -> /docs/quickstart.md, /docs/ -> /docs/index.md
 const docsMarkdownPath = (p) => (/^\/docs(\/|$)/.test(p) && !/\.[a-z0-9]+$/i.test(p) ? `/docs/${p.replace(/^\/docs\/?/, '').replace(/\/$/, '') || 'index'}.md` : null);
 const isPageVisit = (req, url) => (req.method === 'GET' || req.method === 'HEAD') && !MACHINE.test(url.pathname) && String(req.headers.accept || '').includes('text/html');
+// Search crawlers that don't send Accept: text/html (Bingbot sends */*) still have to see the old addresses move,
+// or the apex shows up as a copy of the site.
+const CRAWLER = /googlebot|bingbot|duckduckbot|yandex|baiduspider|applebot|seznambot|petalbot|slurp|oai-searchbot|perplexitybot/i;
+const isCrawl = (req, url) => (req.method === 'GET' || req.method === 'HEAD') && !MACHINE.test(url.pathname) && CRAWLER.test(String(req.headers['user-agent'] || ''));
 
 function makeSite(dir) {
   if (!dir || !existsSync(join(dir, 'index.html'))) return null;
@@ -1810,6 +1857,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const relay = createRelay({
     dbPath: process.env.DB_PATH || join(here, 'data', 'relay.db'),
     adminToken: process.env.ADMIN_TOKEN,
+    // The secret the status page's outside check sends (relay/status-probe/worker.js). Unset: no outside check.
+    probeToken: process.env.STATUS_PROBE_TOKEN || '',
     publicUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
     webhookHosts: (process.env.WEBHOOK_HOSTS || 'api2.cursor.sh').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
     allowLocalWebhooks: process.env.ALLOW_LOCAL_WEBHOOKS === '1',
@@ -1829,6 +1878,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     ...(TOOL_VERSION_RE.test(process.env.MIN_CLI_VERSION || '') ? { minTool: process.env.MIN_CLI_VERSION } : {}),
     // Where new feedback is emailed (optional; it's always kept for GET /admin/feedback).
     feedbackTo: process.env.FEEDBACK_TO || '',
+    // Extra internal/test owners excluded from activation and retention.
+    internalEmails: (process.env.INTERNAL_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
     // Who sees the service dashboard at /app/admin (comma-separated emails).
     adminEmails: (process.env.ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
     // The bot behind "Text the founder" (/founder), by handle. Unset: no such page.
@@ -1845,6 +1896,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       alpha: !process.env.FILES_ALPHA || process.env.FILES_ALPHA === '1' ? true : process.env.FILES_ALPHA.split(',').map((s) => s.trim()).filter(Boolean),
       promoUntil: Date.parse(process.env.FILES_PROMO_UNTIL || '') || 0 },
     redirectHosts: (process.env.REDIRECT_HOSTS || '').split(','),
+    // Earlier public addresses of this server (e.g. https://www.bot2bot.link): connected apps and sign-ins there keep working.
+    aliasUrls: (process.env.ALIAS_URLS || '').split(','),
     // Tokens app directories ask us to serve to prove we own the domain (served as plain text, on every host).
     domainProofs: Object.fromEntries([['openai-apps-challenge', process.env.OPENAI_APPS_CHALLENGE], ['google-connected-apps', process.env.GOOGLE_CONNECTED_APPS], ['mcp-registry-auth', process.env.MCP_REGISTRY_AUTH]].filter(([, v]) => v)),
     // A directory reviewer's sign-in (email:code): that one email signs in with that code instead of the emailed one.
