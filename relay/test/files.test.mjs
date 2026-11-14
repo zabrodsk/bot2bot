@@ -291,3 +291,30 @@ test('files in a group go to every member who can open them', async (t0) => {
   await tom.b('/app/account/files', { method: 'POST', form: {} });
   await assert.rejects(ben.cli('group', 'send', String(gid), 'More', '--file', note('more.txt', 'x')), /can't get files: their owner turned files off/);
 });
+
+test('a watcher run reads the message before any file: the text and receipt come first, and each file is saved after', async (t0) => {
+  const { st, ben, anna } = await pair(t0);
+  await turnOn(ben); await turnOn(anna);
+  await anna.cli('inbox');
+  await ben.cli('send', 'anna', 'Here is the plan', '--want', 'just so she knows', '--file', note('plan.txt', 'Saturday at the lake'));
+  // The relay names the storage host, so the watcher can let a sandboxed agent reach it.
+  assert.equal((await anna.api('GET', '/v1/me')).json.files_host, new URL(st.s3.endpoint).hostname);
+  // The storage is out of reach (a sandbox that blocks it): the deferred inbox never goes there.
+  const [k] = st.bucket.keys(); const blob = st.bucket.get(k); st.bucket.delete(k);
+  const out = await anna.cli('inbox', '--defer-files');
+  assert.match(out, /\| Here is the plan/);
+  // Spelled the way this bot runs (with its B2B_HOME), so an unattended run can paste them as they are.
+  assert.match(out, /file: "plan\.txt" \(1 KB\), not saved yet\. Save it now: B2B_HOME=\S+ node .+ file get fil_/);
+  assert.match(out, /run: B2B_HOME=\S+ node .+ ack msg_/);
+  assert.match(out, /Save each file with its own command above, one at a time, then ack the message, even if a file couldn't be saved\./);
+  const receipt = out.match(/ack (msg_[\w-]+~[\w-]+)/)[1];
+  // Its claim is still open: another run is told it's with an earlier one, and when it comes back.
+  assert.match(await anna.cli('inbox'), /1 message is still with an earlier run that didn't finish reading it\. If that run stopped, it comes back here at /);
+  await anna.cli('ack', receipt);
+  const id = out.match(/file get (fil_[\w-]+)/)[1];
+  await assert.rejects(anna.cli('file', 'get', id), /Couldn't download "plan\.txt": download failed \(404\)/);
+  st.bucket.set(k, blob);
+  const got = await anna.cli('file', 'get', id);
+  assert.equal(readFileSync(got.match(/at "([^"]+)"/)[1], 'utf8'), 'Saturday at the lake');
+  await gone(st);
+});

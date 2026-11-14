@@ -141,6 +141,21 @@ test('audit 13: login emails are limited per client', async (t0) => {
   assert.equal((await b('/login', { method: 'POST', form: { email: 'p10@example.com' } })).status, 429);
 });
 
+test('asking for a login code twice in a row sends one email, and its code works', async (t0) => {
+  const env = await setup(t0);
+  const b = browser(env.url);
+  const mails = env.mail.length;
+  // A double tap on "Email me a code".
+  await Promise.all([b('/login', { method: 'POST', form: { email: 'nephew@example.com' } }), b('/login', { method: 'POST', form: { email: 'nephew@example.com' } })]);
+  assert.equal(env.mail.length, mails + 1);
+  const code = env.mail.at(-1).text.match(/code is (\d{6})/)[1];
+  assert.equal((await b('/login/verify', { method: 'POST', form: { email: 'nephew@example.com', code } })).status, 303);
+  // Asking again later is a new email.
+  env.advance(60_000);
+  await b('/login', { method: 'POST', form: { email: 'nephew@example.com' } });
+  assert.equal(env.mail.length, mails + 2);
+});
+
 test('a login code sent twice from the same browser logs in again instead of saying it expired', async (t0) => {
   const env = await setup(t0);
   const b = browser(env.url);

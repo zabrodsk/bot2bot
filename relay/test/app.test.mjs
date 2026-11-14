@@ -153,7 +153,10 @@ test('login codes: wrong code, attempts limit, rate limit, magic link', async (t
   for (let i = 0; i < 5; i++) assert.equal((await b('/login/verify', { method: 'POST', form: { email: 'x@example.com', code: '000000' } })).status, 400);
   const real = env.mail.at(-1).text.match(/code is (\d{6})/)[1];
   assert.match((await b('/login/verify', { method: 'POST', form: { email: 'x@example.com', code: real } })).text, /Too many wrong tries/); // locked after 5 tries
-  for (let i = 0; i < 4; i++) await b('/login', { method: 'POST', form: { email: 'x@example.com' } });
+  // Each one a minute apart (one right after another is the same request, sent once).
+  const later = () => env.relay.db.prepare('UPDATE login_codes SET created_at = created_at - 60000').run();
+  for (let i = 0; i < 4; i++) { later(); await b('/login', { method: 'POST', form: { email: 'x@example.com' } }); }
+  later();
   assert.match((await b('/login', { method: 'POST', form: { email: 'x@example.com' } })).text, /Too many/);
   const env2 = await setup(t0);
   const c = browser(env2.url);

@@ -31,7 +31,7 @@ fs.appendFileSync(${JSON.stringify(join(d, 'runs.log'))}, JSON.stringify({ args:
 const b2b = (...a) => execFileSync(process.execPath, [${JSON.stringify(CLI)}, ...a], { encoding: 'utf8' });
 for (let i = 0; i < 4; i++) {
   const out = b2b('inbox', '--via', 'watch');
-  const acks = [...out.matchAll(/^[^|\\n].*b2b\\.mjs ack (msg_[\\w~-]+)$/gm)];
+  const acks = [...out.matchAll(/^[^|\\n].*b2b\\.mjs'? ack (msg_[\\w~-]+)$/gm)];
   if (!acks.length) break;
   for (const m of acks) b2b('ack', m[1]);
   if (/save that one line for them instead/.test(out) && / from "/.test(out)) b2b('later', 'Ann: are we still on for Friday?');
@@ -133,7 +133,7 @@ test('coding agent: the watcher wakes it for the test and for a friend, and the 
 });
 
 test('coding agent: the long-poll answers empty after a while, a second watcher takes over, and no watcher means no wake', async (t0) => {
-  const env = await setup(t0, { limits: { watchHoldMs: 300 } });
+  const env = await setup(t0, { limits: { watchHoldMs: 300 }, files: { s3: { endpoint: 'https://store.example.com', bucket: 'b2b-files', keyId: 'k', secret: 's' }, alpha: true } });
   const cara = await joinAgent(env, 'cara@example.com', 'cara-codex', 'codex');
   const token = JSON.parse(readFileSync(join(cara.home, 'config.json'), 'utf8')).token;
   const call = (method, path, body) => fetch(env.url + path, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then(async (r) => ({ status: r.status, json: await r.json() }));
@@ -182,7 +182,9 @@ test('coding agent: the long-poll answers empty after a while, a second watcher 
   assert.equal((await cara.b(`/app/bots/${cara.botId}/test`, { method: 'POST', form: {} })).json().status, 200);
   await waitFor(() => agent.runs().length === 1, 10_000);
   const args = agent.runs()[0].args.join(' ');
-  assert.match(args, /^exec --skip-git-repo-check -s workspace-write -c sandbox_workspace_write\.network_access=true -c features\.network_proxy=\{enabled=true,domains=\{"127\.0\.0\.1"="allow"\}\} -C /);
+  // The file storage the relay names is allowed too, and the folder files are saved in can be written.
+  assert.match(args, /^exec --skip-git-repo-check -s workspace-write -c sandbox_workspace_write\.network_access=true -c features\.network_proxy=\{enabled=true,domains=\{"127\.0\.0\.1"="allow","b2b-files\.store\.example\.com"="allow"\}\} -C /);
+  assert.equal(agent.runs()[0].args.filter((a) => a === '--add-dir').length, 1);
 });
 
 test('OpenClaw in private mode: joins as OpenClaw, is told to set its webhook, and its owner gets no reminder emails', async (t0) => {

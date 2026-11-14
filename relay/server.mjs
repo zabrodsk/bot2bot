@@ -1128,6 +1128,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       platform: me.platform,
       doorbell: { configured: !!me.webhook_url, kind: me.doorbell_kind ?? null, needs_routine: needsRoutine(me), needs_watcher: needsWatcher(me), needs_hook: needsHook(me), watching: me.doorbell_kind === 'watch' ? watching(me) : undefined, verified: !!me.doorbell_verified_at, page: publicUrl ? `${publicUrl}/app/bots/${me.id}` : null, verified_at: iso(me.doorbell_verified_at), last_ring_at: iso(me.last_ring_at), last_ring_status: me.last_ring_status },
       inbox_pending: q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status IN ('pending','claimed') AND kind != 'probe'").get(me.id).n,
+      ...(files.isOn(me) && files.host ? { files_host: files.host } : {}),
       wakes_today: me.wake_day === today() ? me.wake_count : 0, wakes_per_day: L.wakesPerDay,
       contacts: q('SELECT count(*) AS n FROM contacts WHERE owner_bot = ?').get(me.id).n,
       try_founder: tryFounder(me),
@@ -1336,6 +1337,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       const ready = body.ready === true ? updates.readyFor(me) : [];
       const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 25);
       q("UPDATE messages SET status = 'pending', lease_until = NULL WHERE to_bot = ? AND status = 'claimed' AND lease_until <= ?").run(me.id, t);
+      // Messages an earlier run claimed and hasn't acked yet: not offered again until its lease ends, so say when.
+      const held = q("SELECT count(*) AS n, min(lease_until) AS until FROM messages WHERE to_bot = ? AND status = 'claimed' AND kind != 'probe'").get(me.id);
       // Re-check permission at delivery time: messages from contacts blocked since sending are dropped, and group
       // messages to someone no longer in the group. The relay's own notices about a group (an invite, "an admin
       // removed you", "the group was ended") still reach whoever they're for.
@@ -1365,6 +1368,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         ...(news ? { news } : {}),
         ...(lost.length ? { lost } : {}),
         ...(ready.length ? { ready } : {}),
+        ...(held.n ? { reserved: { count: held.n, free_at: iso(held.until) } } : {}),
         messages: rows.map((m) => ({
           from_person: m.kind === 'probe' ? null : (m.from_person ?? null), from_verified: !!m.from_verified,
           id: m.id, lease: m.lease, kind: m.kind, from: m.kind === 'probe' ? 'b2b relay' : (m.from_alias ?? `@${m.from_handle}`), from_handle: `@${m.from_handle}`,

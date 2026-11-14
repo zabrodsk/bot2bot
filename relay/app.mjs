@@ -324,6 +324,16 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
   async function sendLogin(email, req, res, next = '') {
     const hour = clock() - 3_600_000;
     const ipHash = sha(`ip:${clientIp(req)}`);
+    const nonce = token('n_', 18);
+    const cookie = `b2b_login=${nonce}; Path=/login; HttpOnly; SameSite=Lax; Max-Age=${LOGIN_TTL_MS / 1000}${secure ? '; Secure' : ''}`;
+    // The same request again within seconds (a double tap, Enter and a click) is the same sign-in: no second email,
+    // so the code in the first one still works. The link moves to this browser, which got the page.
+    const dup = q('SELECT id FROM login_codes WHERE email = ? AND ip_hash = ? AND used_at IS NULL AND attempts = 0 AND created_at > ? ORDER BY created_at DESC').get(email, ipHash, clock() - 30_000);
+    if (dup) {
+      res.setHeader('set-cookie', cookie);
+      q('UPDATE login_codes SET browser_hash = ?, next = ? WHERE id = ?').run(sha(nonce), String(next || '').slice(0, 500), dup.id);
+      return null;
+    }
     if (q('SELECT count(*) AS n FROM login_codes WHERE created_at > ?').get(hour).n >= L.loginEmailsPerHour) throw new HttpError(429, 'Too many sign-ins right now. Try again in a few minutes.');
     if (q('SELECT count(*) AS n FROM login_codes WHERE ip_hash = ? AND created_at > ?').get(ipHash, hour).n >= L.loginEmailsPerIpPerHour) throw new HttpError(429, 'Too many login emails from here. Try again in an hour.');
     const recent = q('SELECT count(*) AS n FROM login_codes WHERE email = ? AND created_at > ?').get(email, hour).n;
@@ -331,8 +341,7 @@ d.addEventListener('click',(e)=>{if(e.target===d)d.close();});setTimeout(()=>d.s
     const code = String(100000 + (randomBytes(4).readUInt32BE(0) % 900000));
     const link = token('l_', 24);
     // The link only works in this browser (a cookie nonce), so nobody can send you a link to their account.
-    const nonce = token('n_', 18);
-    res.setHeader('set-cookie', `b2b_login=${nonce}; Path=/login; HttpOnly; SameSite=Lax; Max-Age=${LOGIN_TTL_MS / 1000}${secure ? '; Secure' : ''}`);
+    res.setHeader('set-cookie', cookie);
     q('INSERT INTO login_codes (email, code_hash, link_hash, created_at, expires_at, browser_hash, ip_hash, next) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(email, sha(code), sha(link), clock(), clock() + LOGIN_TTL_MS, sha(nonce), ipHash, String(next || '').slice(0, 500));
     // The link opens where sign-in started: its cookie lives on that address (bot2bot.link or the old www host).
     const url = `${originFor(req)}/login/link?t=${link}`;
@@ -648,7 +657,7 @@ ${devCode ? `<p class="dev">${tr('Dev mode: your code is <b>{code}</b>', { code:
 <noscript><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required aria-label="${tr('6-digit code')}"></noscript>
 <button class="btn" data-busy><span class="btn__label">${tr('Log in')}</span><span class="btn__spin" aria-hidden="true"></span></button></form><script>try{document.getElementById('tz').value=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){}</script>`
     : `<p>${tr('No password. We email you a code.')}</p><form method="post" action="/login" class="stack"><input type="hidden" name="next" value="${esc(next)}">
-<label>${tr('Email')}<input name="email" type="email" autocomplete="email" required autofocus value="${esc(email)}"></label><button class="btn">${tr('Email me a code')}</button></form>${site ? `<p class="muted small">${tr('By signing up you agree to the <a class="link" href="/terms/">terms</a>. Here’s how we handle <a class="link" href="/privacy/">your data</a>.')}</p>` : ''}`}
+<label>${tr('Email')}<input name="email" type="email" autocomplete="email" required autofocus value="${esc(email)}"></label><button class="btn" data-busy><span class="btn__label">${tr('Email me a code')}</span><span class="btn__spin" aria-hidden="true"></span></button></form>${site ? `<p class="muted small">${tr('By signing up you agree to the <a class="link" href="/terms/">terms</a>. Here’s how we handle <a class="link" href="/privacy/">your data</a>.')}</p>` : ''}`}
 </section>`, { tr });
   }
 

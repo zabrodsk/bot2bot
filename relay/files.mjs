@@ -72,6 +72,8 @@ export function presign({ endpoint, bucket, region = 'auto', keyId, secret, styl
 
 export function createFiles({ q, clock, L, HttpError, log, hosted, coverage, newerVersion, s3 = {}, alpha = [], promoUntil: promoEnd = 0, fetchImpl = fetch, sealKey = (s) => s, openKey = (s) => s, allowLocal = false, needTool = () => false }) {
   const configured = !!(s3.endpoint && s3.bucket && s3.keyId && s3.secret);
+  // Where downloads and uploads go (the host of every signed link), so a sandboxed bot can be allowed to reach it.
+  const host = (() => { try { const u = new URL(s3.endpoint); return !configured ? null : s3.style === 'path' ? u.hostname : `${s3.bucket}.${u.hostname}`; } catch { return null; } })();
   const emails = new Set((Array.isArray(alpha) ? alpha : []).map((e) => String(e).trim().toLowerCase()).filter(Boolean));
   const userOf = (userOrBot) => {
     if (!userOrBot) return null;
@@ -277,5 +279,5 @@ export function createFiles({ q, clock, L, HttpError, log, hosted, coverage, new
     const p = plan(userOf(me));
     return { on: true, max_mb: Math.round(p.maxBytes / MB), per_day: p.perDay, left_today: p.left, free_plan: p.free, ...(p.promoUntil ? { deal_until: new Date(p.promoUntil).toISOString() } : {}) };
   }
-  return { configured, inAlpha, isOn, whyNot, plan, check, attach, routes, sweep, forgetBots, setOn, statusFor, uploadChat, discardChat, chatFor, MB };
+  return { configured, host, inAlpha, isOn, whyNot, plan, check, attach, routes, sweep, forgetBots, setOn, statusFor, uploadChat, discardChat, chatFor, MB };
 }
