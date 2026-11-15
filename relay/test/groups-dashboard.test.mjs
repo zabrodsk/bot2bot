@@ -3,7 +3,7 @@
 // member's link, waking and hiding with Undo, and the overview's friends by basket with a filter.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setup, owner, connect, connectApp, login, browser } from './helpers.mjs';
+import { setup, owner, connect, connectApp, login, browser, cliHome, waitFor } from './helpers.mjs';
 
 const db = (env) => env.relay.db;
 const botOf = (env, handle) => db(env).prepare('SELECT * FROM bots WHERE handle = ?').get(handle);
@@ -266,4 +266,40 @@ test('waking and hiding come with Undo; baskets fold away, hide from the overvie
   assert.match(many, /Friends <span class="count">6<\/span><\/h2><div class="ffind" data-find hidden><label class="sr" for="ffind-in">Find a friend<\/label><input id="ffind-in" type="search"/);
   assert.match(many, /data-who="cleo [^]*data-who="dora /);
   assert.match(many, /<p class="ffind__none" hidden>Nobody by that name<\/p>/);
+});
+
+test('your own other bots can go in a group: they show under Your bots and join straight away', async (t0) => {
+  const { env, ben, anna } = await trio(t0);
+  // A second bot on Ben's account.
+  await ben.b('/app/bots', { method: 'POST', form: { handle: 'benwork' } });
+  const work = cliHome();
+  await work.cli('enroll', env.url, (await ben.b('/app/bots/add/grok/steps')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
+  const workId = botOf(env, 'benwork').id;
+  await waitFor(() => db(env).prepare('SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = ? AND approved_at IS NOT NULL').get(Number(ben.botId), workId));
+
+  const form = await view(ben.b, `/app/groups/new?bot=${ben.botId}`);
+  assert.match(form, new RegExp(`Who to invite[^]*name="peer_${anna.botId}"[^]*Your bots</legend>[^]*name="peer_${workId}"[^]*@benwork`));
+
+  const made = await go(ben.b, '/app/groups/new', { bot: ben.botId, name: 'Planning', [`peer_${anna.botId}`]: '1', [`peer_${workId}`]: '1' });
+  const gid = gidFrom(made.location);
+  assert.match(made.page, /class="toast__what">Made Planning and invited 1 person · 1 of your bots is in it</);
+  assert.equal(memberOf(env, gid, workId).state, 'joined', 'no yes to wait for: Ben put it there');
+  assert.equal(memberOf(env, gid, anna.botId).state, 'invited', 'friends still say yes themselves');
+  assert.match(made.page, /Ben made the group[^]*@benwork joined/);
+
+  // A bot can't pull its owner's other bot in on its own: that one is only invited.
+  const g2 = (await ben.api('POST', '/v1/groups', { name: 'Bots only', members: ['@benwork'] }));
+  assert.equal(g2.status, 200, JSON.stringify(g2.json));
+  assert.equal(memberOf(env, g2.json.group.id, workId).state, 'invited');
+
+  // The overview shows each group once, naming every one of Ben's bots in it.
+  const home = groupsPart(await view(ben.b, '/app'));
+  assert.equal(home.match(/>Planning</g).length, 1, home);
+  assert.equal(home.match(/>Bots only</g).length, 1, home);
+  assert.match(home, /Groups <span class="count">2</);
+  assert.match(home, /Planning<\/span><span class="line__sub">[^<]*@ben, @benwork</);
+  // Hiding it hides it for all of them, so it doesn't come back as the other bot's.
+  await go(ben.b, `/app/groups/${gid}/hide`, { bot: ben.botId, on: '1' });
+  assert.equal(memberOf(env, gid, workId).hidden, 1);
+  assert.doesNotMatch(groupsPart(await view(ben.b, '/app')), />Planning</);
 });

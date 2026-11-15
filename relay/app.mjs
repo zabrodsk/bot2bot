@@ -1,7 +1,7 @@
 // The human side of b2b: accounts (email code login), a dashboard, self-serve bot setup,
 // doorbell setup with a live test, and invite links. Server-rendered HTML, zero dependencies.
 import { consentMarkup, replayPage, ANALYTICS_CSP } from './analytics.mjs';
-import { webhookKey, AGENTS } from './doorbells.mjs';
+import { webhookKey, AGENTS, doorbellRefused } from './doorbells.mjs';
 import { ASSISTANT, platformForApp } from './platforms.mjs';
 import { CONNECTOR_DOORBELL, ENCRYPTION_MESSAGE, safeText, isDotApp, wakeOnly, isSender, senderLabel, SENDER } from './connector.mjs';
 import { nextQuestion, QUESTION_BY_ID } from './feedback-questions.mjs';
@@ -394,7 +394,7 @@ Don't print any keys or tokens in this chat.`;
     : b.vendor === 'web' ? { key: 'ready', label: tr('Web inbox') }
     : isSender(b) ? { key: 'ready', label: tr('Connected') }
     : noDoorbell(b) ? { key: 'ready', label: tr('Connected') }
-    : !b.webhook_url ? { key: 'needs_doorbell', label: AGENTS[b.platform] ? tr('Watcher off') : tr('Doorbell off') } : b.doorbell_verified_at ? { key: 'ready', label: tr('Ready') } : { key: 'needs_test', label: tr('Doorbell not tested') };
+    : !b.webhook_url ? { key: 'needs_doorbell', label: AGENTS[b.platform] ? tr('Watcher off') : tr('Doorbell off') } : b.doorbell_verified_at ? { key: 'ready', label: tr('Ready') } : { key: 'needs_test', label: doorbellRefused(b) ? tr('Doorbell not working') : tr('Doorbell not tested') };
   const connectionMarker = (b, tr) => b && b.vendor !== 'web' && !b.disconnected_at && !b.paused_at && (botStatus(b, tr).key === 'ready' || doorbellless(b))
     ? `<span hidden data-analytics-connected="${b.id}" data-vendor="${esc(b.vendor)}"></span>` : '';
   // Arc badge tones: success for ready, warning for a step that's missing, info for paused.
@@ -979,7 +979,7 @@ ${invitesGroup}`;
     const botsSec = `<section class="group" aria-labelledby="bots-h"><div class="group__head"><h2 id="bots-h">${tr('Your bots')} <span class="count">${agents.length}</span></h2><a class="btn small ghost" href="/app/bots/add">${ICON.plus}${tr('Add a bot')}</a></div>
 <div class="card card--list card--tips"><ul class="list">${agents.map(botRow).join('')}</ul></div>${aiBots.length > 1 ? `<p class="muted small">${tr('Your bots can message each other. No invite needed.')}</p>` : ''}</section>`;
     const footHtml = `<div class="foot">${live.length && !paused ? confirmMorph({ action: '/app/pause', fields: '<input type="hidden" name="on" value="1">', label: tr('Pause everything'), icon: ICON.pause, prompt: tr('Pause all your bots?'), confirm: tr('Pause'), pending: tr('Pausing'), tone: 'neutral', tr }) : ''}${refreshNote(tr)}</div>`;
-    const groupN = groups && groupBots(user).length ? groups.forUser(user.id, { all: true }).filter((r) => !r.hidden).length : 0;
+    const groupN = groups && groupBots(user).length ? myGroups(user).filter((r) => !r.hidden).length : 0;
     // Arc tabs, vertical: All keeps the whole overview as one list, the rest show one section each.
     // One panel whose content follows the selected tab; the choice is remembered on this device.
     const panes = [['all', ICON.list, tr('All'), ''], ['friends', ICON.people, tr('Friends'), showing.length], groupsSec ? ['groups', ICON.chat, tr('Groups'), groupN] : null,
@@ -1074,7 +1074,7 @@ ${next.form ? `<form method="post" action="/app/invites" class="card__block"><in
     const quietOn = !!(user.quiet_on && user.tz);
     const quiet = quietOn ? tr('{from} to {to}', { from: hhmm(user.quiet_start), to: hhmm(user.quiet_end) }) : tr('Off');
     const rows = [
-      [tr('Doorbell'), b.doorbell_kind === 'watch' ? (watching(b) ? tr('On (watcher running)') : tr('Watcher not running')) : b.doorbell_kind === 'mcp_events' ? tr('On ({platform} is watching)', { platform: platformName(b, tr) }) : b.doorbell_verified_at ? tr('On') : b.webhook_url ? tr('Not tested') : tr('Off'), tr('Last woken {ago}', { ago: tr.ago(b.last_ring_at, clock()) })],
+      [tr('Doorbell'), b.doorbell_kind === 'watch' ? (watching(b) ? tr('On (watcher running)') : tr('Watcher not running')) : b.doorbell_kind === 'mcp_events' ? tr('On ({platform} is watching)', { platform: platformName(b, tr) }) : b.doorbell_verified_at ? tr('On') : doorbellRefused(b) ? tr('Not working') : b.webhook_url ? tr('Not tested') : tr('Off'), tr('Last woken {ago}', { ago: tr.ago(b.last_ring_at, clock()) })],
       [tr('Encryption'), b.box_pub ? tr('On') : tr('Off'), b.box_pub ? tr('Only the bots can read messages') : b.vendor === 'connector' ? tr('Quick connect is not end-to-end encrypted') : tr('Ask your bot to run "b2b keys"')],
       [tr('Friends'), String(n), n === 1 ? tr('friend connected') : tr('friends connected')],
       [tr('Quiet hours'), quiet, quietOn ? tr('Nobody wakes it at night') : tr('Messages can wake it any time')],
@@ -1244,7 +1244,9 @@ ${how.cancel ? `<form method="post" action="/app/bots/cancel"><button class="lin
     // A connected app that isn't Grok Bot can't be woken from outside, so it has no doorbell step: the Grok Bot
     // routine and its video are only for Grok Bot.
     const app = originOf(b, tr).key === 'app';
-    const step = app ? null : st.key === 'needs_doorbell' ? 2 : st.key === 'needs_test' ? 3 : null;
+    // A Grok routine that stopped taking rings needs its key copied again, so it gets the same two boxes as turning it on.
+    const broken = doorbellRefused(b) && (b.doorbell_kind ?? 'grok_webhook') === 'grok_webhook';
+    const step = app ? null : st.key === 'needs_doorbell' || (st.key === 'needs_test' && broken) ? 2 : st.key === 'needs_test' ? 3 : null;
     const agent = AGENTS[b.platform];
     const claw = b.platform === 'openclaw' && b.vendor === 'grokbot'; // OpenClaw in private mode: its own webhook
     const other = b.platform === 'other' || !!ASSISTANT[b.platform]; // another assistant: its own API or a schedule, if it has one
@@ -1304,7 +1306,8 @@ ${codeBlock('wmsg', tr('Message for {agent}', { agent }), WATCH_INSTALL, tr)}
 ${stuckCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     // Grok Bot: its bot already made the routine while joining, so the page leads with the one thing only its owner
     // can do, on a computer: copy two values across. Saving rings it, so testing isn't a step of its own.
-    if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<div class="card__head"><h2>${tr('Turn on the doorbell')}</h2>${badge(tr('Computer only'), 'info')}</div>
+    if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<div class="card__head"><h2>${broken ? tr('Fix the doorbell') : tr('Turn on the doorbell')}</h2>${badge(tr('Computer only'), 'info')}</div>
+${broken ? `<p>${tr("Its b2b doorbell routine stopped taking rings, so friends' bots can't wake it. The routine may be paused or have a new key.")}</p>` : ''}
 <p class="phone-only">${tr("You're on a phone. Open this page on a computer to finish, since phones don't show the webhook.")}</p>
 <ol class="howto"><li>${tr("In Grok Bot on a computer, open your bot's <b>b2b doorbell</b> routine.")} <a class="link" href="${GROK_ROUTINES}" target="_blank" rel="noopener">${tr('Open routines')}${ICON.out}</a></li><li>${tr('Copy <b>POST to</b> and <b>key</b> from its <b>Webhook</b> section into these two boxes.')}</li></ol>
 <form method="post" action="/app/bots/${b.id}/doorbell" class="stack">
@@ -1391,6 +1394,7 @@ ${changeDoorbell(b, tr)}${disconnectCard(b, tr)}
       : { state: 'warn', icon: ICON.bell, tip: tr("The watcher isn't running, so messages wait until it checks. Its page shows how to start it.") };
     if (b.doorbell_kind === 'schedule' && b.doorbell_verified_at) return { state: 'on', icon: ICON.bellOn, tip: tr('Checks for messages on its own schedule.') };
     if (b.webhook_url && b.doorbell_verified_at) return { state: 'on', icon: ICON.bellOn, tip: tr('Doorbell on. A message from a friend wakes it right away.') };
+    if (doorbellRefused(b)) return { state: 'warn', icon: ICON.bell, tip: tr("Its doorbell stopped taking rings, so messages wait. Fix it on its page.") };
     if (b.webhook_url) return { state: 'warn', icon: ICON.bell, tip: tr('Doorbell set, but not tested yet. Test it on its page.') };
     if (noDoorbell(b)) return { state: 'none', icon: ICON.bellOff, tip: tr("No doorbell, so it sees messages when you talk to it.") };
     return { state: 'off', icon: ICON.bell, tip: AGENTS[b.platform] ? tr('Watcher off. Messages wait until it checks. Its page shows how to start it.') : tr('Doorbell off. Messages wait until it checks. Turn it on on its page.') };
@@ -1531,6 +1535,20 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
   // isn't end-to-end encrypted), say yes to invites, and choose how often it wakes their bot. Bots do the talking;
   // owners can type here only in groups that aren't end-to-end encrypted.
   const groupBots = (u) => liveBots(u).filter((b) => b.vendor !== 'web' && !isSender(b));
+  // A group once, however many of my bots are in it: the seat that joined speaks for it (else the invited one),
+  // it's hidden only when every seat is, and it names all my bots in it.
+  const myGroups = (u) => {
+    const by = new Map();
+    for (const r of groups ? groups.forUser(u.id, { all: true }) : []) {
+      const g = by.get(r.id);
+      if (!g) { by.set(r.id, { ...r, handles: [r.my_handle], allHidden: !!r.hidden }); continue; }
+      g.handles.push(r.my_handle);
+      g.allHidden &&= !!r.hidden;
+      if (g.state === 'invited' && r.state === 'joined') Object.assign(g, { ...r, handles: g.handles, allHidden: g.allHidden });
+    }
+    const out = [...by.values()].map((g) => ({ ...g, hidden: g.allHidden ? 1 : 0 }));
+    return [...out.filter((g) => g.state === 'invited'), ...out.filter((g) => g.state !== 'invited')];
+  };
   // Which of my bots sits in this group: the one asked for, else the one that joined, else the invited one.
   const groupSeat = (u, gid, botId = null) => {
     const rows = groups ? groups.forUser(u.id, { all: true }).filter((r) => r.id === Number(gid)) : [];
@@ -1544,12 +1562,13 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
   const groupContacts = (b) => new Map(q(`SELECT c.peer_bot, c.alias, c.approved_at, c.blocked, back.approved_at AS their_ok, back.blocked AS they_blocked
     FROM contacts c LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot WHERE c.owner_bot = ?`).all(b.id).map((c) => [c.peer_bot, c]));
   // Contacts of this bot who can be put in a group (both said yes, a bot that's connected), minus who's in it already.
-  const addable = (b, gid = 0) => q(`SELECT c.peer_bot, c.alias, u.id AS uid, u.photo_at, u.avatar FROM contacts c
+  // The owner's other bots are in it too (own = 1): they join straight away, no one else has to say yes.
+  const addable = (b, gid = 0) => q(`SELECT c.peer_bot, c.alias, u.id AS uid, u.photo_at, u.avatar, coalesce(pb.user_id, 0) = ? AS own FROM contacts c
       JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot JOIN bots pb ON pb.id = c.peer_bot LEFT JOIN users u ON u.id = pb.user_id
       WHERE c.owner_bot = ? AND c.approved_at IS NOT NULL AND back.approved_at IS NOT NULL AND c.blocked = 0 AND back.blocked = 0
-        AND pb.disconnected_at IS NULL AND pb.removed_at IS NULL AND pb.vendor != 'web' AND coalesce(pb.user_id, 0) != ?
+        AND pb.disconnected_at IS NULL AND pb.removed_at IS NULL AND pb.vendor != 'web' AND NOT (pb.platform = 'sender' AND pb.vendor = 'connector')
         AND NOT EXISTS (SELECT 1 FROM group_members m WHERE m.group_id = ? AND m.bot_id = c.peer_bot AND m.state IN ('joined', 'invited'))
-      ORDER BY c.alias`).all(b.id, b.user_id || 0, gid);
+      ORDER BY own, c.alias`).all(b.user_id || -1, b.id, gid);
   const lockBadge = (on, tr) => (on ? badge(tr('End-to-end encrypted'), 'success') : badge(tr('Not end-to-end encrypted')));
   // Up to three faces from the group, overlapping like a little pile of stickers (drawn robots and stickers only:
   // photos stay between people who said yes to each other).
@@ -1571,19 +1590,23 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
   // The relay's group errors are written for bots; the owner gets these.
   const groupError = (e, tr) => (e.status === 426 || e.message === 'tool_too_old' ? tr("Your bot's bot2bot tool needs an update first.") : tr.msg(e.message.replace(/^\w/, (x) => x.toUpperCase()).replace(/([^.])$/, '$1.')));
   // Contacts to pick with a tick: a face and the name you use for them.
-  const peoplePick = (people, picked, legend, tr) => `<fieldset class="gpick"><legend class="row-label">${legend}</legend>
-${people.map((c) => `<label class="gpick__opt"><input type="checkbox" name="peer_${c.peer_bot}" value="1"${picked.includes(c.peer_bot) ? ' checked' : ''}>${avatar(c.alias, 'md', photoUrl(c.uid, c.photo_at, c.avatar))}<span>${esc(c.alias)}</span></label>`).join('')}</fieldset>`;
+  // Your own other bots get their own row, by @handle.
+  const peoplePick = (people, picked, legend, tr) => {
+    const opt = (c) => `<label class="gpick__opt"><input type="checkbox" name="peer_${c.peer_bot}" value="1"${picked.includes(c.peer_bot) ? ' checked' : ''}>${avatar(c.alias, 'md', photoUrl(c.uid, c.photo_at, c.avatar))}<span>${c.own ? '@' : ''}${esc(c.alias)}</span></label>`;
+    const set = (list, label) => (list.length ? `<fieldset class="gpick"><legend class="row-label">${label}</legend>\n${list.map(opt).join('')}</fieldset>` : '');
+    return set(people.filter((c) => !c.own), legend) + set(people.filter((c) => c.own), tr('Your bots'));
+  };
   const pickedPeers = (f) => Object.keys(f).filter((k) => /^peer_\d+$/.test(k) && f[k]).map((k) => Number(k.slice(5)));
 
   // The overview's groups: invites first (with Join and No thanks), then the rest, newest activity first.
   function groupsSection(user, tr) {
     if (!groups || !groupBots(user).length) return '';
     // Hidden groups are gone from here; Account lists them, to show them again.
-    const all = groups.forUser(user.id, { all: true });
+    const all = myGroups(user);
     const rows = all.filter((r) => !r.hidden);
     const hiddenN = all.length - rows.length;
     const now = clock();
-    const multi = new Set(all.map((r) => r.bot_id)).size > 1;
+    const multi = new Set(groups.forUser(user.id, { all: true }).map((r) => r.bot_id)).size > 1;
     const hideForm = (r) => `<form method="post" action="/app/groups/${r.id}/hide"><input type="hidden" name="bot" value="${r.bot_id}"><input type="hidden" name="on" value="1"><input type="hidden" name="back" value="/app"><button>${tr('Hide from the overview')}</button></form>`;
     // Who invited you: the name you gave them, else theirs.
     const inviterOf = (r) => { const by = groups.member(r.id, r.bot_id)?.invited_by; return by ? q('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(r.bot_id, by)?.alias ?? ownerName(by) : ''; };
@@ -1591,7 +1614,7 @@ ${people.map((c) => `<label class="gpick__opt"><input type="checkbox" name="peer
       const invited = r.state === 'invited';
       const sub = [invited ? tr('{name} invited you', { name: esc(inviterOf(r)) }) : tr.n(r.people, '{n} person|{n} people'),
         !invited && r.last_at ? tr('active {ago}', { ago: esc(tr.ago(r.last_at, now)) }) : '',
-        groups.encrypted(r.id) ? tr('End-to-end encrypted') : tr('Not end-to-end encrypted'), multi ? `@${esc(r.my_handle)}` : ''].filter(Boolean).join(' · ');
+        groups.encrypted(r.id) ? tr('End-to-end encrypted') : tr('Not end-to-end encrypted'), multi ? r.handles.map((h) => `@${esc(h)}`).join(', ') : ''].filter(Boolean).join(' · ');
       const link = `<a class="line line--link" href="/app/groups/${r.id}?bot=${r.bot_id}">${groupPile(r.id, r.bot_id)}<span class="line__main"><span class="line__title">${esc(r.name)}</span><span class="line__sub">${sub}</span></span>${invited ? '' : ICON.chev}</a>`;
       const ids = `<input type="hidden" name="bot" value="${r.bot_id}">`;
       return invited ? `<li class="gline">${link}<div class="gline__act gline__act--row"><form method="post" action="/app/groups/${r.id}/join">${ids}<button class="btn small">${tr('Join')}</button></form><form method="post" action="/app/groups/${r.id}/decline">${ids}<button class="btn small ghost">${tr('No thanks')}</button></form></div></li>`
@@ -1651,7 +1674,8 @@ ${ready ? `<div class="actions"><form method="post" action="${act('join')}">${id
 
     // What was said, oldest first, newest at the bottom. Sealed posts say so and show nothing else.
     const post = (p) => {
-      const who = nameFor(p.from_bot, p.person, p.handle);
+      // Your other bots in the group go by their handle, so they don't read as you.
+      const who = p.from_bot !== b.id && mine.has(p.from_bot) ? `@${p.handle}` : nameFor(p.from_bot, p.person, p.handle);
       if (p.kind === 'event') return `<li class="gsys">${esc(groupEvent(p.text, who, tr))} · ${esc(tr.ago(p.created_at, now))}</li>`;
       const out = p.from_bot === b.id;
       const text = p.body_purged_at ? `<i>${tr('Text deleted after 7 days')}</i>` : p.sealed ? `<i>${tr('End-to-end encrypted')}</i>` : p.text ? esc(p.text) : '';
@@ -1825,7 +1849,7 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}<p class="error
   // What the owner hid from the overview (groups and baskets), each with a way to show it again. Only when there's any.
   function hiddenCard(user, tr) {
     const ids = myBots(user).map((b) => b.id);
-    const gs = groups ? groups.forUser(user.id, { all: true }).filter((r) => r.hidden) : [];
+    const gs = groups ? myGroups(user).filter((r) => r.hidden) : [];
     const bs = inPilot(user) && ids.length ? q(`SELECT name_key, min(name) AS name FROM circles WHERE owner_bot IN (${ids.map(() => '?').join(',')}) AND hidden = 1 GROUP BY name_key ORDER BY min(position), name_key`).all(...ids) : [];
     if (!gs.length && !bs.length) return '';
     const back = '<input type="hidden" name="back" value="/app/account">';
@@ -2748,10 +2772,11 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (!b) throw new HttpError(404, 'Bot not found');
         const members = pickedPeers(f);
         let made;
-        try { made = groups.create(b, { name: f.name, members, via: 'web' }); }
+        try { made = groups.create(b, { name: f.name, members, via: 'web', ownerYes: user.id }); }
         catch (e) { if (e instanceof HttpError) return page(res, e.status, groupNewPage(user, b, { error: groupError(e, tr), name: String(f.name || ''), picked: members })), true; throw e; }
-        const n = made.invited.filter((x) => x.invited).length;
-        tell(user, { what: n ? tr.n(n, 'Made {name} and invited {n} person|Made {name} and invited {n} people', { name: made.group.name }) : tr('Made {name}', { name: made.group.name }),
+        const n = made.invited.filter((x) => x.invited).length, mine = made.invited.filter((x) => x.joined).length;
+        tell(user, { what: [n ? tr.n(n, 'Made {name} and invited {n} person|Made {name} and invited {n} people', { name: made.group.name }) : tr('Made {name}', { name: made.group.name }),
+          mine ? tr.n(mine, '{n} of your bots is in it|{n} of your bots are in it') : ''].filter(Boolean).join(' · '),
           undo: undoForm(`/app/groups/${made.group.id}/end`, { bot: b.id }) });
         return redirect(res, `/app/groups/${made.group.id}?bot=${b.id}`), true;
       }
@@ -2789,7 +2814,8 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           }
           if (sub === 'hide') {
             const on = f.on === '1';
-            groups.settings(b, gid, { hidden: on });
+            // Every one of my bots in it, so the group goes from (or comes back to) the overview as one.
+            for (const s of groups.forUser(user.id, { all: true }).filter((x) => x.id === gid)) groups.settings(ownBot(user, s.bot_id), gid, { hidden: on });
             tell(user, { what: on ? tr('{name} is hidden from the overview', { name: g.name }) : tr('{name} is back on the overview', { name: g.name }),
               undo: again ? null : undoForm(`/app/groups/${gid}/hide`, { ...ids, ...(on ? {} : { on: '1' }), back: f.back || (on ? here : '') }) });
             // Hidden: back to the overview, where it's gone. Shown again: where you were.
@@ -2821,8 +2847,9 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           if (sub === 'add') {
             const who = pickedPeers(f);
             if (!who.length) throw new HttpError(400, 'Pick someone to add.');
-            const n = groups.add(b, gid, who, { via: 'web' }).filter((x) => x.invited).length;
-            tell(user, { what: tr.n(n, '{n} person invited|{n} people invited') });
+            const added = groups.add(b, gid, who, { via: 'web', ownerYes: user.id });
+            const n = added.filter((x) => x.invited).length, mine = added.filter((x) => x.joined).length;
+            tell(user, { what: [n ? tr.n(n, '{n} person invited|{n} people invited') : '', mine ? tr.n(mine, '{n} of your bots is in it|{n} of your bots are in it') : ''].filter(Boolean).join(' · ') || tr.n(0, '{n} person invited|{n} people invited') });
             return redirect(res, here), true;
           }
           if (sub === 'contact') {

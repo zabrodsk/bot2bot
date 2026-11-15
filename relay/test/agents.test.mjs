@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { writeFileSync, readFileSync, mkdtempSync, chmodSync, realpathSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, chmodSync, realpathSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,8 +27,10 @@ function fakeAgent() {
   writeFileSync(bin, `#!${process.execPath}
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
-fs.appendFileSync(${JSON.stringify(join(d, 'runs.log'))}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), unattended: process.env.B2B_UNATTENDED }) + '\\n');
+fs.appendFileSync(${JSON.stringify(join(d, 'runs.log'))}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), unattended: process.env.B2B_UNATTENDED, session: process.env.B2B_SESSION }) + '\\n');
 const b2b = (...a) => execFileSync(process.execPath, [${JSON.stringify(CLI)}, ...a], { encoding: 'utf8' });
+// A resumed session reads what was handed to it.
+if (process.argv.includes('--resume')) { fs.appendFileSync(${JSON.stringify(join(d, 'handoff.log'))}, b2b('handoff')); process.exit(0); }
 for (let i = 0; i < 4; i++) {
   const out = b2b('inbox', '--via', 'watch');
   const acks = [...out.matchAll(/^[^|\\n].*b2b\\.mjs'? ack (msg_[\\w~-]+)$/gm)];
@@ -39,7 +41,8 @@ for (let i = 0; i < 4; i++) {
 `);
   chmodSync(bin, 0o755);
   const runs = () => { try { return readFileSync(join(d, 'runs.log'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
-  return { bin, runs };
+  const handoffs = () => { try { return readFileSync(join(d, 'handoff.log'), 'utf8'); } catch { return ''; } };
+  return { bin, runs, handoffs };
 }
 
 async function joinAgent(env, email, handle, agent = 'claude-code') {
@@ -377,4 +380,246 @@ test('a stuck agent finds its docs: b2b docs, whoami, setup errors and the bot p
 
   // The setup guide sends other agents to their own page.
   assert.match(await (await fetch(`${env.url}/setup`)).text(), /Not a Grok Bot\?[^]*docs\/agents\.md[^]*node ~\/bin\/b2b\.mjs docs/);
+});
+
+// The owner's own session can't be woken from outside: while it waits for answers ("b2b wait"), the watcher leaves the
+// messages to it, and it gets every new one, so a second reply right after the first doesn't hide it.
+const startWait = (home, ...a) => {
+  const p = spawn(process.execPath, [CLI, 'wait', ...a], { env: { ...process.env, B2B_HOME: home, HOME: home } });
+  let out = '';
+  p.stdout.on('data', (c) => { out += c; });
+  p.stderr.on('data', (c) => { out += c; });
+  const exited = new Promise((r) => p.on('exit', (code) => r(code)));
+  return { p, out: () => out, exited };
+};
+
+test('coding agent: a session waiting for answers gets both of two replies sent a second apart, and the watcher starts no run', async (t0) => {
+  const env = await setup(t0, { limits: { watchHoldMs: 400 } });
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-claude');
+  const agent = fakeAgent();
+  const w = startWatcher(t0, cara.home, agent.bin);
+  await waitFor(async () => (await cara.b(`/app/bots/${cara.botId}/state`)).json().watching);
+  // Two friends' bots, standing in for Grok Bot and Codex: each reads its inbox when rung.
+  const grok = await owner(env, t0, 'gina@example.com', 'gina-grok');
+  const codex = await owner(env, t0, 'olaf@example.com', 'olaf-codex');
+  await connectHandled(grok, { ...cara }, 'gina');
+  await connectHandled(codex, { ...cara }, 'olaf');
+  const made = await cara.cli('group', 'new', 'Review', 'gina', 'olaf');
+  const gid = Number(made.out.match(/\(number (\d+)\)/)[1]);
+  const row = (id) => env.relay.db.prepare('SELECT * FROM bots WHERE id = ?').get(Number(id));
+  env.relay.groups.join(row(grok.botId), gid, { byOwner: true });
+  env.relay.groups.join(row(codex.botId), gid, { byOwner: true });
+  const runsBefore = agent.runs().length;
+
+  // The session asks, is told how to hear the answers here, and waits for them.
+  const asked = await runIn(cara.home, { CLAUDECODE: '1' })('group', 'send', String(gid), 'Please review the plan', '--ask');
+  assert.match(asked.out, /run B2B_HOME=.* wait in the background[^]*the watcher leaves those messages to you/);
+  const live = startWait(cara.home, '--timeout', '60');
+  await waitFor(() => existsSync(join(cara.home, 'live.json')));
+
+  // Grok Bot answers (no mention: it doesn't ring), and a second later Codex asks something (that rings the watcher).
+  await grok.cli('group', 'send', String(gid), 'Looks good to me');
+  await sleep(1000);
+  await codex.cli('group', 'send', String(gid), 'Which deadline?', '--ask');
+  await waitFor(async () => /your owner's session is waiting for messages, so it gets them/.test(w.log()), 10_000);
+
+  // The waiting session gets both in one go (if Codex's came after it had read Grok's, a second wait gets it).
+  let out = '';
+  for (let i = 0; i < 2 && !/Which deadline\?/.test(out); i++) {
+    const s = i ? startWait(cara.home, '--timeout', '30') : live;
+    assert.equal(await s.exited, 0);
+    out += s.out();
+  }
+  assert.match(out, /Looks good to me/);
+  assert.match(out, /Which deadline\?/);
+  assert.match(out, /in the group "Review"/);
+  assert.match(out, /To keep waiting for more, run .* wait again\./);
+  for (const m of out.matchAll(/b2b\.mjs'? ack (msg_[\w~-]+)$/gm)) await cara.cli('ack', m[1]);
+  assert.equal(env.relay.db.prepare("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND group_id = ? AND kind IN ('note', 'ask') AND status = 'delivered'").get(cara.botId, gid).n, 2);
+
+  // Between one wait and the next (the session is reading what came), another answer rings: it's still left to the session.
+  await codex.cli('group', 'send', String(gid), 'Also, who presents?', '--ask');
+  await sleep(2500);
+  const next = startWait(cara.home, '--timeout', '30');
+  assert.equal(await next.exited, 0);
+  assert.match(next.out(), /Also, who presents\?/);
+  for (const m of next.out().matchAll(/b2b\.mjs'? ack (msg_[\w~-]+)$/gm)) await cara.cli('ack', m[1]);
+
+  // No separate run read them behind the session's back, and nothing waits for the owner's next session.
+  await sleep(1500);
+  assert.equal(agent.runs().length, runsBefore);
+  assert.doesNotMatch(w.log(), /didn't take them/);
+  assert.equal((await cara.cli('waiting', '--hook')).out, '');
+
+  // Nothing comes in: it says so when its time is up.
+  const quiet = startWait(cara.home, '--timeout', '5');
+  assert.equal(await quiet.exited, 0);
+  assert.match(quiet.out(), /Nothing came in for 5 seconds\. To keep waiting, run .* wait again\./);
+  assert.ok(!existsSync(join(cara.home, 'live.json')), 'a session that stopped waiting no longer says it waits');
+});
+
+test('coding agent: a session that says it waits but never reads doesn\'t hold messages up for long', async (t0) => {
+  const env = await setup(t0, { limits: { watchHoldMs: 400 } });
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-claude');
+  const agent = fakeAgent();
+  const w = startWatcher(t0, cara.home, agent.bin);
+  await waitFor(async () => (await cara.b(`/app/bots/${cara.botId}/state`)).json().watching);
+  const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
+  await connectHandled(ann, { ...cara }, 'ann');
+  // A session that's stuck: it said it waits (this test's own process), but it never reads.
+  writeFileSync(join(cara.home, 'live.json'), JSON.stringify({ pid: process.pid, until: Date.now() + 120_000 }));
+  // A run the watcher started leaves the messages to that session...
+  const left = await runIn(cara.home, { B2B_UNATTENDED: '1' })('inbox', '--via', 'watch');
+  assert.match(left.out, /Your owner has a session open that is waiting for these messages[^]*Nothing to do: stop here/);
+  const runsBefore = agent.runs().length;
+  await ann.cli('send', 'cara', 'Are we still on for Friday?', '--want', 'a yes or no');
+  await waitFor(() => /your owner's session is waiting/.test(w.log()), 10_000);
+  // ...but when it hasn't taken them after a while, the watcher starts the agent anyway, and it reads them.
+  await waitFor(() => /the session didn't take them; starting Claude Code anyway/.test(w.log()), 30_000);
+  await waitFor(() => env.relay.db.prepare("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND kind != 'probe' AND status = 'delivered'").get(cara.botId).n === 1, 15_000);
+  assert.ok(agent.runs().length > runsBefore);
+});
+
+// One voice in a group (GitHub issue #2): the Claude Code session doing the work leads the group. A run the watcher starts
+// hands that group's messages to it instead of answering, the open session hears them on its owner's next prompt, and a
+// closed one is resumed with its own history to read them.
+test('coding agent: the session leading a group gets its messages, and a run the watcher starts never answers there', async (t0) => {
+  const env = await setup(t0, { limits: { watchHoldMs: 400 } });
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-claude');
+  const agent = fakeAgent();
+  const w = startWatcher(t0, cara.home, agent.bin);
+  await waitFor(async () => (await cara.b(`/app/bots/${cara.botId}/state`)).json().watching);
+  const grok = await owner(env, t0, 'gina@example.com', 'gina-grok');
+  const codex = await owner(env, t0, 'olaf@example.com', 'olaf-codex');
+  await connectHandled(grok, { ...cara }, 'gina');
+  await connectHandled(codex, { ...cara }, 'olaf');
+  const made = await cara.cli('group', 'new', 'Review', 'gina', 'olaf');
+  const gid = Number(made.out.match(/\(number (\d+)\)/)[1]);
+  const row = (id) => env.relay.db.prepare('SELECT * FROM bots WHERE id = ?').get(Number(id));
+  env.relay.groups.join(row(grok.botId), gid, { byOwner: true });
+  env.relay.groups.join(row(codex.botId), gid, { byOwner: true });
+
+  // The owner's Claude Code session, open in its project folder, posts the draft: it leads the group from now on.
+  const SESSION = 'sess-lead-0001';
+  const project = mkdtempSync(join(tmpdir(), 'b2b-project-'));
+  const sessions = join(cara.home, '.claude', 'sessions');
+  mkdirSync(sessions, { recursive: true });
+  const open = () => writeFileSync(join(sessions, '4242.json'), JSON.stringify({ pid: process.pid, sessionId: SESSION, cwd: project, kind: 'interactive' }));
+  open();
+  const lead = runIn(cara.home, { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: SESSION });
+  const posted = await lead('group', 'send', String(gid), 'v3 is final', '--ask');
+  assert.match(posted.out, /This session leads "Review" now\./);
+  assert.match((await cara.cli('group', 'info', String(gid))).out, new RegExp(`Led by your owner's Claude Code session ${SESSION}[^]*hand its messages to that session`));
+
+  // Another bot asks something there: the watcher's run hands it over, acks it, and says nothing in the group.
+  const runsBefore = agent.runs().length;
+  await codex.cli('group', 'send', String(gid), 'Confirm v2 instead?', '--ask', '--mention', 'cara-claude');
+  await waitFor(() => agent.runs().length > runsBefore, 10_000);
+  await waitFor(() => env.relay.db.prepare("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND group_id = ? AND kind = 'ask' AND status = 'delivered'").get(cara.botId, gid).n === 1, 10_000);
+  assert.equal(agent.runs().at(-1).session, undefined, 'a cold run, not the session');
+  // The session is open, so it isn't resumed: it hears it on its owner's next prompt (the UserPromptSubmit hook).
+  await sleep(1500);
+  assert.ok(!agent.runs().some((r) => r.args.includes('--resume')));
+  const turn = await lead('waiting', '--hook', 'turn');
+  assert.match(turn.out, /handed to you, the session leading that group/);
+  assert.match(turn.out, /\| Confirm v2 instead\?/);
+  assert.match(turn.out, /QUESTION from .* in the group "Review" · mentions your owner/);
+  assert.match(turn.out, new RegExp(`To write in the group: node .*group send ${gid} "<text>"`));
+  assert.equal((await lead('waiting', '--hook', 'turn')).out, '', 'told once');
+  // Nothing was saved for "the owner's next session" behind the lead's back.
+  assert.equal((await cara.cli('waiting', '--hook')).out, '');
+
+  // A run the watcher started can't write in the group the session leads, whatever it was told.
+  const cold = runIn(cara.home, { B2B_UNATTENDED: '1', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'sess-cold-0002' });
+  const refused = await cold('group', 'send', String(gid), 'Withdrawn: v2 is final');
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.out, /Not sent\. Your owner's session that leads "Review" answers there/);
+
+  // The session is closed: the next message wakes it, resumed in its own folder with its own history.
+  rmSync(join(sessions, '4242.json'));
+  await grok.cli('group', 'send', String(gid), 'Looks good to me', '--mention', 'cara-claude');
+  await waitFor(() => agent.runs().some((r) => r.args.includes('--resume')), 15_000);
+  const resumed = agent.runs().find((r) => r.args.includes('--resume'));
+  assert.equal(resumed.args[resumed.args.indexOf('--resume') + 1], SESSION);
+  assert.equal(resumed.session, SESSION);
+  assert.equal(realpathSync(resumed.cwd), realpathSync(project));
+  assert.match(resumed.args.join(' '), /a group this session leads[^]*handoff/);
+  await waitFor(() => /Looks good to me/.test(agent.handoffs()), 10_000);
+  assert.doesNotMatch(w.log(), /couldn't resume/);
+  // Resumed once, not again on every ring.
+  await sleep(1500);
+  assert.equal(agent.runs().filter((r) => r.args.includes('--resume')).length, 1);
+
+  // The owner can let runs answer there again.
+  assert.match((await cara.cli('group', 'unattended', String(gid), 'full')).out, /read and answer in "Review" as usual/);
+  assert.match((await cara.cli('group', 'unbind', String(gid))).out, /No session leads "Review" now/);
+});
+
+test('coding agent: a resumed session that is gone hands its messages to the owner\'s next session', async (t0) => {
+  const env = await setup(t0, { limits: { watchHoldMs: 400 } });
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-claude');
+  // A Claude Code that can't resume this session (it was deleted): it exits with an error.
+  const d = mkdtempSync(join(tmpdir(), 'b2b-agent-'));
+  const bin = join(d, 'claude');
+  writeFileSync(bin, `#!${process.execPath}\nif (process.argv.includes('--resume')) { console.error('No conversation found'); process.exit(1); }\nrequire('node:child_process').execFileSync(process.execPath, [${JSON.stringify(CLI)}, 'inbox', '--via', 'watch'], { stdio: 'inherit' });\n`);
+  chmodSync(bin, 0o755);
+  const w = startWatcher(t0, cara.home, bin);
+  await waitFor(async () => (await cara.b(`/app/bots/${cara.botId}/state`)).json().watching);
+  const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
+  await connectHandled(ann, { ...cara }, 'ann');
+  const made = await cara.cli('group', 'new', 'Trip', 'ann');
+  const gid = Number(made.out.match(/\(number (\d+)\)/)[1]);
+  env.relay.groups.join(env.relay.db.prepare('SELECT * FROM bots WHERE id = ?').get(ann.botId), gid, { byOwner: true });
+  const lead = runIn(cara.home, { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'sess-gone-0003' });
+  assert.match((await lead('group', 'bind', String(gid))).out, /This session leads "Trip" now/);
+  await ann.cli('group', 'send', String(gid), 'Train or car?', '--ask');
+  await waitFor(() => /couldn't resume that session/.test(w.log()), 15_000);
+  const next = await cara.cli('waiting', '--hook');
+  assert.match(next.out, /\| Train or car\?/);
+  assert.match((await cara.cli('group', 'info', String(gid))).out, /No session leads it\./);
+});
+
+test('smaller fixes from issue #2: group read shows what is on its way, received opens group messages, watch --help', async (t0) => {
+  const env = await setup(t0, { limits: { watchHoldMs: 400 } });
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-claude');
+  const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
+  const tom = await owner(env, t0, 'tom@example.com', 'tom-bot');
+  await connectHandled(ann, { ...cara }, 'ann');
+  const made = await cara.cli('group', 'new', 'Trip', 'ann');
+  const gid = Number(made.out.match(/\(number (\d+)\)/)[1]);
+  env.relay.groups.join(env.relay.db.prepare('SELECT * FROM bots WHERE id = ?').get(ann.botId), gid, { byOwner: true });
+  // Tom is Ann's contact, not Cara's: Ann adds him, so Cara's bot only knows his keys from the relay.
+  await connectHandled(ann, tom, 'ann');
+  const row = (id) => env.relay.db.prepare('SELECT * FROM bots WHERE id = ?').get(Number(id));
+  env.relay.groups.add(row(ann.botId), gid, ['@tom-bot']);
+  env.relay.groups.join(row(tom.botId), gid, { byOwner: true });
+  await ann.cli('group', 'send', String(gid), 'Leaving at 9', '--ask');
+  await tom.cli('group', 'send', String(gid), 'I bring snacks');
+
+  // Not picked up yet: group read shows it, marked.
+  const read = await cara.cli('group', 'read', String(gid));
+  assert.match(read.out, /\| Leaving at 9/);
+  assert.match(read.out, /new: not picked up yet/);
+  // Once it's delivered, "received" opens it too.
+  const inbox = await cara.cli('inbox');
+  for (const m of inbox.out.matchAll(/b2b\.mjs'? ack (msg_[\w~-]+)$/gm)) await cara.cli('ack', m[1]);
+  const got = await cara.cli('received');
+  assert.match(got.out, /\| Leaving at 9/);
+  assert.match(got.out, /\| I bring snacks/);
+  assert.doesNotMatch(got.out, /could not be opened/);
+  assert.doesNotMatch((await cara.cli('group', 'read', String(gid))).out, /not picked up yet/);
+
+  // "watch --help" prints the help and starts nothing.
+  const help = await cara.cli('watch', '--help');
+  assert.equal(help.code, 0);
+  assert.match(help.out, /watch --install/);
+  assert.match(help.out, /group bind <group>/);
+  assert.ok(!(await cara.b(`/app/bots/${cara.botId}/state`)).json().watching);
+  // With the service installed, a watcher started by hand refuses instead of taking the doorbell from it.
+  const svc = process.platform === 'darwin' ? join(cara.home, 'Library', 'LaunchAgents', 'link.bot2bot.watch.cara-claude.plist') : join(cara.home, '.config', 'systemd', 'user', 'b2b-watch-cara-claude.service');
+  mkdirSync(dirname(svc), { recursive: true });
+  writeFileSync(svc, '');
+  const second = await runIn(cara.home, { INVOCATION_ID: '' })('watch', '--agent', 'claude-code', '--bin', process.execPath);
+  assert.notEqual(second.code, 0);
+  assert.match(second.out, /already runs as a service[^]*--force/);
 });

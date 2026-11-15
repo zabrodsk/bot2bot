@@ -17,7 +17,7 @@ import { migrateGroups, createGroups } from './groups.mjs';
 import { migrateStatus, createStatus } from './status.mjs';
 import { migrateFiles, createFiles, FILE_LIMITS } from './files.mjs';
 import { migrateUpdates, createUpdates, UPDATE_LIMITS } from './updates.mjs';
-import { createSafePost, checkCallbackUrl, webhookKey, AGENTS, AGENT_NAMES, agentPlatform, JOIN_AS, joinPlatform } from './doorbells.mjs';
+import { createSafePost, checkCallbackUrl, ringRefused, doorbellRefused, webhookKey, AGENTS, AGENT_NAMES, agentPlatform, JOIN_AS, joinPlatform } from './doorbells.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -492,6 +492,10 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         });
       if (typeof res.body?.cancel === 'function') try { await res.body.cancel(); } catch { /* ignore */ }
       q('UPDATE bots SET last_ring_status = ? WHERE id = ?').run(res.status, bot.id);
+      // A doorbell that worked and now refuses rings has stopped working: its routine got a new key, or was paused or
+      // deleted. Ringing again can't fix that, so it isn't verified any more and its owner hears it once.
+      if (ringRefused(res.status) && reason !== 'test' && !['watch', 'mcp_events'].includes(bot.doorbell_kind)
+        && q('UPDATE bots SET doorbell_verified_at = NULL WHERE id = ? AND doorbell_verified_at IS NOT NULL').run(bot.id).changes) void doorbellBroke(bot, res.status);
       // A refused ring (4xx: paused routine, bad key) didn't wake anyone: don't charge it to the wake budget.
       // A 5xx is ambiguous (the run may have started), so it stays charged.
       if (res.status >= 400 && res.status < 500) {
@@ -515,6 +519,18 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     } finally {
       inflight.delete(bot.id);
     }
+  }
+
+  async function doorbellBroke(bot, httpStatus) {
+    log(bot.id, 'doorbell_broken', { status: httpStatus });
+    const u = bot.user_id ? q('SELECT email, lang, email_verified_at FROM users WHERE id = ?').get(bot.user_id) : null;
+    if (!u?.email || !u.email_verified_at) return;
+    // Counts as the day's reminder, so the setup nudge doesn't follow it with another email.
+    q('UPDATE bots SET doorbell_nudged_at = ? WHERE id = ?').run(clock(), bot.id);
+    q('UPDATE users SET nudged_at = ? WHERE id = ?').run(clock(), bot.user_id);
+    try {
+      await mailer({ to: u.email, ...doorbellEmail({ product: productName, handle: bot.handle, stage: 'broken', grok: bot.platform === 'grok', botUrl: `${publicUrl}/app/bots/${bot.id}`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', art: publicUrl ? `${publicUrl}/stickers/robot-sleepy.png` : '', lang: u.lang }) });
+    } catch { log(bot.id, 'doorbell_broken_email_failed'); }
   }
 
   // One scheduler pass: release expired leases, then ring every bot with due messages.
@@ -598,7 +614,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     if (t - nudgeCheckedAt < 60_000) return;
     nudgeCheckedAt = t;
     const at = L.doorbellNudgeAtMs;
-    const due = q(`SELECT b.id, b.handle, b.webhook_url, b.created_at, b.doorbell_nudged_at, b.doorbell_nudges, u.id AS user_id, u.email, u.lang, u.nudged_at FROM bots b JOIN users u ON u.id = b.user_id
+    const due = q(`SELECT b.id, b.handle, b.webhook_url, b.last_ring_status, b.created_at, b.doorbell_nudged_at, b.doorbell_nudges, u.id AS user_id, u.email, u.lang, u.nudged_at FROM bots b JOIN users u ON u.id = b.user_id
                    WHERE (b.webhook_url IS NULL OR b.doorbell_verified_at IS NULL) AND b.platform = 'grok' AND b.vendor = 'grokbot'
                      AND b.disconnected_at IS NULL AND b.removed_at IS NULL AND b.paused_at IS NULL
                      AND b.doorbell_nudges < ? AND b.doorbell_nudge_fails < 3
@@ -614,7 +630,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       q('UPDATE bots SET doorbell_nudged_at = ?, doorbell_nudges = doorbell_nudges + 1 WHERE id = ?').run(t, b.id);
       q('UPDATE users SET nudged_at = ? WHERE id = ?').run(t, b.user_id);
       try {
-        await mailer({ to: b.email, ...doorbellEmail({ product: productName, handle: b.handle, stage: b.webhook_url ? 'test' : 'make', botUrl: `${publicUrl}/app/bots/${b.id}`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', art: publicUrl ? `${publicUrl}/stickers/robot-sleepy.png` : '', video: publicUrl ? `${publicUrl}/art/doorbell.jpg` : '', lang: b.lang }) });
+        await mailer({ to: b.email, ...doorbellEmail({ product: productName, handle: b.handle, stage: !b.webhook_url ? 'make' : ringRefused(b.last_ring_status) ? 'broken' : 'test', grok: true, botUrl: `${publicUrl}/app/bots/${b.id}`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', art: publicUrl ? `${publicUrl}/stickers/robot-sleepy.png` : '', video: publicUrl ? `${publicUrl}/art/doorbell.jpg` : '', lang: b.lang }) });
         log(b.id, 'doorbell_nudged', { n: b.doorbell_nudges + 1 });
       } catch {
         q('UPDATE bots SET doorbell_nudged_at = ?, doorbell_nudges = ?, doorbell_nudge_fails = doorbell_nudge_fails + 1 WHERE id = ?').run(b.doorbell_nudged_at, b.doorbell_nudges, b.id);
@@ -1126,8 +1142,11 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     'GET /v1/me': ({ me }) => ({
       handle: me.handle, display_name: me.display_name,
       platform: me.platform,
-      doorbell: { configured: !!me.webhook_url, kind: me.doorbell_kind ?? null, needs_routine: needsRoutine(me), needs_watcher: needsWatcher(me), needs_hook: needsHook(me), watching: me.doorbell_kind === 'watch' ? watching(me) : undefined, verified: !!me.doorbell_verified_at, page: publicUrl ? `${publicUrl}/app/bots/${me.id}` : null, verified_at: iso(me.doorbell_verified_at), last_ring_at: iso(me.last_ring_at), last_ring_status: me.last_ring_status },
+      doorbell: { configured: !!me.webhook_url, kind: me.doorbell_kind ?? null, needs_routine: needsRoutine(me), needs_watcher: needsWatcher(me), needs_hook: needsHook(me), watching: me.doorbell_kind === 'watch' ? watching(me) : undefined, verified: !!me.doorbell_verified_at, refused: doorbellRefused(me) || undefined, page: publicUrl ? `${publicUrl}/app/bots/${me.id}` : null, verified_at: iso(me.doorbell_verified_at), last_ring_at: iso(me.last_ring_at), last_ring_status: me.last_ring_status },
       inbox_pending: q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status IN ('pending','claimed') AND kind != 'probe'").get(me.id).n,
+      // What an inbox claim would get right now (nothing while paused): "b2b wait" polls this, and the watcher checks
+      // it to see whether a live session took what a ring was for.
+      inbox_ready: me.paused_at ? 0 : q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status = 'pending' AND coalesce(note, '') != 'key_check'").get(me.id).n,
       ...(files.isOn(me) && files.host ? { files_host: files.host } : {}),
       wakes_today: me.wake_day === today() ? me.wake_count : 0, wakes_per_day: L.wakesPerDay,
       contacts: q('SELECT count(*) AS n FROM contacts WHERE owner_bot = ?').get(me.id).n,
@@ -1313,11 +1332,11 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       // The last 10 by default; the evening summary asks for up to 7 days (?days=7), at most 100.
       const days = Math.min(7, Math.max(0, Number(url.searchParams.get('days')) || 0));
       const since = days ? clock() - days * 86_400_000 : 0, limit = days ? 100 : 10;
-      const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.want, m.sealed, m.reply_to, m.created_at, m.replied_at, m.group_id, c.alias, b.handle FROM messages m
+      const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.want, m.sealed, m.reply_to, m.created_at, m.replied_at, m.group_id, c.alias, b.handle, b.sign_pub, b.box_pub FROM messages m
                       JOIN bots b ON b.id = m.from_bot LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot
                       WHERE m.to_bot = ? AND m.kind NOT IN ('probe', 'group_event') AND m.status = 'delivered' AND m.created_at >= ? ${peer ? 'AND m.from_bot = ? AND m.group_id IS NULL' : ''}
                       ORDER BY m.created_at DESC LIMIT ?`).all(...(peer ? [me.id, since, peer.peer_bot] : [me.id, since]), limit);
-      return { messages: rows.map((m) => ({ id: m.id, from: m.alias ?? `@${m.handle}`, from_handle: `@${m.handle}`, kind: m.kind, ...(m.group_id ? { group: m.group_id } : {}), reply_to: m.reply_to, text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), want: m.sealed ? undefined : m.want ?? undefined, sealed: m.sealed ?? undefined, files: m.sealed ? undefined : files.chatFor(m.id), at: iso(m.created_at), replied: !!m.replied_at })) };
+      return { messages: rows.map((m) => ({ id: m.id, from: m.alias ?? `@${m.handle}`, from_handle: `@${m.handle}`, kind: m.kind, ...(m.group_id ? { group: m.group_id } : {}), reply_to: m.reply_to, text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), want: m.sealed ? undefined : m.want ?? undefined, sealed: m.sealed ?? undefined, ...(m.group_id && m.sealed && m.box_pub ? { from_keys: { sign: m.sign_pub, box: m.box_pub } } : {}), files: m.sealed ? undefined : files.chatFor(m.id), at: iso(m.created_at), replied: !!m.replied_at })) };
     },
 
     'GET /v1/sent': ({ me }) => ({
@@ -1326,7 +1345,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     }),
 
     // Each claim also says which tool is newest, so the doorbell run updates the tool on its own.
-    'POST /v1/inbox/claim': ({ me, body }) => ({ tool: botToolInfo(me), handle: me.handle, needs_doorbell: needsRoutine(me), ...(needsRoutine(me) && publicUrl ? { doorbell_page: `${publicUrl}/app/bots/${me.id}` } : {}), ...tx(() => {
+    'POST /v1/inbox/claim': ({ me, body }) => ({ tool: botToolInfo(me), handle: me.handle, needs_doorbell: needsRoutine(me), ...(doorbellRefused(me) ? { doorbell_refused: { status: me.last_ring_status, kind: me.doorbell_kind ?? 'grok_webhook' } } : {}), ...((needsRoutine(me) || doorbellRefused(me)) && publicUrl ? { doorbell_page: `${publicUrl}/app/bots/${me.id}` } : {}), ...tx(() => {
       const t = clock();
       if (me.paused_at) return { lease_seconds: L.leaseMs / 1000, paused: true, messages: [] };
       // Tools that tell their owner what's new ask for it; it's theirs to tell from now on, so no other bot repeats it.

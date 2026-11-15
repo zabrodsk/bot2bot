@@ -138,7 +138,7 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
 
   // ───── making groups and adding people ─────
   // A bot makes a group for its owner, with some of its contacts. They're invited; each owner says yes first.
-  function create(me, { name, members: who = [], via = 'bot' } = {}) {
+  function create(me, { name, members: who = [], via = 'bot', ownerYes = null } = {}) {
     if (me.paused_at) throw new HttpError(403, 'your owner paused bot2bot; nothing can be made until they resume it');
     if (me.vendor === 'web') throw new HttpError(403, 'groups are for bots');
     const n = checkName(name);
@@ -150,7 +150,7 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
       q("INSERT INTO group_members (group_id, bot_id, role, state, invited_by, invited_at, joined_at) VALUES (?, ?, 'admin', 'joined', ?, ?, ?)").run(gid, me.id, me.id, t, t);
       post(gid, me.id, 'event', 'created', via);
       log(me.id, 'group_created', { group: gid, by: via });
-      const added = who.length ? addInTx(me, gid, who, { via }) : [];
+      const added = who.length ? addInTx(me, gid, who, { via, ownerYes }) : [];
       // The creator's invite link, ready for anyone who isn't their contact yet.
       linkInTx(me, gid);
       return { group: view(me, group(gid)), invited: added };
@@ -158,7 +158,8 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
   }
 
   // Adds contacts of this bot to the group as invited. Runs inside a transaction.
-  function addInTx(me, gid, who, { via = 'bot' } = {}) {
+  // ownerYes: the signed-in owner's user id. Their own other bots join straight away: putting them in is their yes.
+  function addInTx(me, gid, who, { via = 'bot', ownerYes = null } = {}) {
     const g = group(gid);
     mayAdd(g, member(gid, me.id));
     const out = [];
@@ -180,6 +181,14 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
       if (was?.state === 'invited') { out.push({ name: c.alias, invited: true }); continue; }
       if (seats(gid) >= L.groupMax) throw new HttpError(409, `the group is full (${L.groupMax} people)`);
       const t = clock();
+      const own = ownerYes != null && pb.user_id === ownerYes && toolReady(pb);
+      if (own) {
+        if (was) q("UPDATE group_members SET state = 'invited', role = 'member', invited_by = ?, invited_at = ? WHERE group_id = ? AND bot_id = ?").run(me.id, t, gid, pb.id);
+        else q("INSERT INTO group_members (group_id, bot_id, role, state, invited_by, invited_at) VALUES (?, ?, 'member', 'invited', ?, ?)").run(gid, pb.id, me.id, t);
+        joinInTx(pb, gid);
+        out.push({ name: c.alias, joined: true });
+        continue;
+      }
       // Said no or left: not asked again for a day, so invites can't be used to keep waking someone's bot.
       if (was?.state === 'left' && was.left_at && t - was.left_at < L.groupReinviteMs) throw new HttpError(429, `"${c.alias}" left or said no to this group lately. They can join again with the group's invite link`);
       // Someone removed by an admin can be invited back by name; that's the point of inviting them.
@@ -227,37 +236,38 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
     if (b.user_id && !byOwner) throw new HttpError(403, `only your owner can say yes to a group, on their page: ${publicUrl}/app/groups/${gid}`);
     if (!live(b)) throw new HttpError(403, 'this bot is not connected');
     if (!toolReady(b)) throw new HttpError(426, 'tool_too_old');
-    return tx(() => {
-      const g = group(gid);
-      if (!g || g.ended_at) throw new HttpError(410, 'this group was ended');
-      const l = linkCode ? linkByCode(linkCode) : null;
-      if (linkCode && (!l || l.group_id !== g.id)) throw new HttpError(410, 'this group link has expired');
-      const was = member(g.id, b.id);
-      if (was?.state === 'joined') return { group: g, already: true };
-      if (!l && was?.state !== 'invited') throw new HttpError(403, 'you need an invite to join this group');
-      // Removed by an admin: a link doesn't bring them back; an admin can invite them again by name.
-      if (l && was?.state === 'removed') throw new HttpError(403, 'an admin removed you from this group. Ask them to add you again');
-      if (l && member(g.id, l.from_bot)?.state !== 'joined') throw new HttpError(410, 'this group link has expired');
-      if (was?.state !== 'invited' && seats(g.id) >= L.groupMax) throw new HttpError(409, `the group is full (${L.groupMax} people)`);
-      if (l && blockedBetween(b.id, l.from_bot)) throw new HttpError(403, "you can't join with this link");
-      const t = clock();
-      if (was) q("UPDATE group_members SET state = 'joined', joined_at = ?, left_at = NULL, invited_by = coalesce(?, invited_by) WHERE group_id = ? AND bot_id = ?").run(t, l?.from_bot ?? null, g.id, b.id);
-      else q("INSERT INTO group_members (group_id, bot_id, role, state, invited_by, invited_at, joined_at) VALUES (?, ?, 'member', 'joined', ?, ?, ?)").run(g.id, b.id, l.from_bot, t, t);
-      // Joining by a member's link connects you with them too, unless you already are.
-      const inviter = l ? bot(l.from_bot) : null;
-      let connected = null;
-      if (inviter && live(inviter) && !q('SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(b.id, inviter.id) && !(b.user_id && inviter.user_id === b.user_id)) connected = connectInTx(b, inviter, basket);
-      const wasEncrypted = joined(g.id).filter((m) => m.bot_id !== b.id && live(m)).every((m) => !!m.box_pub);
-      const who = personOf(b);
-      post(g.id, b.id, 'event', 'joined');
-      tellAll(g.id, b.id, { event: 'joined', group: g.name, who });
-      if (wasEncrypted && !b.box_pub) {
-        post(g.id, b.id, 'event', 'not_encrypted');
-        tellAll(g.id, b.id, { event: 'not_encrypted', group: g.name, who });
-      }
-      log(b.id, 'group_joined', { group: g.id, by: l ? 'link' : 'invite' });
-      return { group: g, connected };
-    });
+    return tx(() => joinInTx(b, gid, { linkCode, basket }));
+  }
+  function joinInTx(b, gid, { linkCode = null, basket = null } = {}) {
+    const g = group(gid);
+    if (!g || g.ended_at) throw new HttpError(410, 'this group was ended');
+    const l = linkCode ? linkByCode(linkCode) : null;
+    if (linkCode && (!l || l.group_id !== g.id)) throw new HttpError(410, 'this group link has expired');
+    const was = member(g.id, b.id);
+    if (was?.state === 'joined') return { group: g, already: true };
+    if (!l && was?.state !== 'invited') throw new HttpError(403, 'you need an invite to join this group');
+    // Removed by an admin: a link doesn't bring them back; an admin can invite them again by name.
+    if (l && was?.state === 'removed') throw new HttpError(403, 'an admin removed you from this group. Ask them to add you again');
+    if (l && member(g.id, l.from_bot)?.state !== 'joined') throw new HttpError(410, 'this group link has expired');
+    if (was?.state !== 'invited' && seats(g.id) >= L.groupMax) throw new HttpError(409, `the group is full (${L.groupMax} people)`);
+    if (l && blockedBetween(b.id, l.from_bot)) throw new HttpError(403, "you can't join with this link");
+    const t = clock();
+    if (was) q("UPDATE group_members SET state = 'joined', joined_at = ?, left_at = NULL, invited_by = coalesce(?, invited_by) WHERE group_id = ? AND bot_id = ?").run(t, l?.from_bot ?? null, g.id, b.id);
+    else q("INSERT INTO group_members (group_id, bot_id, role, state, invited_by, invited_at, joined_at) VALUES (?, ?, 'member', 'joined', ?, ?, ?)").run(g.id, b.id, l.from_bot, t, t);
+    // Joining by a member's link connects you with them too, unless you already are.
+    const inviter = l ? bot(l.from_bot) : null;
+    let connected = null;
+    if (inviter && live(inviter) && !q('SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(b.id, inviter.id) && !(b.user_id && inviter.user_id === b.user_id)) connected = connectInTx(b, inviter, basket);
+    const wasEncrypted = joined(g.id).filter((m) => m.bot_id !== b.id && live(m)).every((m) => !!m.box_pub);
+    const who = personOf(b);
+    post(g.id, b.id, 'event', 'joined');
+    tellAll(g.id, b.id, { event: 'joined', group: g.name, who });
+    if (wasEncrypted && !b.box_pub) {
+      post(g.id, b.id, 'event', 'not_encrypted');
+      tellAll(g.id, b.id, { event: 'not_encrypted', group: g.name, who });
+    }
+    log(b.id, 'group_joined', { group: g.id, by: l ? 'link' : 'invite' });
+    return { group: g, connected };
   }
   // The joiner and the member whose link it was become contacts, both said yes (the link, and the tap).
   // Both start "not sorted yet" unless the joiner picked a basket for them.
@@ -471,13 +481,14 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
 
   // What this bot received in a group lately (its own copies), for when its owner asks what was said.
   function recent(me, gid, { days = 7 } = {}) {
-    const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.choices, m.sealed, m.created_at, m.from_bot, m.mentioned, b.handle, b.sign_pub, b.box_pub, u.name AS person, c.alias
+    // Messages not picked up yet show too (marked pending), so a session reading the group sees what is still on its way.
+    const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.choices, m.sealed, m.created_at, m.from_bot, m.mentioned, m.status, b.handle, b.sign_pub, b.box_pub, u.name AS person, c.alias
       FROM messages m JOIN bots b ON b.id = m.from_bot LEFT JOIN users u ON u.id = b.user_id LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot
-      WHERE m.to_bot = ? AND m.group_id = ? AND m.kind IN ('note', 'ask') AND m.status = 'delivered' AND m.body_purged_at IS NULL AND m.created_at > ? ORDER BY m.created_at DESC LIMIT 50`).all(me.id, gid, clock() - days * 86_400_000);
+      WHERE m.to_bot = ? AND m.group_id = ? AND m.kind IN ('note', 'ask') AND m.status IN ('pending', 'claimed', 'delivered') AND m.body_purged_at IS NULL AND m.created_at > ? ORDER BY m.created_at DESC LIMIT 50`).all(me.id, gid, clock() - days * 86_400_000);
     // Someone who isn't a contact goes by their handle, as in the inbox, so a name they chose can't pass for a contact's.
     return rows.map((m) => ({ id: m.id, kind: m.kind, from: m.alias ?? `@${m.handle}`, from_handle: `@${m.handle}`, mentions_you: !!m.mentioned,
       text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), choices: m.choices ? JSON.parse(m.choices) : undefined,
-      sealed: m.sealed ?? undefined, from_keys: m.sealed && m.box_pub ? { sign: m.sign_pub, box: m.box_pub } : undefined, at: iso(m.created_at) }));
+      sealed: m.sealed ?? undefined, from_keys: m.sealed && m.box_pub ? { sign: m.sign_pub, box: m.box_pub } : undefined, at: iso(m.created_at), ...(m.status === 'delivered' ? {} : { pending: true }) }));
   }
 
   // ───── the bot API ─────

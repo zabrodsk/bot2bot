@@ -112,26 +112,35 @@ export const DOORBELL_VIDEO = 'https://www.loom.com/share/a7b24335fd2a443b980e2a
 /** Sent once (see doorbellNudgeAtMs) when a Grok bot joined but still can't be woken: no doorbell yet ('make'), or one
  *  that never answered a test ring ('test'). Without a doorbell it opens with the setup video, which explains it
  *  better than any steps. There's no second one: the bot mentions it in chat when its owner uses bot2bot. */
-export function doorbellEmail({ product = 'bot2bot', handle, stage = 'make', botUrl, home, logo = '', art = '', video = '', lang = 'en' }) {
+// 'broken': a doorbell that worked stopped taking rings (a new key, a paused or deleted routine). Sent once when it
+// happens; `grok` says it's a Grok Bot routine, whose key only shows on a computer.
+export function doorbellEmail({ product = 'bot2bot', handle, stage = 'make', grok = true, botUrl, home, logo = '', art = '', video = '', lang = 'en' }) {
   const tr = t(lang);
-  const testing = stage === 'test';
-  const subject = testing ? tr('One last step for @{handle}', { handle }) : tr('Set up @{handle} in one minute', { handle });
-  const lead = testing ? tr("@{handle} has its doorbell, but it hasn't answered a test ring yet, so friends' bots may not be able to wake it.", { handle })
+  const broken = stage === 'broken';
+  // Both skip the video and the setup steps: the routine is already there.
+  const testing = stage === 'test' || broken;
+  const subject = broken ? tr("@{handle}'s doorbell stopped working", { handle }) : testing ? tr('One last step for @{handle}', { handle }) : tr('Set up @{handle} in one minute', { handle });
+  const lead = broken ? (grok ? tr("Friends' bots can't wake @{handle} right now: its b2b doorbell routine stopped taking rings. That happens when the routine gets a new key or is paused.", { handle })
+    : tr("Friends' bots can't wake @{handle} right now: its doorbell stopped taking rings. Its address or key may have changed.", { handle }))
+    : testing ? tr("@{handle} has its doorbell, but it hasn't answered a test ring yet, so friends' bots may not be able to wake it.", { handle })
     : tr("@{handle} still can't be woken by friends' bots. This one-minute video shows the whole setup in Grok Bot.", { handle });
-  const steps = testing ? [tr("Open your bot's page and press Ring my bot."), tr("Don't type to your bot for a minute. It should wake up on its own.")]
+  const steps = broken ? (grok ? [tr("Open your bot's page on a computer."), tr("In Grok Bot, open the b2b doorbell routine, check it isn't paused, and copy its POST to and key into that page.")]
+    : [tr("Open your bot's page."), tr('Check its doorbell address and key, then press Ring my bot.')])
+    : testing ? [tr("Open your bot's page and press Ring my bot."), tr("Don't type to your bot for a minute. It should wake up on its own.")]
     : [tr("Open your bot's page on a computer."), tr("Copy POST to and key from your bot's b2b doorbell routine in Grok Bot. The page shows where.")];
-  const cta = testing ? tr('Test the doorbell') : tr('Turn on the doorbell');
-  const foot = tr('It takes about two minutes. This is the only email about it.');
+  const cta = broken ? tr('Fix the doorbell') : testing ? tr('Test the doorbell') : tr('Turn on the doorbell');
+  const foot = broken ? tr('Nothing is lost: messages wait up to 7 days.') : tr('It takes about two minutes. This is the only email about it.');
   // Phones don't show a routine's webhook, so the one step that needs a computer can't be missed.
   const computerOnly = tr('Computer only');
   const computerTitle = tr('This needs Grok Bot on a Mac or PC.');
   const computerText = tr("Phones don't show the webhook.");
   const watch = tr('Watch how it’s done in Grok Bot (1 min)');
   const watchText = testing ? '' : `${watch}: ${DOORBELL_VIDEO}\n\n`;
-  const text = `${lead}\n\n${watchText}${testing ? '' : `${computerOnly.toUpperCase()}: ${computerTitle} ${computerText}\n\n`}${steps.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n${cta}: ${botUrl}\n\n${foot}`;
+  const onComputer = !testing || (broken && grok);
+  const text = `${lead}\n\n${watchText}${onComputer ? `${computerOnly.toUpperCase()}: ${computerTitle} ${computerText}\n\n` : ''}${steps.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n${cta}: ${botUrl}\n\n${foot}`;
   const step = (n, x) => `<tr><td valign="top" width="40" style="padding:0 0 14px;"><div class="stepnum" style="width:28px;height:28px;border-radius:14px;background:${C.accentSubtle};color:${C.accent};font-family:${SANS};font-size:14px;font-weight:600;line-height:28px;text-align:center;">${n}</div></td>
   <td class="ink" valign="top" style="padding:4px 0 14px;font-family:${SANS};font-size:15px;line-height:1.5;color:${C.ink};">${esc(x)}</td></tr>`;
-  const computer = testing ? '' : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 22px;"><tr>
+  const computer = !onComputer ? '' : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 22px;"><tr>
   <td class="callout" style="background:${C.accentSubtle};border:1px solid ${C.accent};border-radius:14px;padding:14px 16px;">
     <div style="margin:0 0 6px;"><span class="badge" style="display:inline-block;background:${C.accent};color:#ffffff;font-family:${SANS};font-size:12px;font-weight:600;line-height:1;padding:6px 10px;border-radius:999px;">&#128187;&nbsp; ${esc(computerOnly)}</span></div>
     <div class="ink" style="font-family:${SANS};font-size:15px;line-height:1.5;color:${C.ink};"><b>${esc(computerTitle)}</b> ${esc(computerText)}</div>
@@ -139,7 +148,7 @@ export function doorbellEmail({ product = 'bot2bot', handle, stage = 'make', bot
 </tr></table>`;
   const player = testing ? '' : `${video ? `<a href="${DOORBELL_VIDEO}" style="display:block;margin:0 0 8px;text-decoration:none;"><img src="${esc(video)}" width="100%" alt="${esc(watch)}" style="display:block;border:0;width:100%;max-width:100%;height:auto;border-radius:12px;border:1px solid ${C.line};"></a>` : ''}
 ${p(`<a class="accent" href="${DOORBELL_VIDEO}" style="color:${C.accent};text-decoration:none;font-weight:600;">&#9654;&nbsp; ${esc(watch)}</a>`, 'font-size:14px;margin:0 0 22px;')}`;
-  const body = `${h1(testing ? tr('One last step: test the doorbell') : tr('The doorbell, in one minute'))}
+  const body = `${h1(broken ? tr('The doorbell stopped working') : testing ? tr('One last step: test the doorbell') : tr('The doorbell, in one minute'))}
 ${p(esc(lead))}
 ${player}
 ${computer}
@@ -147,7 +156,7 @@ ${computer}
 ${button(botUrl, cta)}
 ${p(esc(foot), 'font-size:13px;margin:0;')}`;
   const hero = art ? `<img src="${esc(art)}" width="132" height="132" alt="${esc(tr('A sleepy robot'))}" style="display:inline-block;border:0;width:132px;height:132px;">` : '';
-  return { subject, text, html: layout({ product, logo, home, preheader: testing ? tr("Turn on @{handle}'s doorbell so friends' bots can wake it.", { handle }) : tr("Turn on @{handle}'s doorbell, on a computer, so friends' bots can wake it.", { handle }), body, tr, hero }) };
+  return { subject, text, html: layout({ product, logo, home, preheader: broken ? tr("Friends' bots can't wake @{handle} until it's fixed.", { handle }) : testing ? tr("Turn on @{handle}'s doorbell so friends' bots can wake it.", { handle }) : tr("Turn on @{handle}'s doorbell, on a computer, so friends' bots can wake it.", { handle }), body, tr, hero }) };
 }
 
 /** Sent when a message has waited a day without its bot picking it up (see nudgeWaiting): who wrote, never what,

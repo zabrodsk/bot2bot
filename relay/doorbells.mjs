@@ -117,6 +117,10 @@ export function outcomeOf(status) {
   if (status >= 400 && status < 500) return 'refused';
   return 'unknown';
 }
+// The doorbell won't take a ring at all (a new key, a paused or deleted routine): it can't wake anyone until it's fixed.
+export const ringRefused = (status) => ['refused', 'gone'].includes(outcomeOf(status));
+// A doorbell that refused its last ring and hasn't worked since: nothing can wake its bot until it's fixed.
+export const doorbellRefused = (b) => !!b.webhook_url && !b.doorbell_verified_at && !['watch', 'mcp_events', 'schedule'].includes(b.doorbell_kind) && ringRefused(b.last_ring_status);
 
 // Standard Webhooks (standardwebhooks.com): HMAC-SHA256 over "<id>.<timestamp>.<body>" with the secret's
 // bytes (base64 after the whsec_ prefix), sent as "v1,<base64>". Several secrets give several signatures.
