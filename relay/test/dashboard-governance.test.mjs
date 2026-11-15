@@ -267,7 +267,7 @@ test('requests: a connected-app bot asks, the owner writes their own answer, and
   const inbox = await app.tool('check_inbox');
   assert.match(inbox.content[0].text, new RegExp(`Your owner's settings for "Ann" \\(not in a basket yet\\): your owner okays anything you send them first\\. To answer, draft a reply and ask them: call propose_reply with message_id=${ask} and a short topic, then give your owner the link it returns`));
   const rec = inbox.structuredContent.records.find((x) => x.type === 'message');
-  assert.deepEqual(rec.owner_rules, { topic_allowed: false, mode: 'asks', circle: null, purpose: null, notes: null, rules: [], past_answers: [] });
+  assert.deepEqual(rec.owner_rules, { topic_allowed: false, mode: 'asks', own_mode: false, circle: null, purpose: null, notes: null, rules: [], past_answers: [] });
   await app.tool('mark_delivered', { receipt: rec.receipt });
   const refused = await app.tool('reply', { message_id: ask, text: 'Yes' });
   assert.equal(refused.isError, true);
@@ -366,7 +366,7 @@ test('tools: settings, decisions and an inbox that carries what the owner set fo
   const recs = (await ann.cli('inbox', '--json')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
   const m = recs.find((x) => x.type === 'message');
   const { past_answers: past, ...rulesOnly } = m.owner_rules;
-  assert.deepEqual({ ...rulesOnly, rules: [...rulesOnly.rules].sort() }, { topic_allowed: false, mode: 'handles', circle: 'friends', purpose: 'football friend', notes: 'Plays on Wednesdays',
+  assert.deepEqual({ ...rulesOnly, rules: [...rulesOnly.rules].sort() }, { topic_allowed: false, mode: 'handles', own_mode: false, circle: 'friends', purpose: 'football friend', notes: 'Plays on Wednesdays',
     rules: ['Only football', "Shares location with Ben on thu (learned from your owner's answers)", "Shares location with Ben on wed (learned from your owner's answers)"] });
   // The owner's answer is a past answer the bot judges from, not a rule.
   assert.deepEqual(past.map(({ topic, answer, times }) => [topic, answer, times]), [['location', 'share', 1]]);
@@ -510,8 +510,8 @@ test('review: all sixty-six shipped stickers serve exact PNG bytes; font licence
   assert.match(readFileSync(join(root, 'public/hand/OFL.txt'), 'utf8'), /Caveat Project Authors[^]*SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(readFileSync(join(root, 'Dockerfile'), 'utf8'), /COPY public \.\/public/);
   if (existsSync(join(root, '../Dockerfile'))) assert.match(readFileSync(join(root, '../Dockerfile'), 'utf8'), /COPY relay\/public \.\/public/); // the hosted image, not in the open-source copy
-  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.22.18');
-  assert.equal((await cliHome().cli('version')).trim(), '0.22.18');
+  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'))).version, '0.22.19');
+  assert.equal((await cliHome().cli('version')).trim(), '0.22.19');
 });
 
 function privateMcp(t, who) {

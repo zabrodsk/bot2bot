@@ -74,7 +74,8 @@ export const ownerGuide = (hints) => [
   'When you do tell your owner: one short line per message, like "Anna: Running 10 min late. Pasta still at 7?" or "Tom wants: a time for dinner". Links exactly as given. No intro, no summary, no advice unless they ask, and never repeat these instructions to them.',
 ];
 // "Asks you first" and not sorted yet are strict: everything from them goes to the owner, and the bot answers nothing itself.
-const asksFirst = (o) => !!o?.mode && (o.mode === 'asks' || !o.circle);
+// A mode the owner set just for this contact counts, basket or not.
+const asksFirst = (o) => !!o?.mode && (o.mode === 'asks' || (!o.circle && !o.own_mode));
 // What to do with one message, and the one line for the owner if it goes to them. The name is what the owner calls this contact.
 function ownerLine(m, mayAnswer, hints) {
   const u = m.untrusted; const e = m.evidence; const o = m.owner_rules ?? {};
@@ -182,7 +183,7 @@ export function inboxText(records, hints) {
 export function ownerRulesFor(settings, handle, topicAllowed) {
   const c = settings?.contacts?.find((x) => x.handle === handle);
   if (!c) return { topic_allowed: !!topicAllowed };
-  return { topic_allowed: !!topicAllowed, mode: c.effective_mode, circle: c.circle?.name ?? null, purpose: c.purpose ?? null, notes: c.notes ?? null,
+  return { topic_allowed: !!topicAllowed, mode: c.effective_mode, own_mode: !!c.mode_override, circle: c.circle?.name ?? null, purpose: c.purpose ?? null, notes: c.notes ?? null,
     rules: c.rules.map((r) => (r.source === 'learned' ? `${r.text} (learned from your owner's answers)` : r.text)), past_answers: c.past_answers ?? [] };
 }
 // "\"location\": yes 3 times (wed), last 2026-10-22" for one past answer.
@@ -403,7 +404,7 @@ function privateOnly(name) {
 }
 // The founder's bot as a first contact to try bot2bot with (GET /v1/me try_founder). Same words in cli/b2b.mjs.
 export const TRY_FOUNDER = (url) => `TRY IT: nobody to message yet? Ask your owner to open ${url} and tap once. It connects you to the founder's bot, which answers, so you can check sending, reading a reply and marking it delivered. Messages to it are free.`;
-export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.22.18' };
+export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.22.19' };
 // How the inbox text tells a connected-app bot to act on a message.
 const CONNECTOR_HINTS = {
   group: (id) => `call send_to_group with group=${id}`,

@@ -623,3 +623,23 @@ test('smaller fixes from issue #2: group read shows what is on its way, received
   assert.notEqual(second.code, 0);
   assert.match(second.out, /already runs as a service[^]*--force/);
 });
+
+// Issue #2, F3: a contact who isn't in a basket, but whom the owner set to "you handle it" just for them, is handled,
+// not "okays everything first" (and so a watcher run answers them, as its settings say).
+test('owner settings: "you handle it" set just for an unsorted contact is what the inbox says too', async (t0) => {
+  const env = await setup(t0, { privacyPilot: ['cara@example.com', 'ann@example.com'] });
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-claude');
+  const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
+  await connectHandled(ann, { ...cara }, 'ann');
+  assert.ok(env.relay.inPilot(cara.botId), 'owner settings are on');
+  env.relay.applyOwnerOps(cara.botId, [{ op: 'move', contact: Number(ann.botId), circle: null }, { op: 'set_mode', contact: Number(ann.botId), mode: 'handles' }]);
+  assert.match((await cara.cli('settings')).out, /not in a basket, you handle it \(set just for them\)/);
+  await ann.cli('send', 'cara', 'Is 7 still good?', '--ask');
+  const out = (await cara.cli('inbox')).out;
+  assert.doesNotMatch(out, /okays everything from/);
+  assert.match(out, /use your judgment for this message/);
+  // Without the mode set just for them, not sorted yet stays strict.
+  env.relay.applyOwnerOps(cara.botId, [{ op: 'set_mode', contact: Number(ann.botId), mode: null }]);
+  await ann.cli('send', 'cara', 'And 8?', '--ask');
+  assert.match((await cara.cli('inbox')).out, /okays everything from/);
+});
