@@ -115,3 +115,22 @@ test('schedule: nothing is rung; the recurring task picks up the test, and an ap
   assert.ok(botOf(env, 'sam-bot').doorbell_verified_at);
   assert.match(text(await app.tool('whoami')), /Doorbell: your recurring task ·/);
 });
+
+test("an assistant whose sandbox can't reach the relay switches to quick connect instead of giving up", async (t0) => {
+  const env = await setup(t0);
+  const prompts = setupPrompts({ origin: env.url });
+  // Right after the join, before the steps that need the tool, and without anything it would have to fetch from the relay.
+  const other = prompts.other();
+  assert.match(other, /2\. Run: node ~\/bin\/b2b\.mjs join [^\n]*\nGive me the link[^\n]*\nIf step 1 or 2 fails because this computer can't reach /);
+  assert.ok(other.includes(`server URL: ${env.url}/mcp`), other);
+  assert.match(other, /call bot2bot's whoami tool and do the next step it gives you/);
+  assert.match(other, /quick connect isn't end-to-end encrypted/);
+  assert.match(prompts.instinct(), /this computer can't reach /);
+  // The dashboard's Other bots page offers quick connect for the same case, not only for bots without commands.
+  const b = await login(env, 'oli@example.com');
+  assert.equal((await b('/app/bots/add/other', { method: 'POST', form: { handle: 'oli-bot' } })).location, '/app/bots/add/other/steps');
+  const steps = (await b('/app/bots/add/other/steps')).text;
+  assert.match(steps, /It can(?:'|&#39;|&#x27;)t run commands, or can(?:'|&#39;|&#x27;)t reach bot2bot\?/);
+  assert.ok(steps.includes(`${env.url}/mcp`));
+  assert.match(steps, /this computer can(?:'|&#39;|&#x27;)t reach /);
+});

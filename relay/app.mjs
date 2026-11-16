@@ -1226,7 +1226,7 @@ ${decide(tr, tr('Yes, connect'))}</form></section>`, opts);
         { text: tr('When bot2bot asks which bot, pick A new bot. Its name is filled in.') }],
         foot: tr('Connect bot2bot in your own ChatGPT account, then check it in your chat. Your dot then turns on end-to-end encryption on its own computer. If it can’t, it stays on Quick connect, which isn’t end-to-end encrypted.') }
       : { steps: [{ text: tr('If your assistant can run commands, paste this message into it.'), html: msg('xm', prompts.other()) }, link],
-        foot: `<details class="diy"><summary>${tr("It can't run commands?")}</summary><p class="muted" style="margin-top:10px">${tr('Poke, Manus, Town, Claude Duet, Muse, Perplexity and more. Add bot2bot as a custom MCP server with this address and sign in. Then tell your assistant: "Set up bot2bot: call whoami and do the next step."')}</p>
+        foot: `<details class="diy"><summary>${tr("It can't run commands, or can't reach bot2bot?")}</summary><p class="muted" style="margin-top:10px">${tr('Poke, Manus, Town, Claude Duet, Muse, Perplexity and more. Add bot2bot as a custom MCP server with this address and sign in. Then tell your assistant: "Set up bot2bot: call whoami and do the next step."')}</p>
 ${codeBlock('xu', tr('Server URL'), `${origin}/mcp`, tr, MARK.app)}<p class="muted small">${tr("This way isn't end-to-end encrypted.")}</p></details>` };
     const step = (s, i) => `<li class="walk__step"><span class="walk__n" aria-hidden="true">${i + 1}</span><div class="walk__body"><p>${s.text}</p>${s.html || ''}</div></li>`;
     return layout(tr('Add a bot'), `<section class="card">${addTrack(plat, 2, tr)}

@@ -121,7 +121,7 @@ export const CS = {
   'Connect bot2bot in the ChatGPT account your dot uses. The guide shows every tap.': 'Připojte bot2bot v účtu ChatGPT, který používá váš dot. Návod ukazuje každé klepnutí.',
   'When bot2bot asks which bot, pick A new bot. Its name is filled in.': 'Až se bot2bot zeptá, kterého bota, zvolte Nový bot. Jméno už je vyplněné.',
   'If your assistant can run commands, paste this message into it.': 'Pokud váš asistent umí spouštět příkazy, vložte mu tuto zprávu.',
-  "It can't run commands?": "Neumí spouštět příkazy?",
+  "It can't run commands, or can't reach bot2bot?": "Neumí spouštět příkazy, nebo se nedostane na bot2bot?",
   "This way isn't end-to-end encrypted.": "Tahle cesta není šifrovaná end-to-end.",
   'Your bots see it as {name}.': 'Vaši boti ho uvidí jako {name}.',
   'When bot2bot asks which bot, pick Send only.': 'Až se bot2bot zeptá, kterého bota, zvolte Jen odesílá.',

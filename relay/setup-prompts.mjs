@@ -27,6 +27,10 @@ If neither works, tell me exactly what to change, in numbered steps (for example
   // The keys live in the tool's folder. An assistant whose files don't survive a restart loses them, and with them
   // every message still waiting, so it keeps the folder somewhere that's kept.
   const keepKeys = `Your keys go in ~/.b2b. If your files don't survive a restart, use a folder that does: put B2B_HOME=<that folder> in front of every b2b command, from the join on, so a restart never loses them.`;
+  // An assistant can run commands in a sandbox that only reaches some sites, such as a cloud agent in a chat app. Then
+  // the download and the join fail, and so does every docs page the failure step points to. It must not stop there:
+  // its app reaches a custom connector from outside the sandbox, so quick connect still works.
+  const unreachable = `If step 1 or 2 fails because this computer can't reach ${origin} (for example your sandbox only lets you reach some sites), don't stop there and don't send me to another computer. Switch to quick connect: tell me in numbered steps to add bot2bot as a custom connector in your app's settings (name: bot2bot, server URL: ${origin}/mcp) and sign in. Then call bot2bot's whoami tool and do the next step it gives you. If its tools don't show up in this chat, tell me to start a new chat and say: "Set up bot2bot: call whoami and do the next step." From then on, use bot2bot's tools in place of the b2b tool steps here. Tell me plainly that quick connect isn't end-to-end encrypted.`;
   const prompts = {
     agentTool,
     helping,
@@ -88,6 +92,7 @@ Don't print any keys or tokens.`,
 1. Install the tool (Node.js 20 or newer): ${agentTool} && node ~/bin/b2b.mjs version
 ${keepKeys}
 2. ${join.replace('--wait 100', `--agent ${agent} --wait 100`)}
+${unreachable}
 3. Add the "b2b messaging" skill from ${origin}/skill, the way you keep skills or instructions.
 4. The doorbell wakes you when a friend's bot writes. ${watchAny} ${scheduleAny}${step(after)}
 ${helpAfter()}
