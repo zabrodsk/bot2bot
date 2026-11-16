@@ -52,6 +52,7 @@ export function migrateGroups(db) {
     CREATE INDEX IF NOT EXISTS group_posts_group ON group_posts (group_id, created_at);
   `);
   const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+  if (!cols('group_posts').includes('self_sealed')) db.exec('ALTER TABLE group_posts ADD COLUMN self_sealed TEXT');
   if (!cols('messages').includes('group_id')) db.exec('ALTER TABLE messages ADD COLUMN group_id INTEGER');
   if (!cols('messages').includes('group_post')) db.exec('ALTER TABLE messages ADD COLUMN group_post TEXT');
   if (!cols('messages').includes('mentioned')) db.exec('ALTER TABLE messages ADD COLUMN mentioned INTEGER NOT NULL DEFAULT 0');
@@ -232,10 +233,12 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
 
   // ───── joining: only ever the owner's own yes ─────
   // byOwner: the person signed in on the dashboard. Bots of self-hosted relays without accounts join on their own.
-  function join(b, gid, { linkCode = null, basket = null, byOwner = false } = {}) {
+  function join(b, gid, { linkCode = null, basket = null, byOwner = false, inTransaction = false } = {}) {
     if (b.user_id && !byOwner) throw new HttpError(403, `only your owner can say yes to a group, on their page: ${publicUrl}/app/groups/${gid}`);
     if (!live(b)) throw new HttpError(403, 'this bot is not connected');
     if (!toolReady(b)) throw new HttpError(426, 'tool_too_old');
+    // A combined owner-approved contact + group invite already has a transaction.
+    if (inTransaction) return joinInTx(b, gid, { linkCode, basket });
     return tx(() => joinInTx(b, gid, { linkCode, basket }));
   }
   function joinInTx(b, gid, { linkCode = null, basket = null } = {}) {
@@ -298,6 +301,7 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
     const g = group(gid); const m = member(gid, b.id);
     if (!g || !m || !['joined', 'invited'].includes(m.state)) return { ok: true };
     q('UPDATE group_members SET state = ?, left_at = ?, role = ? WHERE group_id = ? AND bot_id = ?').run(state, clock(), 'member', gid, b.id);
+    q('DELETE FROM group_browser_views WHERE group_id = ? AND bot_id = ?').run(gid, b.id);
     // Nothing more reaches them from this group.
     erase("to_bot = ? AND group_id = ? AND status IN ('pending', 'claimed')", b.id, gid);
     if (m.state === 'joined') {
@@ -348,6 +352,7 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
     });
   }
   function endInTx(gid) {
+    q('DELETE FROM group_browser_views WHERE group_id = ?').run(gid);
     q('UPDATE chat_groups SET ended_at = coalesce(ended_at, ?) WHERE id = ?').run(clock(), gid);
     q("UPDATE group_links SET revoked_at = coalesce(revoked_at, ?) WHERE group_id = ?").run(clock(), gid);
     erase("group_id = ? AND status IN ('pending', 'claimed') AND kind != 'group_event'", gid);
@@ -443,6 +448,8 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
     const mentions = [...new Set((Array.isArray(body.mentions) ? body.mentions : []).map((h) => String(h).trim().toLowerCase().replace(/^@?/, '@')))];
     if (mentions.length > L.groupMax) throw new HttpError(400, 'too many mentions');
     for (const h of mentions) if (h !== '@all' && !recipients.some((r) => `@${r.handle}` === h)) throw new HttpError(400, `${h} isn't in this group`);
+    const selfSealed = body.self_sealed ?? null;
+    if (selfSealed !== null && (ownerWeb || !me.box_pub || typeof selfSealed !== 'string' || selfSealed.length > L.sealedMax || !SEALED_RE.test(selfSealed))) throw new HttpError(400, 'invalid self-encrypted group copy');
     const t = clock();
     const clientId = body.client_id ? String(body.client_id).slice(0, 64) : null;
     if (clientId) {
@@ -461,8 +468,8 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
     return tx(() => {
       const postId = token('gp_', 9);
       const allSealed = copies.length > 0 && copies.every((c) => c.sealed);
-      q('INSERT INTO group_posts (id, group_id, from_bot, kind, text, choices, sealed, mentions, via, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(postId, gid, me.id, kind, allSealed ? null : text, allSealed || !choices.length ? null : JSON.stringify(choices), allSealed ? 1 : 0, JSON.stringify(mentions), ownerWeb ? 'web' : 'bot', t);
+      q('INSERT INTO group_posts (id, group_id, from_bot, kind, text, choices, sealed, mentions, via, created_at, self_sealed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(postId, gid, me.id, kind, allSealed ? null : text, allSealed || !choices.length ? null : JSON.stringify(choices), allSealed ? 1 : 0, JSON.stringify(mentions), ownerWeb ? 'web' : 'bot', t, selfSealed);
       for (const [i, c] of copies.entries()) {
         const mentioned = mentions.includes('@all') || mentions.includes(`@${c.r.handle}`);
         // When it wakes them: muted never; "all" now; "mentions" now for questions and mentions, else a catch-up later.
@@ -489,6 +496,25 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
     return rows.map((m) => ({ id: m.id, kind: m.kind, from: m.alias ?? `@${m.handle}`, from_handle: `@${m.handle}`, mentions_you: !!m.mentioned,
       text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), choices: m.choices ? JSON.parse(m.choices) : undefined,
       sealed: m.sealed ?? undefined, from_keys: m.sealed && m.box_pub ? { sign: m.sign_pub, box: m.box_pub } : undefined, at: iso(m.created_at), ...(m.status === 'delivered' ? {} : { pending: true }) }));
+  }
+
+  // The owner's browser snapshot includes this bot's sent copies, encrypted to itself by new clients.
+  // It uses only messages from the current membership and excludes blocked senders and held copies.
+  function browserHistory(me, gid) {
+    resolve(me, String(gid));
+    const since = Math.max(member(gid, me.id).joined_at ?? clock(), clock() - 7 * 86_400_000);
+    const incoming = q(`SELECT m.*, b.handle, b.sign_pub, b.box_pub FROM messages m JOIN bots b ON b.id = m.from_bot
+      WHERE m.to_bot = ? AND m.group_id = ? AND m.kind IN ('note','ask') AND m.status IN ('pending','claimed','delivered')
+      AND m.body_purged_at IS NULL AND coalesce(m.note,'') != 'key_check' AND m.created_at >= ?
+      AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.blocked = 1 AND ((c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot) OR (c.owner_bot = m.from_bot AND c.peer_bot = m.to_bot)))
+      ORDER BY m.created_at DESC LIMIT 100`).all(me.id, gid, since).map((m) => ({ id: m.id, kind: m.kind, from_handle: `@${m.handle}`, at: iso(m.created_at),
+        ...(m.sealed ? { sealed: m.sealed, from_keys: { sign: m.sign_pub, box: m.box_pub } } : { text: m.text, links: JSON.parse(m.links || '[]'), choices: JSON.parse(m.choices || '[]') }) }));
+    const own = q(`SELECT * FROM group_posts WHERE group_id = ? AND from_bot = ? AND kind IN ('note','ask')
+      AND body_purged_at IS NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 100`).all(gid, me.id, since)
+      .map((p) => ({ id: p.id, kind: p.kind, from_handle: `@${me.handle}`, at: iso(p.created_at), own: true,
+        ...(p.self_sealed ? { sealed: p.self_sealed, from_keys: { sign: me.sign_pub, box: me.box_pub } }
+          : p.sealed ? { unavailable: true } : { text: p.text ?? '', choices: JSON.parse(p.choices || '[]'), links: [] }) }));
+    return [...incoming, ...own].sort((a,b) => b.at.localeCompare(a.at)).slice(0, 100).reverse();
   }
 
   // ───── the bot API ─────
@@ -552,7 +578,7 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
 
   // Retention: post text goes with its copies after 7 days; links nobody can use any more go too.
   function retention(t) {
-    q('UPDATE group_posts SET text = NULL, choices = NULL, body_purged_at = ? WHERE body_purged_at IS NULL AND text IS NOT NULL AND created_at < ?').run(t, t - L.bodyRetentionMs);
+    q('UPDATE group_posts SET text = NULL, choices = NULL, self_sealed = NULL, body_purged_at = ? WHERE body_purged_at IS NULL AND (text IS NOT NULL OR self_sealed IS NOT NULL) AND created_at < ?').run(t, t - L.bodyRetentionMs);
     q('DELETE FROM group_links WHERE expires_at < ? OR revoked_at < ?').run(t - 86_400_000, t - 86_400_000);
     // Invites nobody answered in 7 days go, with the invite still waiting for their bot.
     for (const r of q("SELECT group_id, bot_id FROM group_members WHERE state = 'invited' AND invited_at < ?").all(t - L.inviteTtlMs)) erase("to_bot = ? AND group_id = ? AND status IN ('pending', 'claimed')", r.bot_id, r.group_id);
@@ -560,9 +586,13 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
   }
   // A bot removed for good leaves its groups first.
   function forget(botIds) {
-    for (const id of botIds) for (const g of mine(id)) leaveInTx(bot(id), g.id);
+    for (const id of botIds) {
+      q('UPDATE group_posts SET self_sealed = NULL WHERE from_bot = ?').run(id);
+      q('DELETE FROM group_browser_views WHERE bot_id = ?').run(id);
+      for (const g of mine(id)) leaveInTx(bot(id), g.id);
+    }
   }
 
-  return { routes, mine, resolve, view, create, add, link, linkByCode, join, decline, leave, remove, setAdmin, end, settings, send, recent, forUser, page, requestContact, retention, forget, encrypted, toolReady, group, member };
+  return { routes, mine, resolve, view, create, add, link, linkByCode, join, decline, leave, remove, setAdmin, end, settings, send, recent, browserHistory, forUser, page, requestContact, retention, forget, encrypted, toolReady, group, member };
 }
 

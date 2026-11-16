@@ -1,6 +1,7 @@
 // b2b relay: stores messages between paired bots and wakes the recipient's bot
 // through its webhook routine (the "doorbell"). Zero dependencies (node:sqlite).
 import { messageRoute, messagePlatform } from './message-metadata.mjs';
+import { inviteAddress } from './invite-email.mjs';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, timingSafeEqual, createCipheriv, createDecipheriv, createPublicKey } from 'node:crypto';
@@ -14,9 +15,12 @@ import { messageEmail, doorbellEmail, approveEmail, waitingEmail, updateEmail } 
 import { migrateGovernance, createGovernance } from './governance.mjs';
 import { migrateEvents, createEvents } from './events.mjs';
 import { migrateGroups, createGroups } from './groups.mjs';
+import { migrateGroupBrowserHistory, createGroupBrowserHistory } from './group-browser-history.mjs';
 import { migrateStatus, createStatus } from './status.mjs';
 import { migrateFiles, createFiles, FILE_LIMITS } from './files.mjs';
 import { migrateUpdates, createUpdates, UPDATE_LIMITS } from './updates.mjs';
+import { capabilityProfile } from './capabilities.mjs';
+import { migrateTaskThreads, createTaskThreads } from './task-threads.mjs';
 import { createSafePost, checkCallbackUrl, ringRefused, doorbellRefused, webhookKey, AGENTS, AGENT_NAMES, agentPlatform, JOIN_AS, joinPlatform } from './doorbells.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -327,15 +331,18 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   // A send-only chat's app (ChatGPT, Gemini…). Its name can be the owner's own ("Gemini work"); before names, it was the app.
   if (!db.prepare('PRAGMA table_info(bots)').all().some((c) => c.name === 'chat_app')) db.exec("ALTER TABLE bots ADD COLUMN chat_app TEXT; UPDATE bots SET chat_app = display_name WHERE platform = 'sender'");
   migrateGroups(db);
+  migrateGroupBrowserHistory(db);
   migrateStatus(db);
   migrateFiles(db);
   migrateUpdates(db);
+  migrateTaskThreads(db);
   hostedUsage?.migrateUsage(db);
   hostedBilling?.migrateBilling(db);
   hostedInvites?.migrateInvites(db);
   hostedBoard?.migrateBoard(db);
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => { db.exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
+  const taskThreads = createTaskThreads({ q, tx, clock, HttpError, resolveRecipient, bodyRetentionMs: L.bodyRetentionMs });
   // The public status page (status.mjs): a heartbeat a minute, the signals fed in below, and the operator's incidents.
   const status = createStatus({ q, tx, clock, HttpError, log: (...a) => log(...a), product: productName });
   // Anything refused because a bot's tool is too old asks it to update, and tells whoever waited once it has.
@@ -539,6 +546,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     const t = clock();
     status.beat(t);
     governance.expire(t);
+    groupBrowser.sweep();
     retention(t);
     void nudgeDoorbells(t);
     void nudgeApprovals(t);
@@ -760,17 +768,24 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     governance.retention(t);
     events.retention(t);
     groups.retention(t);
+    groupBrowser.sweep();
     void files.sweep(t).catch((e) => console.error('files sweep', e));
     const expired = q(`UPDATE messages SET status = 'dropped', next_ring_at = NULL, lease_until = NULL, note = coalesce(note, 'expired')
-                       WHERE status IN ('pending', 'claimed') AND kind != 'probe' AND created_at < ?`).run(t - L.undeliveredExpiryMs);
+                       WHERE status IN ('pending', 'claimed') AND kind != 'probe' AND created_at < ?
+                       AND (thread_id IS NULL OR thread_id NOT IN (SELECT id FROM task_threads WHERE expires_at > ?))`).run(t - L.undeliveredExpiryMs, t);
     if (expired.changes) log(null, 'expired', { count: Number(expired.changes) });
     q("DELETE FROM messages WHERE kind = 'probe' AND created_at < ?").run(t - Math.max(L.probeTtlMs, L.scheduleProbeTtlMs));
-    erase(`body_purged_at IS NULL AND (status = 'dropped' OR (status = 'delivered' AND delivered_at < ?))`, t - L.bodyRetentionMs);
+    erase(`body_purged_at IS NULL AND (status = 'dropped'
+      OR (thread_id IS NOT NULL AND thread_id IN (SELECT id FROM task_threads WHERE expires_at <= ?))
+      OR (thread_id IS NULL AND status = 'delivered' AND delivered_at < ?))`, t, t - L.bodyRetentionMs);
     usage?.telemetryRollup(t);
     q('DELETE FROM events WHERE ts < ?').run(t - L.metadataRetentionMs);
     q('DELETE FROM sessions WHERE expires_at < ?').run(t);
     q('DELETE FROM login_codes WHERE expires_at < ?').run(t - 86_400_000);
     q('DELETE FROM join_requests WHERE expires_at < ?').run(t - 86_400_000);
+    // Keep a cancelled invite's recipient/group restrictions while Undo can revive its row.
+    q('DELETE FROM invites WHERE recipient_email IS NOT NULL AND expires_at <= ? AND used_at IS NULL').run(t - 86_400_000);
+    q('UPDATE invites SET recipient_email = NULL, group_code = NULL WHERE used_at IS NOT NULL').run();
     q('DELETE FROM oauth_clients WHERE created_at < ? AND client_id NOT IN (SELECT client_id FROM oauth_tokens) AND client_id NOT IN (SELECT client_id FROM oauth_codes WHERE used_at IS NULL)').run(t - 7 * 86_400_000);
     // A bot its owner removed an hour ago leaves for good: off its friends' contact lists, and its name is free again.
     for (const b of q("SELECT id, handle FROM bots WHERE removed_at IS NOT NULL AND removed_at < ? AND instr(handle, '~') = 0").all(t - L.removedGraceMs)) {
@@ -835,18 +850,19 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         if (!['http:', 'https:'].includes(u.protocol) || l.length > L.linkMax) throw new HttpError(400, 'links must be http(s) URLs under 2000 chars');
       }
     }
-    let replyTo = null;
+    let replyTo = null, orig = null;
     if (kind === 'reply' || body.reply_to) {
-      const orig = q('SELECT * FROM messages WHERE id = ?').get(String(body.reply_to || ''));
+      orig = q('SELECT * FROM messages WHERE id = ?').get(String(body.reply_to || ''));
       if (!orig || orig.to_bot !== me.id || orig.from_bot !== peer.peer_bot) throw new HttpError(400, 'reply_to must be a message you received from this contact');
       replyTo = orig.id;
     }
+    const thread = taskThreads.prepare(me, peer, body, { sealed, text, orig });
     const fileIds = files.check(me, [peer.peer_bot], body.files, { sealed: sealed !== null });
     const clientId = body.client_id ? String(body.client_id).slice(0, 64) : null;
     if (!ownerWeb && !decision && clientId?.startsWith('privacy:') && (!pilot || body.approval !== clientId.slice(8))) throw new HttpError(403, 'privacy client_id requires an approval');
     const t = clock();
     const choicesJson = choices.length ? JSON.stringify(choices) : null;
-    const answer = (m, to) => ({ id: m.id, status: m.status, duplicate: true, to: `@${to}`, recipient_can_be_woken: true, encrypted: !!m.sealed });
+    const answer = (m, to) => ({ id: m.id, status: m.status, duplicate: true, to: `@${to}`, recipient_can_be_woken: true, encrypted: !!m.sealed, ...(m.thread_id ? { thread: m.thread_id } : {}) });
     if (clientId) {
       // Explicit idempotency key: a genuine retry returns the original; reuse for something else is an error.
       // For sealed messages the sender's content tag stands in for the text we can't see.
@@ -854,7 +870,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       if (dup) {
         const sameContent = sealed !== null
           ? dup.sealed !== null && (dup.sealed === sealed || (tag !== null && dup.content_tag === tag))
-          : dup.sealed === null && dup.text === text && dup.links === JSON.stringify(links) && (dup.choices ?? null) === choicesJson;
+          : dup.sealed === null && dup.text === text && dup.links === JSON.stringify(links) && (dup.choices ?? null) === choicesJson && (dup.thread_id ?? null) === thread.id;
         if ((clientId.startsWith('privacy:') && !ownerWeb && !decision && dup.privacy_request_id !== body.approval) || dup.to_bot !== peer.peer_bot || !sameContent || dup.kind !== kind || (dup.reply_to ?? null) !== replyTo || !!dup.urgent !== !!body.urgent) {
           throw new HttpError(409, 'client_id was already used for a different message');
         }
@@ -874,9 +890,9 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       const same = sealed !== null
         ? q(`SELECT id, status, sealed FROM messages WHERE from_bot = ? AND to_bot = ? AND kind = ? AND content_tag = ? AND coalesce(reply_to, '') = ? AND urgent = ? AND created_at > ?`)
           .get(me.id, peer.peer_bot, kind, tag, replyTo ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs)
-        : q(`SELECT id, status, sealed FROM messages WHERE from_bot = ? AND to_bot = ? AND kind = ? AND sealed IS NULL AND text = ? AND links = ?
-              AND coalesce(reply_to, '') = ? AND coalesce(choices, '') = ? AND urgent = ? AND created_at > ?`)
-          .get(me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo ?? '', choicesJson ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs);
+        : q(`SELECT id, status, sealed, thread_id FROM messages WHERE from_bot = ? AND to_bot = ? AND kind = ? AND sealed IS NULL AND text = ? AND links = ?
+              AND coalesce(reply_to, '') = ? AND coalesce(choices, '') = ? AND urgent = ? AND created_at > ? AND coalesce(thread_id, '') = ?`)
+          .get(me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo ?? '', choicesJson ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs, thread.id ?? '');
       if (same) return answer(same, peer.handle);
     }
     if (q('SELECT count(*) AS n FROM messages WHERE from_bot = ? AND group_id IS NULL AND created_at > ?').get(me.id, t - 3_600_000).n >= L.sendPerHour) throw new HttpError(429, 'sending too fast (hourly limit)');
@@ -889,17 +905,18 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       }
     }
     const id = token('msg_', 9);
+    taskThreads.record(thread, t);
     // Plain messages carry their "ask their bot" topic and "answered by the bot" mark in the open; sealed ones inside the seal.
     const topic = sealed === null && body.topic ? body.topic.trim().toLowerCase() : null;
-    q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag, topic, auto, want)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
+    q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag, topic, auto, want, thread_id, handoff_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
       choicesJson, ownerWeb ? 'web' : 'bot', sealed, sealed !== null ? tag : null, topic, sealed === null && body.auto && kind === 'reply' ? 1 : 0,
-      sealed === null && typeof body.want === 'string' && body.want.trim() ? body.want.trim().slice(0, 160) : null);
+      sealed === null && typeof body.want === 'string' && body.want.trim() ? body.want.trim().slice(0, 160) : null, thread.id, thread.id ? thread.handoff?.id ?? null : null);
     files.attach(fileIds, id);
     if (approval) governance.consumeApproval(approval, id);
     if (replyTo) q('UPDATE messages SET replied_at = ? WHERE id = ?').run(t, replyTo);
     log(me.id, 'sent', { message: id, route: messageRoute(me, recipient), platform: messagePlatform(me), kind, encrypted: sealed !== null, ...(fileIds.length ? { files: fileIds.length } : {}) });
-    return { id, status: 'queued', to: `@${peer.handle}`, encrypted: sealed !== null, recipient_can_be_woken: !!recipient.webhook_url, recipient_uses_web_inbox: recipient.vendor === 'web' };
+    return { id, status: 'queued', to: `@${peer.handle}`, encrypted: sealed !== null, ...(thread.id ? { thread: thread.id } : {}), recipient_can_be_woken: !!recipient.webhook_url, recipient_uses_web_inbox: recipient.vendor === 'web' };
   }
 
   function visibleReply(messageId, botId) {
@@ -1142,6 +1159,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     'GET /v1/me': ({ me }) => ({
       handle: me.handle, display_name: me.display_name,
       platform: me.platform,
+      // What this bot can do with a handoff package, as its contacts' tools see it.
+      profile: capabilityProfile(me),
       doorbell: { configured: !!me.webhook_url, kind: me.doorbell_kind ?? null, needs_routine: needsRoutine(me), needs_watcher: needsWatcher(me), needs_hook: needsHook(me), watching: me.doorbell_kind === 'watch' ? watching(me) : undefined, verified: !!me.doorbell_verified_at, refused: doorbellRefused(me) || undefined, page: publicUrl ? `${publicUrl}/app/bots/${me.id}` : null, verified_at: iso(me.doorbell_verified_at), last_ring_at: iso(me.last_ring_at), last_ring_status: me.last_ring_status },
       inbox_pending: q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status IN ('pending','claimed') AND kind != 'probe'").get(me.id).n,
       // What an inbox claim would get right now (nothing while paused): "b2b wait" polls this, and the watcher checks
@@ -1161,18 +1180,27 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     }),
 
     'POST /v1/invites': ({ me, body }) => {
-      const alias = String(body.alias || '').trim();
+      const emailInput = body.email ?? (String(body.alias || '').includes('@') ? body.alias : null);
+      const email = emailInput === null ? null : inviteAddress(emailInput);
+      if (emailInput !== null && !email) throw new HttpError(400, 'That email address looks wrong.');
+      if (email && !me.user_id) throw new HttpError(400, 'Email invites need an owner account to review and send them.');
+      const alias = email && (!body.alias || body.alias === emailInput) ? email.split('@')[0].replace(/[^\p{L}\p{N} ._-]/gu, '').replace(/^[^\p{L}\p{N}]+/u, '').slice(0, 32) || 'friend' : String(body.alias || '').trim();
       if (!ALIAS_RE.test(alias)) throw new HttpError(400, 'alias must be 1-32 letters/numbers (e.g. "anna")');
       if (q('SELECT 1 FROM contacts WHERE owner_bot = ? AND lower(alias) = lower(?)').get(me.id, alias)) throw new HttpError(409, `you already have a contact called "${alias}"`);
       const open = q('SELECT count(*) AS n FROM invites WHERE from_bot = ? AND used_at IS NULL AND expires_at > ?').get(me.id, clock()).n;
       if (open >= 10) throw new HttpError(429, 'too many open invites');
       const basket = governance.basketName(me.id, body.basket);
       const notes = inviteNotes(body.notes);
+      if (body.group && !email) throw new HttpError(400, 'Use an email address for a combined contact and group invite.');
+      const inviteGroup = body.group ? groups.resolve(me, String(body.group)) : null;
+      const groupLink = inviteGroup ? groups.link(me, inviteGroup.id) : null;
       const code = humanCode();
       q('INSERT INTO invites (code_hash, from_bot, alias, expires_at, by_owner, basket, notes) VALUES (?, ?, ?, ?, 0, ?, ?)').run(sha(code), me.id, alias, clock() + L.inviteTtlMs, basket, notes);
+      if (email) q('UPDATE invites SET recipient_email = ?, plain_code = ?, created_at = ?, saved_at = ? WHERE code_hash = ?').run(email, code, clock(), clock(), sha(code));
+      if (groupLink) q('UPDATE invites SET group_code = ? WHERE code_hash = ?').run(groupLink.link.split('/').at(-1), sha(code));
       log(me.id, 'invite_created', { by: 'bot' });
       const link = `${publicUrl}/i/${code}`;
-      return { code, alias, link, message: inviteMessage(link), expires_at: iso(clock() + L.inviteTtlMs), owner_must_approve: !!me.user_id, ...(basket ? { basket } : {}) };
+      return { code, alias, link, message: inviteMessage(link), expires_at: iso(clock() + L.inviteTtlMs), owner_must_approve: !!me.user_id, ...(basket ? { basket } : {}), ...(email ? { email, email_status: 'draft', review_at: `${publicUrl}/app/invites/${code}` } : {}) };
     },
 
     // A contact only becomes usable when each side's human owner has said yes. An owner says yes by
@@ -1186,6 +1214,11 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       if (fails >= L.acceptFailuresPerHour) throw new HttpError(429, 'too many wrong invite codes; try again in an hour');
       const inv = q('SELECT * FROM invites WHERE code_hash = ?').get(sha(code));
       if (!inv || inv.used_at || inv.expires_at < clock()) { failedAccept = me.id; throw new HttpError(400, 'invite code is invalid, used or expired'); }
+      if (inv.recipient_email) {
+        const recipient = me.user_id && q('SELECT email, email_verified_at FROM users WHERE id = ?').get(me.user_id);
+        if (!recipient?.email_verified_at || recipient.email.toLowerCase() !== inv.recipient_email) throw new HttpError(403, 'Sign in with the email address this invite was sent to.');
+      }
+      if (inv.group_code && !byOwner) throw new HttpError(403, `Your owner connects and joins the group here: ${publicUrl}/i/${code}`);
       if (inv.from_bot === me.id) throw new HttpError(400, 'you cannot accept your own invite');
       const paired = contact(me.id, inv.from_bot);
       if (paired && me.user_id && q('SELECT user_id FROM bots WHERE id = ?').get(inv.from_bot)?.user_id === me.user_id) throw new HttpError(409, `that's another of your owner's bots; you can already message it as "${paired.alias}" (no invite needed)`);
@@ -1213,6 +1246,11 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       // What each owner said about the other while inviting or accepting goes to their own bot, as notes.
       if (inv.notes) q('UPDATE contacts SET notes = ? WHERE owner_bot = ? AND peer_bot = ?').run(inv.notes, inv.from_bot, me.id);
       if (notes) q('UPDATE contacts SET notes = ? WHERE owner_bot = ? AND peer_bot = ?').run(notes, me.id, inv.from_bot);
+      if (inv.group_code) {
+        const groupLink = groups.linkByCode(inv.group_code);
+        if (!groupLink) throw new HttpError(410, 'This group link has expired.');
+        groups.join(me, groupLink.group_id, { linkCode: inv.group_code, basket, byOwner: true, inTransaction: true });
+      }
       log(me.id, 'paired', { with: inviter.handle, by: byOwner ? 'owner' : 'bot', waiting: [!mineOk && 'me', !inviterOk && 'them'].filter(Boolean) });
       return { paired_with: `@${inviter.handle}`, inviter_name: inviter.display_name, your_alias_for_them: alias, ...(basket ? { basket } : {}),
         waiting_for_your_owner: !mineOk, waiting_for_them: !inviterOk,
@@ -1245,10 +1283,12 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       return {
         handle: me.handle,
         try_founder: tryFounder(me),
-        contacts: q(`SELECT c.*, b.handle, b.display_name, b.vendor, b.user_id AS peer_user, b.sign_pub, b.box_pub, b.keys_at, c.codes_compared_at, c.privacy_on, c.can_ask, back.can_ask AS they_let_me_ask, c.blocked, c.approved_at, back.approved_at AS their_ok, b.webhook_url IS NOT NULL AS has_doorbell
+        contacts: q(`SELECT c.*, b.handle, b.display_name, b.vendor, b.user_id AS peer_user, b.sign_pub, b.box_pub, b.keys_at, c.codes_compared_at, c.privacy_on, c.can_ask, back.can_ask AS they_let_me_ask, c.blocked, c.approved_at, back.approved_at AS their_ok, b.webhook_url IS NOT NULL AS has_doorbell, b.platform AS peer_platform
                      FROM contacts c JOIN bots b ON b.id = c.peer_bot LEFT JOIN contacts back ON back.owner_bot = c.peer_bot AND back.peer_bot = c.owner_bot
                      WHERE c.owner_bot = ? ORDER BY c.alias`).all(me.id)
           .map((c) => ({ alias: c.alias, handle: `@${c.handle}`, display_name: c.display_name, ...(me.user_id && c.peer_user === me.user_id ? { your_own_bot: true } : {}), blocked: !!c.blocked, owner_approves_first: governance.inPilot(me) ? governance.effectiveMode(c) === 'asks' : !!c.privacy_on, can_wake: !!c.has_doorbell,
+            // What their bot can do with a handoff package (files, repos, the tool), never which app it is.
+            profile: capabilityProfile({ vendor: c.vendor, platform: c.peer_platform }),
             uses: c.vendor === 'web' ? 'web_inbox' : c.vendor === 'connector' ? 'connected_app' : 'bot', keys: c.box_pub ? { sign: c.sign_pub, box: c.box_pub } : null, keys_since: iso(c.keys_at), codes_compared: !!c.codes_compared_at,
             may_ask_you_about: JSON.parse(c.can_ask || '[]'), you_may_ask_about: JSON.parse(c.they_let_me_ask || '[]'),
             ...(files.isOn(me) ? { files: files.whyNot(c.peer_bot, sendsFiles(c) ? me.id : null) ?? 'yes' } : {}),
@@ -1311,12 +1351,16 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       return result;
     },
 
+    'GET /v1/threads/:thread': ({ me, params, url }) => taskThreads.history(me, params.thread, url),
+    'POST /v1/threads/:thread/close': ({ me, params }) => taskThreads.close(me, params.thread),
+
     'GET /v1/messages/:id': ({ me, params }) => {
       const m = q('SELECT m.*, f.handle AS from_handle, t.handle AS to_handle, t.last_ring_status AS to_ring_status, t.paused_at AS to_paused, t.vendor AS to_vendor, t.user_id AS to_user FROM messages m JOIN bots f ON f.id = m.from_bot JOIN bots t ON t.id = m.to_bot WHERE m.id = ?').get(params.id);
       if (!m || (m.from_bot !== me.id && m.to_bot !== me.id)) throw new HttpError(404, 'message not found');
       const reply = visibleReply(m.id, me.id);
       return {
         id: m.id, from: `@${m.from_handle}`, to: `@${m.to_handle}`, kind: m.kind, encrypted: !!m.sealed, reply_to: m.reply_to,
+        ...(!m.sealed && m.thread_id ? { thread: m.thread_id } : {}),
         status: messageState(m, { replied: !!reply, quiet: !!(m.to_user && quietUntil(q('SELECT * FROM users WHERE id = ?').get(m.to_user), clock())), notAnsweringAfterRings: L.notAnsweringAfterRings }),
         choices: m.choices && !m.body_purged_at && (m.from_bot === me.id || m.status === 'delivered') ? JSON.parse(m.choices) : undefined,
         created_at: iso(m.created_at), first_rung_at: iso(m.first_rung_at), ring_count: m.ring_count,
@@ -1332,11 +1376,11 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       // The last 10 by default; the evening summary asks for up to 7 days (?days=7), at most 100.
       const days = Math.min(7, Math.max(0, Number(url.searchParams.get('days')) || 0));
       const since = days ? clock() - days * 86_400_000 : 0, limit = days ? 100 : 10;
-      const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.want, m.sealed, m.reply_to, m.created_at, m.replied_at, m.group_id, c.alias, b.handle, b.sign_pub, b.box_pub FROM messages m
+      const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.want, m.sealed, m.thread_id, m.reply_to, m.created_at, m.replied_at, m.group_id, c.alias, b.handle, b.sign_pub, b.box_pub FROM messages m
                       JOIN bots b ON b.id = m.from_bot LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot
                       WHERE m.to_bot = ? AND m.kind NOT IN ('probe', 'group_event') AND m.status = 'delivered' AND m.created_at >= ? ${peer ? 'AND m.from_bot = ? AND m.group_id IS NULL' : ''}
                       ORDER BY m.created_at DESC LIMIT ?`).all(...(peer ? [me.id, since, peer.peer_bot] : [me.id, since]), limit);
-      return { messages: rows.map((m) => ({ id: m.id, from: m.alias ?? `@${m.handle}`, from_handle: `@${m.handle}`, kind: m.kind, ...(m.group_id ? { group: m.group_id } : {}), reply_to: m.reply_to, text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), want: m.sealed ? undefined : m.want ?? undefined, sealed: m.sealed ?? undefined, ...(m.group_id && m.sealed && m.box_pub ? { from_keys: { sign: m.sign_pub, box: m.box_pub } } : {}), files: m.sealed ? undefined : files.chatFor(m.id), at: iso(m.created_at), replied: !!m.replied_at })) };
+      return { messages: rows.map((m) => ({ id: m.id, from: m.alias ?? `@${m.handle}`, from_handle: `@${m.handle}`, kind: m.kind, ...(!m.sealed && m.thread_id ? { thread: m.thread_id } : {}), ...(m.group_id ? { group: m.group_id } : {}), reply_to: m.reply_to, text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), want: m.sealed ? undefined : m.want ?? undefined, sealed: m.sealed ?? undefined, ...(m.group_id && m.sealed && m.box_pub ? { from_keys: { sign: m.sign_pub, box: m.box_pub } } : {}), files: m.sealed ? undefined : files.chatFor(m.id), at: iso(m.created_at), replied: !!m.replied_at })) };
     },
 
     'GET /v1/sent': ({ me }) => ({
@@ -1361,11 +1405,11 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       // Re-check permission at delivery time: messages from contacts blocked since sending are dropped, and group
       // messages to someone no longer in the group. The relay's own notices about a group (an invite, "an admin
       // removed you", "the group was ended") still reach whoever they're for.
-      erase(`to_bot = ? AND status = 'pending' AND kind != 'probe' AND (created_at <= ?
+      erase(`to_bot = ? AND status = 'pending' AND kind != 'probe' AND ((created_at <= ? AND (thread_id IS NULL OR thread_id NOT IN (SELECT id FROM task_threads WHERE expires_at > ?)))
          OR from_bot IN (SELECT peer_bot FROM contacts WHERE owner_bot = ? AND blocked = 1)
          OR from_bot IN (SELECT owner_bot FROM contacts WHERE peer_bot = ? AND blocked = 1)
          OR (group_id IS NULL AND NOT EXISTS (SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = messages.from_bot))
-         OR (group_id IS NOT NULL AND kind != 'group_event' AND NOT EXISTS (SELECT 1 FROM group_members g WHERE g.group_id = messages.group_id AND g.bot_id = messages.to_bot AND g.state = 'joined')))`, me.id, t - L.undeliveredExpiryMs, me.id, me.id, me.id);
+         OR (group_id IS NOT NULL AND kind != 'group_event' AND NOT EXISTS (SELECT 1 FROM group_members g WHERE g.group_id = messages.group_id AND g.bot_id = messages.to_bot AND g.state = 'joined')))`, me.id, t - L.undeliveredExpiryMs, t, me.id, me.id, me.id);
       // Messages held because the sender's key changed stay put until the owner trusts the new key.
       const rows = q(`SELECT m.*, b.handle AS from_handle, b.user_id AS from_user, b.sign_pub AS from_sign, b.box_pub AS from_box, c.alias AS from_alias, u.name AS from_person, u.email_verified_at AS from_verified, g.name AS group_name FROM messages m
                       JOIN bots b ON b.id = m.from_bot LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot LEFT JOIN users u ON u.id = b.user_id LEFT JOIN chat_groups g ON g.id = m.group_id
@@ -1393,6 +1437,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
           id: m.id, lease: m.lease, kind: m.kind, from: m.kind === 'probe' ? 'b2b relay' : (m.from_alias ?? `@${m.from_handle}`), from_handle: `@${m.from_handle}`,
           ...(m.group_id ? { group: { id: m.group_id, name: m.group_name }, mentions_you: !!m.mentioned || undefined, contact: !!m.from_alias } : {}),
           text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links), reply_to: m.reply_to, urgent: !!m.urgent,
+          ...(!m.sealed && m.thread_id ? { thread: m.thread_id } : {}),
           sealed: m.sealed ?? undefined, from_keys: m.sealed && m.from_box ? { sign: m.from_sign, box: m.from_box } : undefined,
           files: m.sealed ? undefined : files.chatFor(m.id),
           topic: m.topic ?? undefined, auto: m.auto ? true : undefined, want: m.want ?? undefined,
@@ -1673,6 +1718,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   const groups = createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files,
     allowanceLeft: (me, t) => { if (!hosted || me.vendor === 'web') return null; const a = allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me, t); return a.limited ? a.left : null; },
     kick: () => setImmediate(() => { void tick(); }), needTool: updates.need });
+  const groupBrowser = createGroupBrowserHistory({ q, tx, clock, token, groups, HttpError });
+  Object.assign(routes, groupBrowser.routes);
   Object.assign(routes, groups.routes);
   Object.assign(routes, files.routes);
   Object.assign(routes, status.routes);
@@ -1725,7 +1772,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     return missing.length;
   }
   linkOwnBots();
-  const handleApp = createApp({ originFor, aliasUrls: aliases, analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
+  const handleApp = createApp({ originFor, aliasUrls: aliases, analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, groupBrowser, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
     decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, status, files, toolInfo, channelFor, toolTooOld, privateDoorbell, renameBot, latestUpdate, board, feedbackTo, markActive, usage, hostedAdmin, payments, invites, hostedInvites: invites ? hostedInvites : null, adminEmails, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, watching, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   const probeHash = probeToken ? sha(probeToken) : null;

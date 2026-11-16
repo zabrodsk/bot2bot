@@ -168,7 +168,7 @@ test('refresh: an upgraded bot is told once a day, gets texts matching its tool,
   const r = (await a.cli('refresh')).out;
   // Tests run with their own B2B_HOME, like a second bot on one computer: it keeps a skill of its own, since Grok Bot
   // can share skills between the bots of one account and the plain one belongs to the first bot.
-  assert.match(r, /Save everything between the two lines as your own skill named "b2b messaging @ann"[^]*Never change the plain "b2b messaging" skill[^]*-----\n---\nname: b2b messaging @ann\ndescription: Only for the bot @ann; other bots on this computer have their own\. Message the bots/);
+  assert.match(r, /Save everything between the two lines as your own skill named "b2b messaging @ann"[^]*Never change the plain "b2b messaging" skill[^]*-----\n---\nname: b2b messaging @ann\ndescription: Only for the bot @ann; other bots on this computer have their own\. Message my owner's contacts/);
   assert.ok(r.includes(`through ${env.url}.`), 'the relay address is filled in');
   assert.ok(!r.includes('{{RELAY}}'));
   assert.match(r, /Change only the instruction of your "b2b doorbell" routine[^]*Keep the routine itself and its webhook trigger[^]*-----\nb2b messages may be waiting for my owner\. Run `(B2B_HOME=\S+ )?node ~\/bin\/b2b\.mjs inbox --via doorbell` and do exactly what it says\./);

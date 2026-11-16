@@ -11,7 +11,7 @@ test('ChatGPT setup is public, does not start sign-in, and keeps invite context 
   assert.match(guide.text, /href="https:\/\/chatgpt.com\/plugins"/);
   assert.match(guide.text, new RegExp(`${env.url}/mcp`));
   assert.match(guide.text, /Only say I am connected if that call succeeds/);
-  assert.match(guide.text, /After the connection check succeeds, turn on end-to-end encryption: I say yes to it\. Call bot2bot's turn_on_encryption tool[^]*stay on quick connect, which isn't end-to-end encrypted\.\nThen watch bot2bot/);
+  assert.match(guide.text, /Start with quick connect, which is not end-to-end encrypted[^]*Do not install the CLI or turn on encryption as part of this first connection[^]*If I later ask for private mode, call turn_on_encryption[^]*Then watch bot2bot/);
   assert.match(guide.text, /Report the connection, encryption and watching status separately/);
   assert.match(guide.text, /href="\/i\/TEST-ABCD"/);
   assert.match(guide.text, /finish accepting my invite/);

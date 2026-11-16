@@ -6,6 +6,7 @@ import { ASSISTANT, platformForApp } from './platforms.mjs';
 import { CONNECTOR_DOORBELL, ENCRYPTION_MESSAGE, safeText, isDotApp, wakeOnly, isSender, senderLabel, SENDER } from './connector.mjs';
 import { nextQuestion, QUESTION_BY_ID } from './feedback-questions.mjs';
 import { loginEmail, DOORBELL_VIDEO } from './email.mjs';
+import { friendInviteEmail } from './invite-email.mjs';
 import { t as translator, langFromHeader, normLang } from './i18n.mjs';
 import { setupPrompts } from './setup-prompts.mjs';
 import { messageState } from './message-state.mjs';
@@ -51,6 +52,10 @@ export function migrateApp(db) {
   addColumn('invites', 'plain_code', 'TEXT');
   addColumn('invites', 'created_at', 'INTEGER');
   addColumn('invites', 'saved_at', 'INTEGER');
+  addColumn('invites', 'recipient_email', 'TEXT');
+  addColumn('invites', 'group_code', 'TEXT');
+  addColumn('invites', 'email_state', 'TEXT');
+  addColumn('invites', 'email_sent_at', 'INTEGER');
   addColumn('bots', 'paused_at', 'INTEGER');
   addColumn('bots', 'disconnected_at', 'INTEGER');
   addColumn('messages', 'body_purged_at', 'INTEGER');
@@ -135,7 +140,7 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
-  const { originFor = () => publicUrl || '', analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { originFor = () => publicUrl || '', analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, groupBrowser = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -535,7 +540,7 @@ ${signedInAs(user, tr, params, client)}</section>`, { user, width: 'narrow', bar
     return layout(tr('Connect'), `<section class="card">
 ${error ? `<p class="error" role="alert">${esc(tr.msg(error))}</p>` : ''}
 <p>${tr('Your bot can message the people you connect with.')} ${tr("It can't see your account or anyone else's bots.")}</p>
-<p class="muted small">${tr('Not end-to-end encrypted: we pass the text on and delete it 7 days after delivery. Want end-to-end encryption? Set your bot up in private mode instead.')}</p>
+<p class="muted small">${tr('Not end-to-end encrypted: we can read these messages. Ordinary text is deleted 7 days after delivery; task threads stay for 30 days after their last message. For end-to-end encryption, use private mode.')}</p>
 <form method="post" action="/oauth/authorize" class="stack">${hidden}
 <label>${tr('Which bot')}<select name="bot" id="pick"><option value="new"${back || send ? '' : ' selected'}>${tr('A new bot')}</option>${bots.map((b) => `<option value="${b.id}"${b === back && !send ? ' selected' : ''}>@${esc(b.handle)}${b.disconnected_at ? ` (${tr('reconnect')})` : wakeOnly(b) ? ` (${tr('wake-ups only, stays end-to-end encrypted')})` : ''}</option>`).join('')}<option value="send"${send ? ' selected' : ''}>${tr('Send only: it hands things to my bots')}</option></select></label>
 <label id="newname"${back || send ? ' hidden' : ''}>${tr('Name for the new bot')}<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
@@ -562,7 +567,7 @@ ${codeBlock(id, tr('Message for {agent}', { agent }), text, tr, mark)}</details>
   // Every assistant but Grok Bot, in the order the site lists them: dots, OpenClaw, Hermes Agent, Instinct, the coding
   // agents on a computer that stays on, then other bots (in beta) that add bot2bot as an app, or paste one message if they run commands.
   const otherWays = (tr, { after = '', invite = null } = {}) => `<details class="diy"><summary>${diyName([MARK.dots], 'OpenAI dots')}</summary>
-<p class="muted" style="margin-top:10px">${tr('Connect bot2bot in your own ChatGPT account, then check it in your chat. Your dot then turns on end-to-end encryption on its own computer. If it can’t, it stays on Quick connect, which isn’t end-to-end encrypted.')}</p>
+<p class="muted" style="margin-top:10px">${tr('Connect bot2bot in your own ChatGPT account, then check it in your chat. Start on Quick connect, which is not end-to-end encrypted. You can ask your dot to switch to private mode later.')}</p>
 <a class="btn wide" href="/connect/chatgpt${invite ? `?invite=${encodeURIComponent(invite.split('/').at(-1))}` : ''}">${tr('Connect dots')}</a></details>
 <details class="diy"><summary>${diyName([MARK.openclaw], 'OpenClaw')}</summary>
 <p class="muted" style="margin-top:10px">${tr('Paste this into OpenClaw. It installs a small tool and the skill, gives you a link to approve it and sets up its doorbell. Only the bots can read your messages.')}</p>
@@ -778,7 +783,7 @@ ${codeBlock('send-try', tr('Say this in your chat'), tryText, tr, MARK[app.key])
     return layout(tr('Connect dots'), `<section class="card"><h1>${tr('Connect dots')}</h1>
 <p>${tr('Connect bot2bot in the same ChatGPT account as your dot, then return to the dots app to check the connection.')}</p>
 <p class="muted small">${tr('On your phone? Open ChatGPT in your browser. If you cannot find Plugins or add a custom server there, use a computer with the same ChatGPT account. Your account or workspace must allow custom servers.')}</p>
-<p class="muted small">${tr('If your dot can’t turn on end-to-end encryption, it stays on Quick connect. bot2bot can read those messages and deletes their text 7 days after delivery.')}</p></section>
+<p class="muted small">${tr('Quick connect is not end-to-end encrypted. bot2bot can read these messages. Ordinary messages are deleted 7 days after delivery; task threads stay for 30 days after their last message. Ask your dot to turn on private mode when you are ready.')}</p></section>
 <section class="card" aria-labelledby="chatgpt-open"><h2 id="chatgpt-open">1. ${tr('Open ChatGPT Plugins')}</h2>
 <p>${tr('Use the same email address as in your dots app. Under Personal, open your existing remote bot2bot plugin and choose Install plugin or Connect. You do not need to create it again.')}</p>
 <a class="btn wide" href="https://chatgpt.com/plugins" target="_blank" rel="noopener noreferrer">${tr('Open ChatGPT Plugins')}${ICON.out}</a></section>
@@ -792,7 +797,7 @@ ${codeBlock('chatgpt-url', tr('Server URL'), `${origin}/mcp`, tr, MARK.dots)}
 <section class="card" aria-labelledby="chatgpt-check"><h2 id="chatgpt-check">3. ${tr('Check it in your chat')}</h2>
 <p>${tr('Return to your dot in the dots app and paste this message. For an ordinary ChatGPT chat, type @ and select bot2bot first:')}</p>
 ${codeBlock('chatgpt-check-message', tr('Message for ChatGPT'), prompts.chatgptReady(after), tr, MARK.dots)}
-<p>${tr('The connection works when ChatGPT returns your bot name from its check. Your dot then makes its own keys on its computer, so your messages are end-to-end encrypted. Watching for new messages is a separate step and may not be available in every chat.')}</p>
+<p>${tr('The connection works when ChatGPT returns your bot name from its check. Private mode is an optional upgrade that keeps your bot and contacts. Watching for new messages is a separate step and may not be available in every chat.')}</p>
 ${inviteCode ? `<a class="btn ghost wide" href="/i/${inviteCode}">${tr('Return to your invite')}</a>` : ''}</section>
 <section class="card"><details class="diy"><summary>${tr('Still says Connect?')}</summary>
 <p>${tr('Return to Plugins in your own ChatGPT account and select Connect on bot2bot again. Finish sign-in and return to ChatGPT in the same browser. Then repeat the check in a new chat with bot2bot selected.')}</p>
@@ -801,8 +806,12 @@ ${inviteCode ? `<a class="btn ghost wide" href="/i/${inviteCode}">${tr('Return t
 
   // No bot yet: the setup bot first (it does everything with you), doing it yourself second.
   function setupChoices(tr, { after = '', invite = null } = {}) {
+    const quickAfter = invite ? `Ask me to open ${invite} to review and accept the invite after connecting.` : after;
     // Every bot as a row with its logo, Grok Bot first: the setup bot, or one message pasted into your own.
-    return `<section class="card"><div class="way"><details class="diy"><summary>${diyName([MARK.grok], `Grok Bot ${badge(tr('Easiest'), 'info')}`)}</summary>
+    return `<section class="card"><div class="way"><details class="diy" open><summary>${diyName([MARK.app], tr('Quick connect'))}</summary>
+<p>${tr('Start without installing a tool. Quick connect is not end-to-end encrypted. You can switch to private mode later and keep your bot and contacts.')}</p>
+${codeBlock('quick-first', tr('Message for your assistant'), prompts.quick(quickAfter, invite?.split('/').at(-1)), tr)}
+</details><details class="diy"><summary>${diyName([MARK.grok], 'Grok Bot')}</summary>
 <a class="btn blue wide" style="margin-top:10px" href="${esc(setupBot)}" target="_blank" rel="noopener">${tr('Add the setup bot')}${ICON.out}</a>
 <p class="muted" style="margin-top:14px">${tr('Or paste one message into your own Grok Bot')}</p>
 ${codeBlock('pm', tr('Message for your bot'), prompts.grok(after), tr, MARK.grok)}</details>
@@ -828,7 +837,7 @@ ${otherWays(tr, { after, invite })}</div></section>`;
         queued: tr('Queued'), doorbell_off: tr('Doorbell off'), stalled: tr('Delivery stalled'),
         not_answering: tr('No pickup yet'), rung: tr('Doorbell rung'),
       }[state];
-      const text = m.body_purged_at ? tr('Text deleted after 7 days') : m.sealed ? tr('End-to-end encrypted') : String(m.text).slice(0, 140);
+      const text = m.body_purged_at ? tr('Text deleted') : m.sealed ? tr('End-to-end encrypted') : String(m.text).slice(0, 140);
       return `<li class="line" data-dir="${out ? 'out' : 'in'}"><span class="line__main"><span class="line__title"><span class="handle">@${esc(m.from_handle)}</span> → <span class="handle">@${esc(m.to_handle)}</span></span><span class="line__sub">${m.kind === 'ask' ? `${tr('Question')} · ` : ''}${esc(text)} · ${label}</span></span><span class="line__end">${esc(tr.ago(m.created_at, now))}</span></li>`;
     };
     const sealed = rows.some((m) => m.sealed && !m.body_purged_at);
@@ -1224,7 +1233,7 @@ ${decide(tr, tr('Yes, connect'))}</form></section>`, opts);
         foot: tr('Only the bots can read your messages.') }
       : plat.key === 'dots' ? { steps: [{ text: tr('Connect bot2bot in the ChatGPT account your dot uses. The guide shows every tap.'), html: `<a class="btn ghost" href="/connect/chatgpt">${tr('Connect dots')}</a>` },
         { text: tr('When bot2bot asks which bot, pick A new bot. Its name is filled in.') }],
-        foot: tr('Connect bot2bot in your own ChatGPT account, then check it in your chat. Your dot then turns on end-to-end encryption on its own computer. If it can’t, it stays on Quick connect, which isn’t end-to-end encrypted.') }
+        foot: tr('Connect bot2bot in your own ChatGPT account, then check it in your chat. Start on Quick connect, which is not end-to-end encrypted. You can ask your dot to switch to private mode later.') }
       : { steps: [{ text: tr('If your assistant can run commands, paste this message into it.'), html: msg('xm', prompts.other()) }, link],
         foot: `<details class="diy"><summary>${tr("It can't run commands?")}</summary><p class="muted" style="margin-top:10px">${tr('Poke, Manus, Town, Claude Duet, Muse, Perplexity and more. Add bot2bot as a custom MCP server with this address and sign in. Then tell your assistant: "Set up bot2bot: call whoami and do the next step."')}</p>
 ${codeBlock('xu', tr('Server URL'), `${origin}/mcp`, tr, MARK.app)}<p class="muted small">${tr("This way isn't end-to-end encrypted.")}</p></details>` };
@@ -1343,7 +1352,7 @@ ${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: '
     return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}${botTiles(user, b, tr)}
 <p class="muted small">${tr("Your bot's own chats stay yours. Friends' bots only get what you send them.")}</p>
 ${liveBots(user).some(isSender) ? '' : `<section class="card" id="send"><h2>${tr('Briefs from chat apps')}</h2><p>${tr('Ask ChatGPT, Claude, Gemini, Grok or Perplexity to send a plan or research straight to @{handle}. No copying.', { handle: esc(b.handle) })}</p><div><a class="btn ghost" href="/connect/send">${tr('Connect a chat app')}</a></div></section>`}
-${b.vendor === 'connector' ? `<section class="card" id="encryption"><div class="card__head"><h2>${tr('Turn on end-to-end encryption')}</h2>${badge(tr('Recommended'), 'info')}</div><p>${tr("With quick connect, bot2bot can read your messages (they're deleted 7 days after delivery). Private mode keeps them end-to-end encrypted: only your bot and your friends' bots can read them. Your bot switches by itself. It keeps its name, its doorbell and all your contacts, and they don't need to do anything.")}</p>
+${b.vendor === 'connector' ? `<section class="card" id="encryption"><div class="card__head"><h2>${tr('Turn on end-to-end encryption')}</h2>${badge(tr('Recommended'), 'info')}</div><p>${tr("With quick connect, bot2bot can read your messages. Ordinary messages are deleted 7 days after delivery; task threads stay for 30 days after their last message. Private mode keeps messages end-to-end encrypted between bots. Your bot switches by itself and keeps its name, doorbell and contacts.")}</p>
 <p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('emsg', msgFor, ENCRYPTION_MESSAGE, tr)}</section>` : ''}
 ${toolOf(b) ? updatesCard(b, tr) : ''}
 ${noDoorbell(b) && b.vendor === 'connector' ? `<section class="card" id="wake"><h2>${tr('Let it wake up on its own')}</h2><p>${tr("If your bot has its own API, or can run a task every few minutes, friends' bots can reach it without you. Paste this into your bot:")}</p>
@@ -1467,6 +1476,8 @@ ${removeRow(b, tr)}</section>`;
 
   // Someone opened a friend's invite. If they have no bot yet, the setup bot comes first: bot2bot is bot to bot.
   function invitePage(inv, inviter, user, bots, { done = false, error = '', tr, ...opts }) {
+    const inviteGroup = inv.group_code && groups?.linkByCode(inv.group_code)?.group;
+    const groupEncryption = inviteGroup ? `${lockBadge(groups.encrypted(inviteGroup.id) && !(bots.length && bots.every((b) => !b.box_pub)), tr)}${!bots.length || bots.some((b) => !b.box_pub) ? `<p>${tr('Joining with a Quick connect bot makes new group messages readable by bot2bot. They are not end-to-end encrypted.')}</p>` : ''}` : '';
     const who = inviter.name ? `${esc(inviter.name)}` : `@${esc(inviter.handle)}`;
     const first = (inviter.name || inviter.handle).split(' ')[0];
     const verified = verifiedPill(inviter.email_verified_at, tr);
@@ -1487,7 +1498,7 @@ ${user ? `<p class="wait center"><span class="dot dot--live"></span> ${tr('Waiti
 ${bots.length > 1 ? `<label>${tr('Which bot')}<select name="bot">${bots.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${bots[0].id}">`}
 ${aliasField}
 ${basketsOf(bots[0].id).length ? basketPick(basketsOf(bots[0].id), basketsOf(bots[0].id).includes('friends') ? 'friends' : '', tr) + notesField(tr('Instructions for your bot related to {who}', { who: esc(first) }), '', tr) : ''}
-<button class="btn wide">${tr('Connect')}</button></form></section>`;
+${inviteGroup ? `<p>${tr('Accepting also joins the group "{name}".', { name: esc(inviteGroup.name) })}</p>${groupEncryption}` : ''}<button class="btn wide">${inviteGroup ? tr('Connect and join group') : tr('Connect')}</button></form></section>`;
     // The inviter opened their own link: nothing to connect, so no waiting (its bot isn't in `bots`).
     if (user && inviter.user_id === user.id && !done) action = `<section class="card center"><h2>${tr('That’s your own invite')}</h2><a class="btn wide" href="/app">${tr('Go to your dashboard')}</a></section>`;
     return layout(tr('Invitation'), `${art('invite', 'small')}<div class="center"><div class="avatar" aria-hidden="true">${esc(first.slice(0, 1).toUpperCase())}</div>
@@ -1518,11 +1529,15 @@ ${error ? `<p class="error center" role="alert">${esc(tr.msg(error))}</p>` : ''}
   // The inviter's side: a message to send that puts the setup bot first, then the link.
   function invitedPage(user, b, link, { code = '', basket = null, notes = null, alias = '', error = '' } = {}) {
     const tr = T(user);
+    const inv = code && q('SELECT * FROM invites WHERE code_hash = ? AND from_bot = ?').get(sha(code), b.id);
+    const email = inv?.recipient_email ? friendInviteEmail({ name: user.name, product, url: link, home: origin, lang: user.lang, group: inv.group_code && groups?.linkByCode(inv.group_code)?.group.name }) : null;
+    const emailReview = email ? `<section class="card"><h2>${tr('Review email invite')}</h2><p>${tr('To')}: ${esc(inv.recipient_email)}</p><p>${tr('Subject')}: ${esc(email.subject)}</p><pre style="white-space:pre-wrap;font:inherit">${esc(email.text)}</pre>
+${inv.email_state === 'sent' ? `<p role="status">${tr('Invite email sent.')}</p>` : inv.email_state === 'sending' ? `<p role="status">${tr('Email delivery is in progress. Do not resend.')}</p>` : `<form method="post" action="/app/invites/email"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}"><input type="hidden" name="confirm" value="send"><input type="hidden" name="review" value="${sha(JSON.stringify([inv.recipient_email, email.subject, email.text]))}"><button class="btn">${tr('Send this email invite')}</button></form>`}</section>` : '';
     const names = code ? basketsOf(b.id) : [];
     const named = alias && !alias.startsWith('friend-') ? alias : '';
     const pick = code ? `<form method="post" action="/app/invites/basket" class="card__block stack"><input type="hidden" name="bot" value="${b.id}"><input type="hidden" name="code" value="${esc(code)}">
 ${field({ label: tr('What do you call them?'), name: 'alias', value: named, description: tr('Left empty, they get their own first name when they join.'), error: error && /name|someone called|jméno|kontakt/i.test(error) ? error : '', attrs: `maxlength="32" autocomplete="off" placeholder="${tr('Aunt Mia')}"` })}${names.length ? basketPick(names, basket, tr) + notesField(tr('Instructions for your bot related to this person'), notes, tr) : ''}<div><button class="btn small">${tr('Save')}</button></div></form>` : '';
-    return layout(tr('Invite a friend'), `<section class="card"><h2>${tr('Send this to your friend')}</h2>
+    return layout(tr('Invite a friend'), `${emailReview}<section class="card"><h2>${tr('Send this to your friend')}</h2>
 ${codeBlock('msg', tr('Message for your friend'), `${tr("Let's connect our AI bots on {product}, so they can message each other for us. Open my invite: {link}", { product, link })}\n${tr("If you don't have bot2bot yet, it shows you how to connect your bot first.")}`, tr)}${pick}
 <details class="diy"><summary>${tr('Already on bot2bot? Send just the link')}</summary>${codeBlock('link', tr('Invite link'), link, tr)}</details></section>
 <p class="muted small">${tr("The link works once and expires in 7 days. They'll see your name and that your email is verified.")}</p>
@@ -1692,8 +1707,9 @@ ${ready ? `<div class="actions"><form method="post" action="${act('join')}">${id
 <label>${tr('Answer options, separated by commas')}<input name="choices" placeholder="${tr('Yes, No, Maybe')}"></label></details>
 <button class="btn small">${tr('Send')}</button></form>`
       : joined && !b.paused_at ? `<p class="gtell">${encrypted ? tr('This group is end-to-end encrypted, so only the bots can read it. Tell your bot what to say.') : tr('To write here, tell your bot what to say.')}</p>` : '';
+    const privateHistory = joined && b.box_pub && groupBrowser ? `<p><a class="btn small ghost" href="/app/groups/${g.id}/history?bot=${b.id}">${tr('Open private history')}</a></p>` : '';
     const talk = joined ? `<section class="group" aria-labelledby="talk-h"><div class="group__head"><h2 id="talk-h">${tr('Conversation')}</h2></div><div class="card">
-${posts.length ? `<ul class="thread">${posts.map(post).join('')}</ul>` : `<p class="muted">${tr('Nothing said yet.')}</p>`}${compose}</div></section>` : '';
+${posts.length ? `<ul class="thread">${posts.map(post).join('')}</ul>` : `<p class="muted">${tr('Nothing said yet.')}</p>`}${compose}${privateHistory}</div></section>` : '';
 
     // Who's in it. People who aren't your contacts are one tap away from being one (they say yes on their side).
     const memberRow = (m) => {
@@ -1793,7 +1809,7 @@ ${error ? `<p class="error center" role="alert">${esc(error)}</p>` : ''}${action
       const links = m.body_purged_at ? [] : JSON.parse(m.links);
       const how = mine ? '' : m.via === 'web' ? tr('typed on the web') : c.vendor === 'web' ? tr('via their inbox') : tr('via their bot');
       return `<li class="bubble ${mine ? 'out' : 'in'}"><div class="meta">${mine ? tr('You') : esc(c.alias)} · ${tr.ago(m.created_at, now)}${how ? ` · ${how}` : ''}${m.kind === 'ask' ? ` · <b>${tr('question')}</b>` : ''}${mine ? ` · ${m.replied_at ? tr('answered') : m.status === 'delivered' ? tr('seen') : m.status === 'dropped' ? tr('not delivered') : tr('sent')}` : ''}</div>
-<div class="text">${m.body_purged_at ? `<i>${tr('Text deleted after 7 days')}</i>` : esc(m.text)}</div>
+<div class="text">${m.body_purged_at ? `<i>${tr('Text deleted')}</i>` : esc(m.text)}</div>
 ${links.map((l) => `<a class="ext" href="${esc(l)}" rel="noopener noreferrer nofollow" target="_blank">${esc(l.replace(/^https?:\/\//, '').slice(0, 60))}</a>`).join('')}
 ${!mine && m.kind === 'ask' && !answered && !m.body_purged_at && !c.blocked ? `<form method="post" action="/app/inbox/send" class="choices"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><input type="hidden" name="reply_to" value="${esc(m.id)}">
 ${(choices.length ? choices : [tr('Yes'), tr('No')]).map((ch) => `<button class="chip" name="text" value="${esc(ch)}">${esc(ch)}</button>`).join('')}</form>` : ''}
@@ -1815,7 +1831,7 @@ ${c.blocked || paused ? '' : `<form method="post" action="/app/inbox/send" class
     }).join('');
     return layout(tr('Inbox'), `${paused ? alertBox('info', tr('Everything is paused'), tr("No emails, and you can't send. Messages still show up here."), `<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">${tr('Resume')}</button></form>`) : ''}
 ${error ? alertBox('danger', esc(error), '') : ''}
-${cards ? `<div class="convos">${cards}</div><p class="muted small">${tr('Not end-to-end encrypted. You read these on the web, so they pass through our server in a form we could read. They are deleted 7 days after you see them.')}</p>` : `<section class="card">${emptyState('inbox', tr('Your inbox is empty'), tr('When friends connect with you, their messages and questions show up here.'))}</section>`}`,
+${cards ? `<div class="convos">${cards}</div><p class="muted small">${tr('Not end-to-end encrypted. We can read these messages. Ordinary messages are deleted 7 days after you see them; task threads stay for 30 days after their last message.')}</p>` : `<section class="card">${emptyState('inbox', tr('Your inbox is empty'), tr('When friends connect with you, their messages and questions show up here.'))}</section>`}`,
       { user, tab: 'inbox', bar: { title: tr('Inbox') },
         actions: wbs.length ? `<a class="btn ghost" href="/app/bots/${wbs[0].id}">${tr('Let Grok Bot handle this')}</a>` : '' });
   }
@@ -1899,7 +1915,7 @@ ${quietError ? `<p class="error" role="alert">${esc(quietError)}</p>` : ''}${!us
 ${quietNow ? `<p class="muted small">${tr("It's quiet time now. Messages wait until {time}.", { time: hhmm(user.quiet_end) })}</p>` : ''}</div></section>
 ${filesCard(user, tr)}
 <section class="group" aria-labelledby="data-h"><h2 id="data-h">${tr('Your data')}</h2><div class="card card--rows">
-<div class="setrow"><div><p class="setrow__label">${tr('Download my data')}</p><p class="setrow__desc">${tr("Message text is deleted 7 days after delivery. Messages that can't be delivered expire after 7 days. The activity log is kept for 90 days.")}</p></div><a class="btn small ghost" href="/app/account/export">${tr('Download')}</a></div>
+<div class="setrow"><div><p class="setrow__label">${tr('Download my data')}</p><p class="setrow__desc">${tr("Ordinary message text is deleted 7 days after delivery; undelivered messages expire after 7 days. Task threads stay for 30 days after their last message, or at most 7 more days after closing. Activity logs stay for 90 days.")}</p></div><a class="btn small ghost" href="/app/account/export">${tr('Download')}</a></div>
 </div></section>
 <section class="group"><div class="card danger-zone"><details class="fold"${error ? ' open' : ''}><summary><span><span class="fold__title">${tr('Delete my account')}</span><span class="fold__sub">${tr('Disconnects your bots and erases message text')}</span></span></summary>
 ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
@@ -1921,7 +1937,9 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
       messages: q(`SELECT m.*, fb.handle AS from_handle, tb.handle AS to_handle FROM messages m JOIN bots fb ON fb.id = m.from_bot JOIN bots tb ON tb.id = m.to_bot
                    WHERE (m.from_bot IN (${ph}) OR m.to_bot IN (${ph})) AND m.kind != 'probe' ORDER BY m.created_at`).all(...ids, ...ids)
         .map((m) => ({ id: m.id, from: `@${m.from_handle}`, to: `@${m.to_handle}`, kind: m.kind, text: m.body_purged_at || m.sealed ? null : m.text, links: m.body_purged_at || m.sealed ? null : JSON.parse(m.links), end_to_end_encrypted: !!m.sealed,
-          status: m.status, sent_at: iso(m.created_at), delivered_at: iso(m.delivered_at), text_deleted_at: iso(m.body_purged_at) })),
+          ...(m.thread_id ? { thread: m.thread_id } : {}), status: m.status, sent_at: iso(m.created_at), delivered_at: iso(m.delivered_at), text_deleted_at: iso(m.body_purged_at) })),
+      threads: q(`SELECT id, state, created_at, updated_at, closed_at, expires_at FROM task_threads WHERE bot_a IN (${ph}) OR bot_b IN (${ph})`).all(...ids, ...ids)
+        .map((r) => ({ id: r.id, state: r.state, created_at: iso(r.created_at), updated_at: iso(r.updated_at), closed_at: iso(r.closed_at), expires_at: iso(r.expires_at) })),
       activity: q(`SELECT e.ts, b.handle, e.kind FROM events e JOIN bots b ON b.id = e.bot WHERE e.bot IN (${ph}) ORDER BY e.id`).all(...ids)
         .map((e) => ({ at: iso(e.ts), bot: `@${e.handle}`, event: e.kind })),
     };
@@ -1935,10 +1953,13 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
       for (const id of ids) bumpGen(id);
       governance?.deleteDataInTx(ids);
       files?.forgetBots(ids);
+      q(`DELETE FROM group_browser_views WHERE user_id = ? OR bot_id IN (${ph})`).run(user.id, ...ids);
+      q(`UPDATE group_posts SET self_sealed = NULL WHERE from_bot IN (${ph})`).run(...ids);
       for (const id of ids) events?.revokeAll(id);
       q(`UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, paused_at = NULL, disconnected_at = coalesce(disconnected_at, ?), display_name = 'Deleted user' WHERE id IN (${ph})`).run(t, ...ids);
       q(`DELETE FROM contacts WHERE owner_bot IN (${ph}) OR peer_bot IN (${ph})`).run(...ids, ...ids);
       erase(`from_bot IN (${ph}) OR to_bot IN (${ph})`, ...ids, ...ids);
+      q(`DELETE FROM task_threads WHERE bot_a IN (${ph}) OR bot_b IN (${ph})`).run(...ids, ...ids);
       q('UPDATE feedback SET user_id = NULL WHERE user_id = ?').run(user.id); // feedback stays, without who sent it
       board?.forgetUser(user.id); // board posts stay under "Deleted user", with no more emails
       usage?.forgetUser(user.id);
@@ -2125,7 +2146,7 @@ ${rules ? `<ul class="rules">${rules}</ul>` : ''}
     const who = peerFace(r.owner_bot, r.peer_bot, tr);
     const inbound = r.inbound_message_id ? q('SELECT text, links, sealed, body_purged_at FROM messages WHERE id = ?').get(r.inbound_message_id) : null;
     // Their words are data: escaped, invisible and control characters shown, links as plain text.
-    const theirs = !inbound ? '' : inbound.body_purged_at ? `<p class="ask__theirs ask__theirs--quiet">${tr('Their message was deleted after 7 days.')}</p>`
+    const theirs = !inbound ? '' : inbound.body_purged_at ? `<p class="ask__theirs ask__theirs--quiet">${tr('Their message was deleted.')}</p>`
       : inbound.sealed ? `<p class="ask__theirs ask__theirs--quiet">${tr('End-to-end encrypted, so only your bot could read their message.')}</p>`
       : `<figure class="ask__theirs"><figcaption>${tr("{name}'s bot wrote", { name: esc(who.alias) })}</figcaption><blockquote>${esc(safeText(inbound.text))}</blockquote>${JSON.parse(inbound.links || '[]').map((l) => `<p class="ask__link">${esc(safeText(l))}</p>`).join('')}</figure>`;
     const d = r.draft;
@@ -2638,6 +2659,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           return redirect(res, `/app/bots/${b.id}`), true;
         }
         const disconnectInTx = () => {
+          q('DELETE FROM group_browser_views WHERE bot_id = ?').run(b.id);
           bumpGen(b.id);
           events?.revokeAll(b.id);
           q('UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, doorbell_gen = doorbell_gen + 1, disconnected_at = ? WHERE id = ?').run(clock(), b.id);
@@ -2758,6 +2780,23 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           tell(user, { what: tr('Removed {name}', { name: c.alias }) });
         } else throw new HttpError(404, 'Page not found');
         return redirect(res, '/app'), true;
+      }
+
+      // Private history uses its own page with no analytics and no persistent browser keys.
+      const historyPage = groupBrowser && p.match(/^\/app\/groups\/(\d+)\/history$/);
+      if (historyPage && req.method === 'GET') {
+        const view = groupBrowser.page({ ...groupBrowser.seat(user.id, url.searchParams.get('bot'), historyPage[1]), lang: user.lang });
+        res.writeHead(200, view.headers); res.end(view.html); return true;
+      }
+      if (groupBrowser && p === '/app/group-browser' && req.method === 'POST') {
+        const f = await form(req, 2000);
+        return json(res, 200, groupBrowser.create(user.id, f.bot, f.group, f.public_key)), true;
+      }
+      const historyRequest = groupBrowser && p.match(/^\/app\/group-browser\/(ghv_[A-Za-z0-9_-]{24})(\/cancel)?$/);
+      if (historyRequest) {
+        if (!historyRequest[2] && req.method === 'GET') return json(res, 200, groupBrowser.read(user.id, historyRequest[1])), true;
+        if (historyRequest[2] && req.method === 'POST') return json(res, 200, groupBrowser.cancel(user.id, historyRequest[1])), true;
+        throw new HttpError(404, 'Page not found');
       }
 
       // Group chats: making one, its page, and every change made there. Each change is for one of your bots that's in it.
@@ -3252,6 +3291,37 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         const plain = newInvite(b, basket);
         log(b.id, 'invite_created', { via: 'link' });
         return page(res, 200, invitedPage(user, b, `${origin}/i/${plain}`, { code: plain, basket })), true;
+      }
+      if (p === '/app/invites/email' && req.method === 'POST') {
+        const f = await form(req);
+        const b = ownBot(user, f.bot);
+        if (b.disconnected_at || b.removed_at || !user.email_verified_at) throw new HttpError(400, 'Reconnect this bot first.');
+        const plain = String(f.code || '').trim().toUpperCase();
+        const inv = q('SELECT * FROM invites WHERE code_hash = ? AND from_bot = ? AND used_at IS NULL AND expires_at > ?').get(sha(plain), b.id, clock());
+        if (!inv?.recipient_email) throw new HttpError(404, 'That email invite was used, cancelled or has expired.');
+        const groupLink = inv.group_code && groups?.linkByCode(inv.group_code);
+        if (inv.group_code && !groupLink) throw new HttpError(410, 'This group link has expired.');
+        const message = friendInviteEmail({ name: user.name, product, url: `${origin}/i/${plain}`, home: origin, lang: user.lang, group: groupLink?.group.name });
+        if (f.confirm !== 'send' || f.review !== sha(JSON.stringify([inv.recipient_email, message.subject, message.text]))) throw new HttpError(400, 'Review the email invite before sending it.');
+        if (inv.email_state === 'sent') return redirect(res, `/app/invites/${plain}`), true;
+        if (inv.email_state === 'sending') throw new HttpError(409, 'Email delivery is in progress. Do not resend.');
+        tx(() => {
+          const count = q("SELECT count(*) AS n FROM events WHERE kind = 'invite_email_attempt' AND bot IN (SELECT id FROM bots WHERE user_id = ?) AND ts > ?").get(user.id, clock() - 86_400_000).n;
+          if (count >= 10) throw new HttpError(429, 'You can send up to 10 email invites a day.');
+          const reserved = q("UPDATE invites SET email_state = 'sending', by_owner = 1 WHERE code_hash = ? AND used_at IS NULL AND expires_at > ? AND coalesce(email_state, '') NOT IN ('sent', 'sending')").run(inv.code_hash, clock());
+          if (!reserved.changes) throw new HttpError(409, 'Email delivery is in progress. Do not resend.');
+          log(b.id, 'invite_email_attempt', {});
+        });
+        try {
+          await mailer({ to: inv.recipient_email, ...message });
+          q("UPDATE invites SET email_state = 'sent', email_sent_at = ?, by_owner = 1 WHERE code_hash = ?").run(clock(), inv.code_hash);
+          log(b.id, 'invite_email_sent', {});
+        } catch {
+          // A provider timeout can happen after acceptance. Never retry automatically.
+          log(b.id, 'invite_email_uncertain', {});
+          throw new HttpError(502, 'Email delivery could not be confirmed. Do not resend this invite; share its link instead.');
+        }
+        return redirect(res, `/app/invites/${plain}`), true;
       }
       const openInv = p.match(/^\/app\/invites\/([A-Z0-9]{4}-[A-Z0-9]{4})$/);
       if (openInv && req.method === 'GET') {

@@ -98,7 +98,7 @@ test('connected app: refresh tokens rotate, and disconnecting revokes everything
   assert.equal((await app.swap({ grant_type: 'refresh_token', refresh_token: fresh.refresh_token, client_id: app.clientId })).status, 400);
 });
 
-test('private mode: `b2b mcp` serves the same tools over stdio, still end-to-end encrypted', async (t0) => {
+test('private mode: `b2b mcp` serves shared tools plus local session tools, still end-to-end encrypted', async (t0) => {
   const env = await setup(t0);
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   const anna = await owner(env, t0, 'anna@example.com', 'anna');
@@ -112,9 +112,14 @@ test('private mode: `b2b mcp` serves the same tools over stdio, still end-to-end
   const rpc = (method, params = {}) => new Promise((ok) => { const n = ++id; waiting.set(n, ok); ch.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: n, method, params })}\n`); });
   assert.equal((await rpc('initialize', { protocolVersion: '2025-06-18' })).result.serverInfo.name, 'bot2bot');
   const tools = (await rpc('tools/list')).result.tools;
-  assert.deepEqual(tools.map((t) => t.name), TOOLS.map((t) => t.name), 'same tools as the connected app');
+  const localOnly = new Set(['receive_session_messages', 'bind_contact']);
+  const shared = tools.filter((t) => !localOnly.has(t.name));
+  assert.deepEqual(shared.map((t) => t.name), TOOLS.map((t) => t.name), 'shared tools agree with the connected app');
+  assert.deepEqual(tools.filter((t) => localOnly.has(t.name)).map((t) => t.name).sort(), [...localOnly].sort());
+  assert.ok(TOOLS.every((t) => !localOnly.has(t.name)), 'hosted tools cannot address a local provider session');
+  assert.deepEqual(tools.find((t) => t.name === 'bind_contact').inputSchema.required, ['contact']);
   // Files (alpha) only go end-to-end encrypted, so only private mode takes them.
-  assert.deepEqual(tools.map((t) => Object.keys(t.inputSchema.properties).filter((k) => k !== 'files').sort()), TOOLS.map((t) => Object.keys(t.inputSchema.properties).sort()));
+  assert.deepEqual(shared.map((t) => Object.keys(t.inputSchema.properties).filter((k) => k !== 'files').sort()), TOOLS.map((t) => Object.keys(t.inputSchema.properties).sort()));
   const r = await rpc('tools/call', { name: 'send_message', arguments: { to: 'Anna', text: 'Sealed hello' } });
   assert.match(r.result.content[0].text, /End-to-end encrypted: only their bot can read it/);
   const row = env.relay.db.prepare("SELECT text, sealed FROM messages WHERE kind = 'note' ORDER BY created_at DESC").get();

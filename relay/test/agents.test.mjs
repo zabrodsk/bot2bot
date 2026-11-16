@@ -178,6 +178,10 @@ test('coding agent: the long-poll answers empty after a while, a second watcher 
   assert.deepEqual(Object.keys(got).sort(), ['pending', 'reason', 'ring', 'ring_id', 'urgent']);
 
   // Codex runs with network on and can write its bot2bot folder; "only bot2bot" keeps it inside that folder.
+  // The raw long-poll above received a test ring but did not consume its probe.
+  // Drain it before starting the real watcher, so that stale test cannot wake the fake agent.
+  await cara.cli('inbox');
+  env.relay.db.prepare('UPDATE bots SET watch_seen_at = NULL WHERE id = ?').run(cara.botId);
   const agent = fakeAgent();
   const w = startWatcher(t0, cara.home, agent.bin, 'codex', '--only-b2b');
   await waitFor(() => /watching @cara-codex[^]*bot2bot only/.test(w.log()));
@@ -190,10 +194,10 @@ test('coding agent: the long-poll answers empty after a while, a second watcher 
   assert.equal(agent.runs()[0].args.filter((a) => a === '--add-dir').length, 1);
 });
 
-test('OpenClaw in private mode: joins as OpenClaw, is told to set its webhook, and its owner gets no reminder emails', async (t0) => {
+test('OpenClaw in private mode: joins as OpenClaw, prefers its local watcher with a hosted webhook alternative, and its owner gets no reminder emails', async (t0) => {
   const env = await setup(t0);
   const { b, cli, done, botId } = await joinAgent(env, 'olga@example.com', 'olga-claw', 'openclaw');
-  assert.match(done.out, /Joined as @olga-claw[^]*NEXT STEP[^]*OpenClaw webhook[^]*doorbell set https:\/\/<your gateway>\/hooks\/wake/);
+  assert.match(done.out, /Joined as @olga-claw[^]*NEXT STEP[^]*outbound watcher[^]*No public address or tunnel[^]*OpenClaw webhook[^]*doorbell set https:\/\/<your gateway>\/hooks\/wake/);
   assert.doesNotMatch(done.out, /routine|Grok/);
   const row = env.relay.db.prepare('SELECT platform, vendor FROM bots WHERE id = ?').get(botId);
   assert.deepEqual({ ...row }, { platform: 'openclaw', vendor: 'grokbot' });
@@ -543,7 +547,7 @@ test('coding agent: the session leading a group gets its messages, and a run the
   assert.equal(resumed.args[resumed.args.indexOf('--resume') + 1], SESSION);
   assert.equal(resumed.session, SESSION);
   assert.equal(realpathSync(resumed.cwd), realpathSync(project));
-  assert.match(resumed.args.join(' '), /a group this session leads[^]*handoff/);
+  assert.match(resumed.args.join(' '), /a conversation this session handles[^]*handoff/);
   await waitFor(() => /Looks good to me/.test(agent.handoffs()), 10_000);
   assert.doesNotMatch(w.log(), /couldn't resume/);
   // Resumed once, not again on every ring.
@@ -642,4 +646,41 @@ test('owner settings: "you handle it" set just for an unsorted contact is what t
   env.relay.applyOwnerOps(cara.botId, [{ op: 'set_mode', contact: Number(ann.botId), mode: null }]);
   await ann.cli('send', 'cara', 'And 8?', '--ask');
   assert.match((await cara.cli('inbox')).out, /okays everything from/);
+});
+
+test('Codex resumes the bound thread for a direct message with the existing bot2bot-only sandbox settings', async (t0) => {
+  const env = await setup(t0, { limits: { watchHoldMs: 400 } });
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-codex', 'codex');
+  const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
+  await connectHandled(ann, { ...cara }, 'ann');
+  const d = mkdtempSync(join(tmpdir(), 'b2b-codex-resume-'));
+  const bin = join(d, 'codex'), log = join(d, 'runs.jsonl'), received = join(d, 'received.txt');
+  writeFileSync(bin, `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, session: process.env.B2B_SESSION, agent: process.env.B2B_SESSION_AGENT }) + '\\n');
+const output = require('node:child_process').execFileSync(process.execPath, [${JSON.stringify(CLI)}, args.includes('resume') ? 'handoff' : 'inbox'], { encoding: 'utf8' });
+if (args.includes('resume')) fs.writeFileSync(${JSON.stringify(received)}, output);
+`);
+  chmodSync(bin, 0o755);
+  const id = '019a1234-5678-7000-8000-123456789abc';
+  const lead = runIn(cara.home, { B2B_SESSION: id, B2B_SESSION_AGENT: 'codex', CODEX_THREAD_ID: id });
+  assert.match((await lead('bind', 'ann')).out, /now belong to this session/);
+  const w = startWatcher(t0, cara.home, bin, 'codex', '--only-b2b');
+  await waitFor(async () => (await cara.b(`/app/bots/${cara.botId}/state`)).json().watching);
+  await ann.cli('send', '@cara-codex', 'Continue the API review', '--ask');
+  await waitFor(() => existsSync(received), 15_000);
+  const runs = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  const resumed = runs.find((r) => r.args.includes('resume'));
+  assert.ok(resumed, w.log());
+  assert.equal(resumed.args[0], 'exec');
+  assert.equal(resumed.args[resumed.args.indexOf('resume') + 1], id);
+  assert.equal(resumed.args[resumed.args.indexOf('-C') + 1], cara.home);
+  assert.equal(resumed.args[resumed.args.indexOf('-s') + 1], 'workspace-write');
+  assert.ok(resumed.args.includes('sandbox_workspace_write.network_access=true'));
+  assert.match(resumed.args.join(' '), /features.network_proxy/);
+  assert.equal(resumed.session, id);
+  assert.equal(resumed.agent, 'codex');
+  assert.match(readFileSync(received, 'utf8'), /\| Continue the API review/);
+  assert.doesNotMatch(resumed.args.join(' '), /dangerously-bypass/);
 });

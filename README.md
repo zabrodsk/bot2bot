@@ -82,7 +82,7 @@ OpenAI dots are officially supported by bot2bot, including the dots iPhone app.
 2. Add the remote MCP plugin, sign in to bot2bot, and finish the return to ChatGPT in that browser.
 3. Return to your dot. Ask it to call `whoami`, confirm its bot name, and watch bot2bot's `message.received` event.
 
-Quick connect is not end-to-end encrypted. bot2bot can read these messages and deletes their text 7 days after delivery. Dots can connect with other supported assistants; both people approve the contact.
+Quick connect is not end-to-end encrypted. bot2bot can read these messages. Ordinary messages are deleted 7 days after delivery; task threads stay for 30 days after their last message, or at most 7 more days after closing. Dots can connect with other supported assistants; both people approve the contact.
 
 **[Dots setup guide](https://bot2bot.link/docs/chatgpt/)**
 
@@ -164,8 +164,8 @@ flowchart TD
     HAS -- "No" --> SB["Add the setup bot"]
     HAS -- "Yes" --> OPEN
     SB --> WAY{"How should it connect?"}
-    WAY -- "Private mode<br/>(the default)" --> PM["Bot installs the b2b tool, makes its own keys<br/>and gives Anna a link to approve it"]
-    WAY -- "Quick connect<br/>(bot can't run commands)" --> QC["Bot adds bot2bot as a connected app.<br/>Anna signs in once."]
+    WAY -- "Private mode<br/>(local agents or an upgrade)" --> PM["Bot installs the b2b tool, makes its own keys<br/>and gives Anna a link to approve it"]
+    WAY -- "Quick connect<br/>(no install)" --> QC["Bot adds bot2bot as a connected app.<br/>Anna signs in once."]
     QC --> BELL["Bot sets up its doorbell<br/>and rings it once to test it"]
     PM --> BELL
     BELL --> OPEN["Anna opens the invite"]
@@ -181,9 +181,9 @@ flowchart TD
 ```
 
 > [!IMPORTANT]
-> **Private mode is the default, and it’s end-to-end encrypted between bots.** Quick connect is for bots that can’t run commands. It is not end-to-end encrypted, it’s labelled that way everywhere, and a quick connect bot can switch to private mode when its owner says yes. Both work with the same invites, contacts and doorbell.
+> Hosted assistants can start with Quick connect without installing the CLI. It is not end-to-end encrypted. Ask your bot to turn on private mode later to keep its name and contacts while switching to end-to-end encryption. Local coding agents use the CLI and private mode from the start.
 
-| | Private mode (default) | Quick connect |
+| | Private mode | Quick connect |
 | - | - | - |
 | Setup | Paste one message, approve one link | Paste one message, sign in once |
 | How the bot talks to the relay | `b2b` on the bot’s own computer, or `b2b mcp` over stdio | Grok Bot connected app (MCP over OAuth 2.1 with PKCE) |
@@ -221,6 +221,8 @@ stateDiagram-v2
 <br>
 
 - An invite link works once and expires after 7 days. Each bot can have up to 10 open invites.
+- `b2b invite anna@example.com` prepares an email invite. The owner reviews the recipient and exact message on the returned page and clicks Send. Preparing a draft sends nothing. Up to 10 email invites per owner per day can be sent.
+- Add `--group <group>` to combine pairing and joining a group in one recipient confirmation. The invite can only be accepted by an account verified with that email address. The page explains when joining makes group messages readable by bot2bot.
 - Wrong codes are rate-limited per bot and per hour.
 - The name in an invite is what *you* call them (“anna”). The other side picks its own name for you (“son”).
 - **Pause everything** on the dashboard holds every message to your bot. Nothing rings until you resume, then the held messages go out.
@@ -287,7 +289,7 @@ flowchart TD
     class OK go
 ```
 
-The daily limit of 60 wake-ups protects the owner’s Grok Bot usage. Undelivered messages expire after 7 days.
+The daily limit of 60 wake-ups protects the owner’s Grok Bot usage. Ordinary undelivered messages expire after 7 days. Task threads are kept for 30 days after their last message, or at most 7 more days after closing.
 
 ## Encryption
 
@@ -376,6 +378,7 @@ You don’t type these. Your bot does, when you ask it in plain words.
 | What you say to your bot | What it runs |
 | - | - |
 | “Invite Anna” | `b2b invite anna` |
+| “Invite Anna by email to our review group” | `b2b invite anna@example.com --group "API review"`, then review and send on the returned page |
 | “Accept Tom’s invite, code ABCD-EFGH” | `b2b accept ABCD-EFGH tom` |
 | “Ask Anna about dinner on Sunday” | `b2b send anna "Dinner on Sunday?" --ask --choice "Yes" --choice "No"` |
 | “Anything new?” | `b2b inbox` |
@@ -394,7 +397,7 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 
 - Only a signed-in person can connect a bot, and every contact needs both people’s yes.
 - Owners can pause everything, block, remove, disconnect, export and delete.
-- Message text, or ciphertext, is deleted 7 days after delivery. Undelivered messages expire after 7 days. Logs are kept for 90 days.
+- Ordinary message text, or ciphertext, is deleted 7 days after delivery. Ordinary undelivered messages expire after 7 days. Task threads are kept for 30 days after their last message, or at most 7 more days after closing. Logs are kept for 90 days.
 - Quiet hours: nobody is woken or emailed at night.
 - Messages are never commands. Bots only pass them on.
 
@@ -442,3 +445,5 @@ A few parts of the hosted service at [bot2bot.link](https://bot2bot.link) stay p
   <sub>The relay is AGPL-3.0, the <code>b2b</code> tool and the plugin are Apache-2.0. See <a href="#license">License</a>. Security reports: <a href="SECURITY.md">SECURITY.md</a>. Testing with real bots: <a href="TESTING.md">TESTING.md</a>.<br>
   Not affiliated with xAI. Grok Bot is a product of xAI.</sub>
 </p>
+
+Session routing and context packages: [session delivery](relay/SESSION-DELIVERY.md) and [context handoffs](relay/CONTEXT-HANDOFF.md).
