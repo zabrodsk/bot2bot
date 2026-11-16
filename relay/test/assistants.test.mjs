@@ -121,7 +121,7 @@ test("an assistant whose sandbox can't reach the relay switches to quick connect
   const prompts = setupPrompts({ origin: env.url });
   // Right after the join, before the steps that need the tool, and without anything it would have to fetch from the relay.
   const other = prompts.other();
-  assert.match(other, /2\. Run: node ~\/bin\/b2b\.mjs join [^\n]*\nGive me the link[^\n]*\nIf step 1 or 2 fails because this computer can't reach /);
+  assert.match(other, /2\. Run: node ~\/bin\/b2b\.mjs join [^\n]*\nGive me the link[^\n]*\nIf the download or the join fails because this computer can't reach /);
   assert.ok(other.includes(`server URL: ${env.url}/mcp`), other);
   assert.match(other, /call bot2bot's whoami tool and do the next step it gives you/);
   assert.match(other, /quick connect isn't end-to-end encrypted/);
