@@ -30,7 +30,7 @@ export async function setup(t0, opts = {}) {
   const mailer = opts.mailer ?? (async (m) => { mail.push(m); });
   relay = createRelay({ ...opts, adminToken: ADMIN, allowLocalWebhooks: true, publicUrl: url, clock: () => Date.now() + offset,
     limits: { ringFloorMs: 200, urgentFloorMs: 100, ...opts.limits }, mailer: async (m) => { if (/login code/.test(m.subject)) mail.push(m); else await mailer(m); } });
-  const timer = setInterval(() => relay.tick().catch(() => {}), 100);
+  const timer = opts.autoTick === false ? null : setInterval(() => relay.tick().catch(() => {}), 100);
   t0.after(() => { clearInterval(timer); s.close(); });
   return { relay, url, mail, advance: (ms) => { offset += ms; }, now: () => Date.now() + offset };
 }
@@ -115,7 +115,7 @@ export async function connectApp(env, b, handle, name = 'Grok Bot') {
   const verifier = randomBytes(32).toString('base64url');
   const params = { response_type: 'code', client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', state: 'xyz' };
   const consent = await b(`/oauth/authorize?${new URLSearchParams(params)}`);
-  assert.match(consent.text, new RegExp(`Connect your bot to bot2bot[^]*Not end-to-end encrypted[^]*Requested by the app "${name}"`));
+  assert.match(consent.text, new RegExp(`Connect your bot to bot2bot[^]*Not end-to-end encrypted[^]*Requested by the app "${name || 'An app'}"`));
   const ok = await b('/oauth/authorize', { method: 'POST', form: { ...params, bot: 'new', handle, decision: 'allow' } });
   const loc = new URL(ok.location);
   assert.equal(loc.searchParams.get('state'), 'xyz');

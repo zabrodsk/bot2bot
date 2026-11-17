@@ -30,7 +30,8 @@ function message(env, from, to, id, extra = {}) {
 
 // Inspect what the app passes to end(), since node:http itself would also hide HEAD bodies.
 test('HEAD pages match GET headers and status without sending a body or changing page state', async (t) => {
-  const env = await setup(t, { hosted: true, privacyPilot: true, webInbox: true });
+  // Only the requests under test may write here. A background tick can create promo nudges mid-snapshot.
+  const env = await setup(t, { hosted: true, privacyPilot: true, webInbox: true, autoTick: false });
   const handle = env.relay.handle;
   env.relay.handle = (req, res) => {
     if (req.method === 'HEAD') {

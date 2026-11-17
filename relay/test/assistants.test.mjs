@@ -2,7 +2,7 @@
 // sets its own doorbell from its tool: its inbound API, or a recurring check.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setup, login, listen, waitFor } from './helpers.mjs';
+import { setup, login, listen, waitFor, cliHome } from './helpers.mjs';
 import { connectApp } from './helpers.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { platformForApp } from '../platforms.mjs';
@@ -18,7 +18,7 @@ async function pickUp(app) {
   await app.tool('mark_delivered', { receipt });
 }
 
-test('an app is known by the name it signs in with; no name stays Grok Bot', () => {
+test('only recognized app names get specific setup steps; unnamed apps and Cursor are generic', () => {
   assert.equal(platformForApp('Poke'), 'poke');
   assert.equal(platformForApp('Instinct'), 'instinct');
   assert.equal(platformForApp('Instinct AI'), 'instinct');
@@ -29,10 +29,75 @@ test('an app is known by the name it signs in with; no name stays Grok Bot', () 
   assert.equal(platformForApp('Gemini'), 'other');
   assert.equal(platformForApp('ChatGPT'), 'chatgpt');
   assert.equal(platformForApp('OpenClaw'), 'openclaw');
-  assert.equal(platformForApp('Grok Bot'), null);
-  assert.equal(platformForApp('An app'), null);
+  assert.equal(platformForApp('Grok Bot'), 'grok');
+  assert.equal(platformForApp('xAI'), 'grok');
+  for (const name of [undefined, null, '', ' ', 'An app', 'Cursor']) assert.equal(platformForApp(name), 'other');
   assert.equal(platformForApp('Some New Assistant'), 'other');
 });
+
+test('an OAuth app with no name gets generic setup and encryption steps', async (t0) => {
+  const env = await setup(t0);
+  const b = await login(env, 'unnamed@example.com');
+  const app = await connectApp(env, b, 'unnamed', null);
+  assert.equal(botOf(env, 'unnamed').platform, 'other');
+  const who = text(await app.tool('whoami'));
+  assert.match(who, /inbound API or webhook[^]*recurring task/);
+  assert.doesNotMatch(who, /Grok|routine called/);
+  const steps = text(await app.tool('turn_on_encryption'));
+  assert.match(steps, /No doorbell is configured[^]*Automatic delivery remains unverified/);
+  assert.doesNotMatch(steps, /Edit your "b2b doorbell"|then do nothing for a minute/);
+});
+
+for (const [name, way] of [['Claude Duet', 'schedule'], ['Poke', 'webhook'], ['OpenClaw', 'schedule'], ['OpenClaw', 'webhook']]) {
+  test(`${name}: encryption requires direct access and preserves its ${way} through enrollment`, async (t0) => {
+    const env = await setup(t0);
+    const b = await login(env, 'test@example.com');
+    const app = await connectApp(env, b, 'test-assistant', name);
+    const { s, url } = await listen((req, res) => res.end('{}'));
+    t0.after(() => s.close());
+    await app.tool('set_doorbell', { way, ...(way === 'webhook' ? { url: `${url}/inbound`, key: 'test-hook-key' } : {}) });
+    await app.tool('test_doorbell');
+    await pickUp(app);
+    const before = botOf(env, 'test-assistant');
+    const who = text(await app.tool('whoami'));
+    assert.match(who, /A working MCP connector does not prove your computer can reach/);
+    assert.ok(who.includes(`${env.url}/cli/b2b.mjs`));
+    assert.match(who, /If access is already known to be blocked, do not retry/);
+    assert.match(who, /do not offer to turn on encryption or call turn_on_encryption[^]*Keep quick connect/);
+    assert.match(who, /Only if both checks pass[^]*Only if they say yes, call turn_on_encryption/);
+    assert.doesNotMatch(who, /I can turn it on myself/);
+    assert.equal(env.relay.db.prepare('SELECT count(*) AS n FROM enroll_codes WHERE handle = ?').get(before.handle).n, 0);
+
+    const steps = text(await app.tool('turn_on_encryption'));
+    assert.match(steps, /If installation or enrollment fails because access is blocked, stop, keep this app connected/);
+    assert.doesNotMatch(steps, /Edit your "b2b doorbell"|then do nothing for a minute/);
+    if (way === 'schedule') {
+      assert.match(steps, /Keep your existing recurring task and its schedule[^]*inbox --via doorbell/);
+      assert.match(steps, /let your recurring task pick up and acknowledge the test on its next run/);
+    } else {
+      assert.match(steps, /Keep your existing inbound API or webhook, including its URL and key[^]*inbox --via doorbell/);
+    }
+    // Asking for instructions has not switched or revoked quick connect.
+    assert.equal(botOf(env, before.handle).vendor, 'connector');
+    assert.equal((await app.rpc('ping')).status, 200);
+    const { cli } = cliHome();
+    const code = steps.match(/b2b\.mjs enroll \S+ ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+    await cli('enroll', env.url, code);
+    const after = botOf(env, before.handle);
+    for (const field of ['id', 'platform', 'doorbell_kind', 'webhook_url', 'webhook_key']) assert.equal(after[field], before[field], field);
+    assert.ok(after.box_pub);
+    assert.equal(after.doorbell_verified_at, null, 'the updated handling instruction needs a new test');
+    assert.equal((await app.rpc('ping')).status, 401);
+    env.advance(1000);
+    await cli('doorbell', 'test');
+    if (way === 'schedule') env.advance(15 * 60_000);
+    const inbox = await cli('inbox', '--via', 'doorbell');
+    const ack = inbox.match(/^[^|\n].*b2b\.mjs ack (msg_[\w~-]+)$/m)?.[1];
+    assert.ok(ack, inbox);
+    await cli('ack', ack);
+    assert.ok(botOf(env, before.handle).doorbell_verified_at);
+  });
+}
 
 test('Instinct keeps its own name without a Beta label and gets the generic delivery choices', async (t0) => {
   const env = await setup(t0);

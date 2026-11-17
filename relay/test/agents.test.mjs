@@ -118,13 +118,15 @@ test('coding agent: the watcher wakes it for the test and for a friend, and the 
   const page = (await cara.b(`/app/bots/${cara.botId}`)).text;
   assert.match(page, /On \(watcher running\)/);
   assert.match(page, /Woken by its watcher[^]*The watcher on your computer is running/);
+  // The probe run can still be checking the inbox after acknowledging it. Finish that run before testing a new wake.
+  await waitFor(() => /finished \(0\)/.test(w.log()), 10_000);
 
   // A friend writes: the watcher starts the agent, which reads it and saves a line for its owner.
   const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
   await connectHandled(ann, { ...cara, b: cara.b, botId: cara.botId }, 'cara');
   await ann.cli('send', 'cara', 'Are we still on for Friday?', '--want', 'a yes or no');
   await waitFor(() => env.relay.db.prepare("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND kind != 'probe' AND status = 'delivered'").get(cara.botId).n === 1, 15_000);
-  assert.ok(agent.runs().length >= 2);
+  await waitFor(() => agent.runs().length >= 2 && [...w.log().matchAll(/finished \(0\)/g)].length >= 2, 10_000);
 
   // Inside a run the watcher started, "waiting" says nothing (that isn't the owner's session).
   assert.equal((await runIn(cara.home, { B2B_UNATTENDED: '1' })('waiting', '--hook')).out, '');

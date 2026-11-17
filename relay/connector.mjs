@@ -383,7 +383,8 @@ export const CONNECTOR_DOORBELL = `Make a routine called "b2b doorbell" with a w
 // What the owner pastes into their bot to switch a quick-connect bot to private mode (from the dashboard).
 export const ENCRYPTION_MESSAGE = "Please turn on bot2bot end-to-end encryption: call the bot2bot app's turn_on_encryption tool and follow its steps. Don't print any codes, tokens or keys in this chat.";
 // Offered once setup works. The owner decides; the bot never switches on its own.
-const ENCRYPTION_OFFER = `Then, if you haven't asked your owner yet, tell them once: "You're all set. Right now bot2bot can read your messages. Ordinary messages are deleted 7 days after delivery; task threads stay for 30 days after their last message. Want end-to-end encryption, so only your friends' bots can read them? I can turn it on myself. Just say yes." Only if they say yes, call turn_on_encryption.`;
+const encryptionCheck = (base, privateMode = false) => `Private mode needs Node.js and direct access to ${base} from your own computer. A working MCP connector does not prove your computer can reach that address. Before offering encryption, check that Node.js runs and your computer can download ${base}/cli/b2b.mjs. If access is already known to be blocked, do not retry. If either requirement fails, do not offer to turn on encryption or call turn_on_encryption. ${privateMode ? 'Keep the existing private-mode connection; never fall back to quick connect.' : 'Keep quick connect and tell your owner it is not end-to-end encrypted.'} If the app has network settings, explain that they can allow ${base} there; do not claim that option exists unless you can verify it. Retry only after access changes.`;
+const encryptionOffer = (base) => `${encryptionCheck(base)} Only if both checks pass and you haven't asked your owner yet, tell them once: "Right now bot2bot can read your messages. Ordinary messages are deleted 7 days after delivery; task threads stay for 30 days after their last message. Want end-to-end encryption between bots in private mode? Just say yes." Only if they say yes, call turn_on_encryption.`;
 // A dot in private mode: its keys and messages live with the b2b tool on its own computer, and this app stays
 // connected only so ChatGPT's message.received watching keeps waking it. It never reads, sends or shows a message
 // for that bot again. Every other bot ends its app sign-in when it switches.
@@ -404,8 +405,6 @@ export const ASSISTANT_STEP = (pref) => {
   return `turn on your doorbell, so friends' bots reach you without your owner. Pick the first way you really have: ${order.map((w, i) => `${i + 1}. ${ways[w]}`).join(' ')} Then call test_doorbell. If you have none of these, tell your owner in one short sentence that you see bot2bot messages when they talk to you, and move on. Never print keys in this chat.`;
 };
 const LOST_KEYS = `Always use your saved absolute CLI path and absolute B2B_HOME, including in later runs. If the tool or connection is missing, check those saved paths first: a different working directory is not proof of a reset. If the keys are still unavailable, stop and tell your owner. Never make a new bot, re-enroll automatically, or fall back to quick connect. Only after a fresh owner yes call turn_on_encryption to reconnect.`;
-// For a dot, private mode is the next step right after the connection check, unless its owner already said no.
-const DOT_SWITCH = `Turn on end-to-end encryption. If your owner asked for it in this chat, call turn_on_encryption now and do its steps. If not, and you haven't asked them yet, tell them once: "You're connected. Right now bot2bot can read your messages. Want end-to-end encryption, so only your friends' bots can read them? I set it up myself. Just say yes." Only if they say yes, call turn_on_encryption. If you can't run commands on a computer, tell your owner plainly that you stay on quick connect, which isn't end-to-end encrypted.`;
 // What a dot in private mode does instead of one of this app's tools: the same thing with the b2b tool.
 function privateOnly(name) {
   const how = { check_inbox: `run ${B2B} inbox --via doorbell and do exactly what it says, including its ack commands`, mark_delivered: `use the ack command that ${B2B} inbox printed`,
@@ -592,6 +591,7 @@ export function createConnector({ q, tx, log, clock, publicUrl, aliasUrls = [], 
     return [again
       ? `This reconnects your private mode with new keys, for when your computer lost the old ones. Never print the code, tokens or keys in this chat.`
       : `Your owner said yes to end-to-end encryption. Never print the code, tokens or keys in this chat.`,
+      `${encryptionCheck(base, again)} If access is blocked, stop before installing or enrolling. Keep the existing connection and report the limitation; never bypass the network restriction.`,
       `Before changing files, check your saved bot2bot CLI path, B2B_HOME and existing watch instructions. Reuse a working installation. Do not move keys or replace another bot's connection. If already connected as @${b.handle}, stop enrollment and keep that installation; never use --again.`,
       `1. For a new installation, choose one absolute directory dedicated to @${b.handle}. Prefer storage documented to persist across runs. If none is documented, use the home-directory default below and report reset persistence as unverified. Do not choose a scratch directory or assume that home survives a reset. Install with:`,
       `   b2b_root="$HOME/.local/share/bot2bot/${b.handle}" && mkdir -p "$b2b_root" && curl -fsSL ${base}/cli/b2b.mjs -o "$b2b_root/b2b.mjs" && node "$b2b_root/b2b.mjs" version`,
@@ -638,23 +638,22 @@ export function createConnector({ q, tx, log, clock, publicUrl, aliasUrls = [], 
               : !m.doorbell.configured ? `NEXT STEP: ${watchStep(read)}`
               : `When bot2bot's event says messages are waiting, ${read}. For everything else, use ${B2B} (${B2B} help lists it). ${LOST_KEYS}`].filter(Boolean).join('\n');
         }
-        const offer = ENCRYPTION_OFFER;
+        const offer = encryptionOffer(base);
         const settingsTip = 'Also tell them once that anything on their dashboard (baskets, ask first or handle it, rules, pause, quiet hours) they can just tell you; get_settings lists it.';
         const watchNext = watchStep('call check_inbox, tell your owner who wrote and what they say, and mark_delivered');
-        const known = ASSISTANT[b.platform] || b.platform === 'other';
+        const known = !watcher && b.platform !== 'grok';
         const next = known && !m.doorbell.configured ? `NEXT STEP: ${ASSISTANT_STEP(ASSISTANT[b.platform]?.wake)}`
           : known && !m.doorbell.verified ? `NEXT STEP: call test_doorbell${b.doorbell_kind === 'schedule' ? ', then let your recurring task pick up the test message on its next run' : ' and, when it wakes you, confirm the test message'}.`
           : known && m.contacts === 0 ? `NEXT STEP: ask your owner who to connect with, then use invite and give them the link. ${offer}`.trim()
-          : known ? `NEXT STEP: ${offer.replace(/^Then, if/, 'If')} ${settingsTip}`
-          : b.platform === 'chatgpt' ? `NEXT STEP: ${DOT_SWITCH}\nAfter that, ${!m.doorbell.configured ? watchNext : m.contacts === 0 ? 'ask your owner who to connect with, then use invite and give them the link.' : settingsTip.replace(/^Also t/, 't')}`
+          : known ? `NEXT STEP: ${offer} ${settingsTip}`
           : watcher && !m.doorbell.configured ? `NEXT STEP: ${watchNext}`
           : watcher && m.contacts === 0 ? `NEXT STEP: ask your owner who to connect with, then use invite and give them the link. ${offer}`.trim()
-          : watcher ? `NEXT STEP: ${offer ? `${offer.replace(/^Then, if/, 'If')} ` : ''}${settingsTip}`
+          : watcher ? `NEXT STEP: ${offer} ${settingsTip}`
           : !m.doorbell.configured
           ? `NEXT STEP: ${CONNECTOR_DOORBELL.replace(/^Make/, 'Make yourself')}\nThen tell your owner: "This step needs Grok Bot on a computer (phones don't show the webhook). Open ${page}, then in Grok Bot click my name at the top of our chat, open the b2b doorbell routine, and copy POST to and key from its Webhook section into that page. It tests itself." Never ask for the key in chat.`
           : !m.doorbell.verified ? `NEXT STEP: ask your owner to open ${page} and click "Ring my bot", then don't type anything for a minute.`
-          : m.contacts === 0 ? `NEXT STEP: ask your owner who to connect with, then use invite and give them the link. ${ENCRYPTION_OFFER}`
-          : `NEXT STEP: ${ENCRYPTION_OFFER.replace(/^Then, if/, 'If')} ${settingsTip}`;
+          : m.contacts === 0 ? `NEXT STEP: ask your owner who to connect with, then use invite and give them the link. ${offer}`
+          : `NEXT STEP: ${offer} ${settingsTip}`;
         const tryIt = m.try_founder ? TRY_FOUNDER(m.try_founder) : '';
         return [`@${m.handle} (${m.display_name}) · connected app ("quick connect"): messages are NOT end-to-end encrypted.`,
           `Doorbell: ${b.doorbell_kind === 'mcp_events' ? `on: ${watcher || 'you'} watching bot2bot's message.received event` : b.doorbell_kind === 'schedule' ? `your recurring task${m.doorbell.verified ? '' : ' (not tested yet)'}` : m.doorbell.configured ? (m.doorbell.verified ? 'working' : 'set, not tested yet') : 'not set'} · contacts: ${m.contacts} · waiting for you: ${m.inbox_pending}`,
@@ -824,19 +823,32 @@ export function createConnector({ q, tx, log, clock, publicUrl, aliasUrls = [], 
         log(b.id, wakeOnly(b) ? 'reconnect_code' : 'encryption_code', {});
         if (b.platform === 'chatgpt') return dotSteps(b, code);
         return [`Your owner said yes to end-to-end encryption. Do these steps yourself, in order, on your computer. Never print the code, tokens or keys in this chat.`,
+          `${encryptionCheck(base)} If installation or enrollment fails because access is blocked, stop, keep this app connected and report that private mode is unavailable on this computer. Never bypass the network restriction.`,
           `1. Install the bot2bot tool: mkdir -p ~/bin && curl -fsSL ${base}/cli/b2b.mjs -o ~/bin/b2b.mjs && node ~/bin/b2b.mjs version`,
           `2. Switch to private mode with this one-time code (it works for 30 minutes): node ~/bin/b2b.mjs enroll ${base} ${code}`,
           `   You stay @${b.handle} with all your contacts. From then on this bot2bot app stops working for you. That's expected: you use the tool instead.`,
           `   If it says this computer already has a bot2bot connection, that's another of your owner's bots: never use --again. Put B2B_HOME=~/.b2b-${b.handle} before every b2b command from here on, including inside the routine instruction below, and run the enroll again.`,
-          ...(b.platform === 'openclaw' ? [
-            `3. Set up the doorbell: turn on OpenClaw's webhooks (hooks.enabled with a long random hooks.token) on a gateway reachable over public HTTPS, then run: node ~/bin/b2b.mjs doorbell set https://<your gateway>/hooks/wake --key-file <file with the hook token>. When bot2bot wakes you, run node ~/bin/b2b.mjs inbox --via doorbell and tell your owner what arrived.`,
-          ] : [
+          ...(b.doorbell_kind === 'schedule' ? [
+            `3. Keep your existing recurring task and its schedule. Replace its check_inbox instruction with the text between the two lines. Do not create a webhook or a Grok routine.`,
+            '-----', privateDoorbell(), '-----',
+          ] : b.platform === 'grok' ? [
             `3. Edit your "b2b doorbell" routine. Keep the same routine and its webhook (a new routine would mean your owner pastes the key again). Replace its whole instruction with the text between the two lines:`,
             '-----', privateDoorbell(), '-----',
+          ] : b.webhook_url && b.doorbell_kind !== 'mcp_events' ? [
+            `3. Keep your existing inbound API or webhook, including its URL and key. Update the instruction it runs to the text between the two lines. Do not create a Grok routine or ask your owner to paste the key again.`,
+            '-----', privateDoorbell(), '-----',
+          ] : b.platform === 'openclaw' ? [
+            `3. Set up the doorbell: turn on OpenClaw's webhooks (hooks.enabled with a long random hooks.token) on a gateway reachable over public HTTPS, then run: node ~/bin/b2b.mjs doorbell set https://<your gateway>/hooks/wake --key-file <file with the hook token>. When bot2bot wakes you, run node ~/bin/b2b.mjs inbox --via doorbell and tell your owner what arrived.`,
+          ] : [
+            `3. No doorbell is configured. Use node ~/bin/b2b.mjs inbox when your owner asks to check messages. Tell them automatic delivery is not set up. Do not invent a Grok routine or claim friends can wake you.`,
           ]),
-          `4. Run: node ~/bin/b2b.mjs doorbell test, then do nothing for a minute. node ~/bin/b2b.mjs whoami should then say the doorbell is verified.`,
+          b.doorbell_kind === 'schedule'
+            ? `4. Run: node ~/bin/b2b.mjs doorbell test, then let your recurring task pick up and acknowledge the test on its next run. It can take longer than a minute. Check node ~/bin/b2b.mjs whoami afterwards; only say the doorbell works if it reports verified.`
+            : b.webhook_url || ['grok', 'openclaw'].includes(b.platform)
+              ? `4. Run: node ~/bin/b2b.mjs doorbell test, then let the webhook start a separate run that reads and acknowledges the test. Check node ~/bin/b2b.mjs whoami afterwards; only say the doorbell works if it reports verified.`
+              : `4. Run: node ~/bin/b2b.mjs whoami to confirm private mode. Automatic delivery remains unverified until a doorbell is configured and its test is acknowledged.`,
           `5. Add the "b2b messaging" skill from ${base}/skill in place of the bot2bot app skill. If you can add a custom app with a command, add "node ~/bin/b2b.mjs mcp" named bot2bot, then remove this bot2bot app. If you can't, use the commands from ${base}/setup.`,
-          `6. Tell your owner: "Done. Messages between me and your friends' bots are now end-to-end encrypted. Your contacts don't need to do anything."`,
+          `6. Tell your owner private mode is configured. Messages are end-to-end encrypted only with other bots in private mode. Report whether the doorbell test passed; do not claim automatic delivery works until it does. Your contacts don't need to reconnect.`,
           `If a step fails, tell your owner what it said. Until step 2 works, this app keeps working as before.`].join('\n');
       }
       case 'decide_request': {

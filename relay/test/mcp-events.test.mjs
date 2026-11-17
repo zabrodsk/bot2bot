@@ -88,8 +88,10 @@ test('ChatGPT: MCP 2.0 discovery, events with a challenge, signed wake-ups witho
   assert.equal(tools.find((x) => x.name === 'get_settings').annotations.readOnlyHint, true);
   assert.equal(tools.find((x) => x.name === 'send_message').annotations.openWorldHint, true);
 
-  // Before watching, whoami makes private mode the next step, then watching.
-  assert.match((await gpt.tool('whoami')).content[0].text, /NEXT STEP: Turn on end-to-end encryption[^]*call turn_on_encryption[^]*\nAfter that, tell your owner[^]*Watch bot2bot for new messages[^]*call check_inbox/);
+  // First connection stays on quick connect and sets up watching before offering private mode.
+  const initial = (await gpt.tool('whoami')).content[0].text;
+  assert.match(initial, /NEXT STEP: tell your owner[^]*Watch bot2bot for new messages[^]*call check_inbox/);
+  assert.doesNotMatch(initial, /turn_on_encryption|Install the bot2bot tool|Turn on end-to-end encryption/);
 
   // Bad subscriptions.
   const sub = (secret, extra = {}) => gpt.rpc('events/subscribe', { name: 'message.received', arguments: {}, delivery: { mode: 'webhook', url: recv.url, secret }, cursor: null, ...extra });
@@ -180,9 +182,9 @@ test('a dot switches to private mode: keys on its computer, the app stays connec
   assert.equal((await sub()).result.resultType, 'complete');
   await connect(ann, { b: mia, botId: String(gpt.botId) }, 'Ann');
   const alias = env.relay.db.prepare('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(Number(ann.botId), gpt.botId).alias;
-  // Quick connect for now: the dashboard offers the switch, and whoami makes it the next step.
+  // Once watching is configured, private mode is a separate, conditional owner-approved upgrade.
   assert.match((await mia(`/app/bots/${gpt.botId}`)).text, /Turn on end-to-end encryption/);
-  assert.match(await text('whoami'), /NEXT STEP: Turn on end-to-end encryption/);
+  assert.match(await text('whoami'), /NEXT STEP: Private mode needs Node.js[^]*Only if both checks pass[^]*Only if they say yes, call turn_on_encryption/);
   await ann.cli('send', alias, 'Sent before the switch');
 
   // The dot's own steps: no routine to edit, and the app is kept, not removed.
@@ -276,6 +278,8 @@ test('a dot switches to private mode: keys on its computer, the app stays connec
   rmSync(join(dot.home, 'config.json'));
   await assert.rejects(dot.cli('whoami'), /No bot2bot connection on this computer[^]*don't make a new bot[^]*turn_on_encryption after its owner's yes/);
   const again = await text('turn_on_encryption');
+  assert.match(again, /Keep the existing private-mode connection; never fall back to quick connect/);
+  assert.doesNotMatch(again, /Keep quick connect and tell your owner/);
   assert.match(again, /reconnects your private mode with new keys/);
   assert.match(again, /If already connected as @mrbot, stop enrollment and keep that installation; never use --again/);
   assert.match(await dot.cli('enroll', env.url, again.match(/ enroll \S+ ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]), /Enrolled as @mrbot/);

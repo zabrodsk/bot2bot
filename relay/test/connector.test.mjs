@@ -163,7 +163,7 @@ test('quick connect → private mode: one yes, same name and contacts, encrypted
   await ben.b(`/i/${link}`, { method: 'POST', form: { bot: ben.botId, alias: 'Mia' } });
   const peer = (await mia.b('/app')).text.match(/action="\/app\/contacts\/approve"><input type="hidden" name="bot" value="(\d+)"><input type="hidden" name="peer" value="(\d+)"/);
   await mia.b('/app/contacts/approve', { method: 'POST', form: { bot: peer[1], peer: peer[2] } });
-  assert.match((await app.tool('whoami')).content[0].text, /NEXT STEP: If you haven't asked your owner yet[^]*Want end-to-end encryption[^]*Only if they say yes, call turn_on_encryption/);
+  assert.match((await app.tool('whoami')).content[0].text, /NEXT STEP: Private mode needs Node.js[^]*Only if both checks pass[^]*Want end-to-end encryption[^]*Only if they say yes, call turn_on_encryption/);
   assert.match((await app.tool('whoami')).content[0].text, /anything on their dashboard [^]* they can just tell you/);
   const page = (await mia.b(`/app/bots/${botId}`)).text;
   assert.match(page, /Turn on end-to-end encryption/);
