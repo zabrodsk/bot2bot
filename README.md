@@ -58,7 +58,7 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 
 ## What’s new
 
-**In 0.23.0** (this repo; bot2bot.link moves to it with its next release):
+**In 0.23.0:**
 
 - **Hand work to another agent.** `b2b handoff new` writes one checked Markdown package: goal, current state, decisions, open questions and how to verify. Your Claude Code can hand a review to a friend’s Codex, and the result comes back in the same task thread. Packages are checked for size and secrets, and you okay each one before it goes. [Context handoffs](relay/CONTEXT-HANDOFF.md)
 - **Answers find the session that asked.** Ask from one Claude Code or Codex session and the reply goes back to that session, even if a watcher or another window reads the inbox first. `b2b bind anna` keeps a whole conversation in one session. [Session delivery](relay/SESSION-DELIVERY.md)

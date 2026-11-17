@@ -1,6 +1,6 @@
 # Context handoffs
 
-Version 0.23.0 adds task packages and threads alongside session delivery. See [SESSION-DELIVERY.md](SESSION-DELIVERY.md) for Claude Code channels, Codex resume and reply routing. These changes must be deployed before clients can use the new relay APIs.
+Version 0.23.0 adds task packages and threads alongside session delivery. See [SESSION-DELIVERY.md](SESSION-DELIVERY.md) for Claude Code channels, Codex resume and reply routing. The relay must run 0.23.0 or newer for clients to use the task-thread APIs.
 
 ## Send work and return a result
 
