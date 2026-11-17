@@ -15,7 +15,7 @@ export const HANDOFF_LIMITS = { bytes: 64 * 1024, frontBytes: 8 * 1024, frontLin
 export const HANDOFF_ID_RE = /^h_[A-Za-z0-9]{8,40}$/;
 export const THREAD_ID_RE = /^t_[A-Za-z0-9]{8,40}$/;
 export const HANDOFF_REF_TYPES = ['git', 'pr', 'issue', 'url', 'doc', 'b2b-file', 'local'];
-const HANDOFF_FIELDS = ['spec', 'id', 'thread', 'from', 'ask', 'title', 'reply_by', 'in_reply_to', 'verdict', 'findings', 'refs'];
+const HANDOFF_FIELDS = ['spec', 'id', 'thread', 'from', 'ask', 'title', 'reply_by', 'in_reply_to', 'verdict', 'findings', 'refs', 'repo_branch', 'repo_commit', 'repo_pushed', 'repo_tests'];
 const HANDOFF_UNSAFE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u{202a}-\u{202e}\u{2066}-\u{2069}\u{2028}\u{2029}\u{fff9}-\u{fffb}]/u;
 const handoffRand = (prefix) => `${prefix}${Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (b) => 'abcdefghijkmnpqrstuvwxyz23456789'[b % 32]).join('')}`;
 export const newHandoffId = () => handoffRand('h_');
@@ -179,6 +179,12 @@ export function lintHandoff(text, opts = {}) {
   for (const s of findSecrets(src, opts.secrets)) errors.push(`line ${s.line} looks like ${s.what}; take it out (never send secrets)`);
   const m = p.meta;
   if (!m) return { ok: false, errors, warnings, meta: null, sections: {} };
+  if (m.repo_branch !== undefined && (typeof m.repo_branch !== 'string' || !m.repo_branch.trim())) errors.push('repo_branch must be a nonempty string');
+  if (m.repo_commit !== undefined && !/^[a-f0-9]{7,64}$/.test(String(m.repo_commit))) errors.push('repo_commit must be a commit hash');
+  if (m.repo_pushed !== undefined && ![true, false, 'unknown'].includes(m.repo_pushed)) errors.push('repo_pushed must be true, false or unknown');
+  if (m.repo_tests !== undefined && (typeof m.repo_tests !== 'string' || !m.repo_tests.trim())) errors.push('repo_tests must be a nonempty string');
+  if (m.repo_pushed === false) warnings.push(`${typeof m.repo_branch === 'string' ? m.repo_branch : 'This branch'} is not pushed. Codex on the server won't see it.`);
+  if (m.repo_pushed === 'unknown') warnings.push('Push state is unknown. Check the remote before asking another machine to use this commit.');
   for (const k of Object.keys(m)) if (!HANDOFF_FIELDS.includes(k)) warnings.push(`unknown field "${k}" (ignored)`);
   if (m.spec !== HANDOFF_SPEC) errors.push(`spec must be ${HANDOFF_SPEC}`);
   if (!HANDOFF_ID_RE.test(String(m.id ?? ''))) errors.push('id must look like h_ followed by 8 to 40 letters or digits');
@@ -260,9 +266,10 @@ export function handoffInfo(text) {
 }
 const yq = (v) => JSON.stringify(String(v));
 // A package to fill in. Each section says what goes there, as a comment the lint ignores.
-export function handoffTemplate({ id, thread, from, ask = 'review', title = '', replyBy = '', inReplyTo = '', refs = [] }) {
+export function handoffTemplate({ id, thread, from, ask = 'review', title = '', replyBy = '', inReplyTo = '', refs = [], repo = {} }) {
   const result = ask === 'result';
-  const front = ['---', `spec: ${HANDOFF_SPEC}`, `id: ${id}`, `thread: ${thread}`, ...(from ? [`from: ${yq(from)}`] : []), `ask: ${ask}`, ...(title ? [`title: ${yq(title)}`] : []),
+  const repoFields = ['repo_branch', 'repo_commit', 'repo_pushed', 'repo_tests'].filter((k) => repo[k] !== undefined).map((k) => `${k}: ${typeof repo[k] === 'boolean' ? repo[k] : yq(repo[k])}`);
+  const front = ['---', ...repoFields, `spec: ${HANDOFF_SPEC}`, `id: ${id}`, `thread: ${thread}`, ...(from ? [`from: ${yq(from)}`] : []), `ask: ${ask}`, ...(title ? [`title: ${yq(title)}`] : []),
     ...(replyBy ? [`reply_by: ${replyBy}`] : []), ...(inReplyTo ? [`in_reply_to: ${inReplyTo}`] : []),
     ...(result ? ['verdict: approve            # approve | changes | blocked | answer', 'findings:', '  - "<one finding per line, or findings: [] if none>"'] : []),
     ...(refs.length ? ['refs:', ...refs.map((r) => `  - {${Object.entries(r).map(([k, v]) => `${k}: ${typeof v === 'boolean' ? v : yq(v)}`).join(', ')}}`)] : result ? ['refs: []'] : ['refs:', '  # - {type: git, url: https://github.com/org/repo, commit: 3e1a9c0, path: src/app.js}', '  # - {type: pr, url: https://github.com/org/repo/pull/42}', '  # - {type: b2b-file, name: diff.patch}   (a file you attach with --attach)']),

@@ -530,7 +530,7 @@ test('coding agent: the session leading a group gets its messages, and a run the
   assert.match(turn.out, /handed to you, the session leading that group/);
   assert.match(turn.out, /\| Confirm v2 instead\?/);
   assert.match(turn.out, /QUESTION from .* in the group "Review" · mentions your owner/);
-  assert.match(turn.out, new RegExp(`To write in the group: node .*group send ${gid} "<text>"`));
+  assert.match(turn.out, new RegExp(`To write in the group: node .*group send ${gid} --reply-to gp_[\\w-]+ "<text>"`));
   assert.equal((await lead('waiting', '--hook', 'turn')).out, '', 'told once');
   // Nothing was saved for "the owner's next session" behind the lead's back.
   assert.equal((await cara.cli('waiting', '--hook')).out, '');

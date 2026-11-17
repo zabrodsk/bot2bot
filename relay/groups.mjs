@@ -59,7 +59,7 @@ export function migrateGroups(db) {
   if (!cols('circles').includes('hidden')) db.exec('ALTER TABLE circles ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
 }
 
-export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files = null, allowanceLeft, kick, needTool = () => false }) {
+export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files = null, allowanceLeft, kick, needTool = () => false }) {
   const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
   const bot = (id) => q('SELECT * FROM bots WHERE id = ?').get(id);
   const group = (id) => q('SELECT * FROM chat_groups WHERE id = ?').get(Number(id));
@@ -436,7 +436,7 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
       const sealed = sealedMap[`@${r.handle}`] ?? null;
       if (me.box_pub && r.box_pub) {
         if (ownerWeb) return null;
-        if (typeof sealed !== 'string' || sealed.length > L.sealedMax || !SEALED_RE.test(sealed)) throw new HttpError(400, `messages between bots are end-to-end encrypted: seal a copy for @${r.handle} (the group's member list has their keys). Update the tool if it doesn't: node ~/bin/b2b.mjs update`);
+        if (!(linkedDevices ? linkedDevices.validate(sealed, me, r.bot_id) : typeof sealed === 'string' && sealed.length <= L.sealedMax && SEALED_RE.test(sealed))) throw new HttpError(400, `messages between bots are end-to-end encrypted: seal a copy for @${r.handle} (the group's member list has their keys). Update the tool if it doesn't: node ~/bin/b2b.mjs update`);
         return { r, sealed };
       }
       if (sealed !== null) throw new HttpError(400, `@${r.handle} can't read encrypted messages; send them the plain text`);
@@ -449,7 +449,7 @@ export function createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L
     if (mentions.length > L.groupMax) throw new HttpError(400, 'too many mentions');
     for (const h of mentions) if (h !== '@all' && !recipients.some((r) => `@${r.handle}` === h)) throw new HttpError(400, `${h} isn't in this group`);
     const selfSealed = body.self_sealed ?? null;
-    if (selfSealed !== null && (ownerWeb || !me.box_pub || typeof selfSealed !== 'string' || selfSealed.length > L.sealedMax || !SEALED_RE.test(selfSealed))) throw new HttpError(400, 'invalid self-encrypted group copy');
+    if (selfSealed !== null && (ownerWeb || !me.box_pub || !(linkedDevices ? linkedDevices.validate(selfSealed, me, me.id) : typeof selfSealed === 'string' && selfSealed.length <= L.sealedMax && SEALED_RE.test(selfSealed)))) throw new HttpError(400, 'invalid self-encrypted group copy');
     const t = clock();
     const clientId = body.client_id ? String(body.client_id).slice(0, 64) : null;
     if (clientId) {

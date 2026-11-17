@@ -21,6 +21,7 @@ import { migrateStatus, createStatus } from './status.mjs';
 import { migrateFiles, createFiles, FILE_LIMITS } from './files.mjs';
 import { migrateUpdates, createUpdates, UPDATE_LIMITS } from './updates.mjs';
 import { capabilityProfile } from './capabilities.mjs';
+import { migrateLinkedDevices, createLinkedDevices } from './linked-devices.mjs';
 import { migrateTaskThreads, createTaskThreads } from './task-threads.mjs';
 import { createSafePost, checkCallbackUrl, ringRefused, doorbellRefused, webhookKey, AGENTS, AGENT_NAMES, agentPlatform, JOIN_AS, joinPlatform } from './doorbells.mjs';
 
@@ -341,12 +342,14 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   migrateFiles(db);
   migrateUpdates(db);
   migrateTaskThreads(db);
+  migrateLinkedDevices(db);
   hostedUsage?.migrateUsage(db);
   hostedBilling?.migrateBilling(db);
   hostedInvites?.migrateInvites(db);
   hostedBoard?.migrateBoard(db);
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => { db.exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
+  const linkedDevices = createLinkedDevices({ q, tx, clock, HttpError, sha, L });
   const taskThreads = createTaskThreads({ q, tx, clock, HttpError, resolveRecipient, bodyRetentionMs: L.bodyRetentionMs });
   // The public status page (status.mjs): a heartbeat a minute, the signals fed in below, and the operator's incidents.
   const status = createStatus({ q, tx, clock, HttpError, log: (...a) => log(...a), product: productName });
@@ -409,12 +412,12 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     for (const m of rows) q("UPDATE messages SET note = 'lost_keys_told' WHERE id = ?").run(m.id);
     return rows.map((m) => ({ id: m.id, to: `@${m.handle}`, name: m.alias ?? `@${m.handle}`, sent_at: iso(m.created_at) }));
   }
-  const botByToken = (raw) => (raw ? q('SELECT * FROM bots WHERE token_hash = ?').get(sha(raw)) : undefined);
+  const botByToken = (raw) => (raw ? q('SELECT * FROM bots WHERE token_hash = ?').get(sha(raw)) ?? linkedDevices.authenticate(sha(raw)) : undefined);
   const contact = (owner, peer) => q('SELECT * FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(owner, peer);
 
   function resolveRecipient(me, to) {
     if (typeof to !== 'string' || !to.trim()) throw new HttpError(400, 'to is required (a contact alias or @handle)');
-    const name = to.trim();
+    const name = linkedDevices.ownCodex(me, to.trim());
     let row;
     if (name.startsWith('@')) {
       row = q('SELECT c.*, b.handle FROM contacts c JOIN bots b ON b.id = c.peer_bot WHERE c.owner_bot = ? AND b.handle = ?').get(me.id, name.slice(1).toLowerCase());
@@ -835,7 +838,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     const tag = body.content_tag ?? null;
     let text = '', links = [], choices = [];
     if (sealed !== null) {
-      if (ownerWeb || typeof sealed !== 'string' || sealed.length > L.sealedMax || !SEALED_RE.test(sealed)) throw new HttpError(400, 'sealed message is malformed');
+      if (ownerWeb || !linkedDevices.validate(sealed, me, peer.peer_bot)) throw new HttpError(400, 'sealed message is malformed');
       if (tag !== null && (typeof tag !== 'string' || !TAG_RE.test(tag))) throw new HttpError(400, 'content_tag is malformed');
       if (!recipient.box_pub) throw new HttpError(400, "their bot can't read encrypted messages yet; send it as plain text");
       if (!me.box_pub) throw new HttpError(400, 'this bot has no keys, so its sealed messages could never be checked. Run: node ~/bin/b2b.mjs keys');
@@ -1427,7 +1430,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       // Messages held because the sender's key changed stay put until the owner trusts the new key.
       const rows = q(`SELECT m.*, b.handle AS from_handle, b.user_id AS from_user, b.sign_pub AS from_sign, b.box_pub AS from_box, c.alias AS from_alias, u.name AS from_person, u.email_verified_at AS from_verified, g.name AS group_name FROM messages m
                       JOIN bots b ON b.id = m.from_bot LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot LEFT JOIN users u ON u.id = b.user_id LEFT JOIN chat_groups g ON g.id = m.group_id
-                      WHERE m.to_bot = ? AND m.status = 'pending' AND coalesce(m.note, '') != 'key_check' ORDER BY m.created_at LIMIT ?`).all(me.id, limit);
+                      WHERE m.to_bot = ? AND m.status = 'pending' AND coalesce(m.note, '') != 'key_check' AND b2b_device_can_open(m.sealed, ?) ORDER BY m.created_at LIMIT ?`).all(me.id, me.device_id ?? 'primary', limit);
       for (const m of rows) {
         m.lease = token('lease_', 6);
         q("UPDATE messages SET status = 'claimed', lease_until = ?, lease_token = ?, claim_count = claim_count + 1, first_claimed_at = coalesce(first_claimed_at, ?), next_ring_at = NULL WHERE id = ?").run(t + L.leaseMs, m.lease, t, m.id);
@@ -1449,7 +1452,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         messages: rows.map((m) => ({
           from_person: m.kind === 'probe' ? null : (m.from_person ?? null), from_verified: !!m.from_verified,
           id: m.id, lease: m.lease, kind: m.kind, from: m.kind === 'probe' ? 'b2b relay' : (m.from_alias ?? `@${m.from_handle}`), from_handle: `@${m.from_handle}`,
-          ...(m.group_id ? { group: { id: m.group_id, name: m.group_name }, mentions_you: !!m.mentioned || undefined, contact: !!m.from_alias } : {}),
+          ...(m.group_id ? { group: { id: m.group_id, name: m.group_name, post: m.group_post ?? undefined }, mentions_you: !!m.mentioned || undefined, contact: !!m.from_alias } : {}),
           text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links), reply_to: m.reply_to, urgent: !!m.urgent,
           ...(!m.sealed && m.thread_id ? { thread: m.thread_id } : {}),
           sealed: m.sealed ?? undefined, from_keys: m.sealed && m.from_box ? { sign: m.from_sign, box: m.from_box } : undefined,
@@ -1730,7 +1733,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     resolveRecipient, enqueue, bumpGen, bumpPair, dropBetween, release, ring, L, filesFor: (to, from) => files.whyNot(to, from) });
   const { inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx,
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
-  const groups = createGroups({ q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files,
+  const groups = createGroups({ linkedDevices, q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files,
     allowanceLeft: (me, t) => { if (!hosted || me.vendor === 'web') return null; const a = allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me, t); return a.limited ? a.left : null; },
     kick: () => setImmediate(() => { void tick(); }), needTool: updates.need });
   const groupBrowser = createGroupBrowserHistory({ q, tx, clock, token, groups, HttpError });
@@ -1741,6 +1744,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   Object.assign(routes, groups.routes);
   Object.assign(routes, files.routes);
   Object.assign(routes, status.routes);
+  linkedDevices.install(routes);
   // Paying with Stripe (hosted only).
   const payments = hostedBilling ? hostedBilling.createBilling({ q, clock, log, release, hosted, B, fetchImpl, publicUrl, HttpError }) : null;
   // Someone tapped "Text the founder": their bot and the founder's bot become contacts. The founder's side is
@@ -1844,7 +1848,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
       const admin = auth.length > 0 && auth.length === adminToken.length && timingSafeEqual(Buffer.from(sha(auth)), Buffer.from(adminHash));
       const me = botByToken(auth);
-      const open = ['POST /v1/enroll', 'POST /v1/join', 'POST /v1/join/poll'].includes(found.key) || found.key.startsWith('POST /admin') || found.key.startsWith('GET /admin');
+      const open = ['POST /v1/devices/link', 'POST /v1/devices/link/poll', 'POST /v1/enroll', 'POST /v1/join', 'POST /v1/join/poll'].includes(found.key) || found.key.startsWith('POST /admin') || found.key.startsWith('GET /admin');
       if (!open && !me) throw new HttpError(401, 'missing or invalid bot token');
       // Which tool this bot runs, for its owner's dashboard; one too old to keep going is asked to update first.
       if (me) {

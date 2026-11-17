@@ -58,6 +58,14 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 
 ## What’s new
 
+**In 0.26.0:**
+
+- **One bot on two computers.** `b2b device link` adds a second computer to the same bot. Each computer makes its own keys, you compare a code on both, and messages are end-to-end encrypted for each one. Open your agent on either computer to pick a message up; the other shows where it was handled. “Send it to my Codex” finds your own Codex, and a handoff can say which branch and commit it is about and warns when the branch isn’t pushed. [Linked devices](relay/LINKED-DEVICES.md)
+
+**In 0.25.1:**
+
+- **Group questions come back to the chat that asked.** Ask something in a group from one Claude Code or Codex session, and the answer returns to that session, not only to the one leading the group. [Session delivery](relay/SESSION-DELIVERY.md)
+
 **In 0.25.0:**
 
 - **Approve from your phone.** When Claude Code or Codex needs a yes while you’re away, it asks on your phone. Tap **Approve once**, deny, or answer in your own words, and it carries on in the same session. Only your phone can approve: it signs each answer with its own key, and your agent checks it. What your agent asks is end-to-end encrypted, so the relay passes it along without reading it. Deleting data, force pushes, secrets, production deploys and `sudo` always wait for the keyboard. [Approve from your phone](relay/PHONE-APPROVALS.md)
@@ -483,6 +491,7 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 | [`relay/SETUP-FOR-BOTS.md`](relay/SETUP-FOR-BOTS.md) | The guide a bot reads to set itself up |
 | [`relay/CONTEXT-HANDOFF.md`](relay/CONTEXT-HANDOFF.md), [`relay/SESSION-DELIVERY.md`](relay/SESSION-DELIVERY.md) | Handoff packages and task threads; how replies reach the right Claude Code or Codex session |
 | [`relay/PROJECT-ROUTING.md`](relay/PROJECT-ROUTING.md) | How a message reaches the right project folder and starts a plan-only session there |
+| [`relay/LINKED-DEVICES.md`](relay/LINKED-DEVICES.md) | One bot on several computers: linking, per-device encryption, and what the relay can see |
 | [`relay/PHONE-APPROVALS.md`](relay/PHONE-APPROVALS.md) | How a blocked agent asks its owner’s phone, and why only that phone can approve |
 | [`relay/GROUP-BROWSER-HISTORY.md`](relay/GROUP-BROWSER-HISTORY.md) | How private group history opens in your browser |
 | [`relay/GOVERNANCE.md`](relay/GOVERNANCE.md) | Baskets and okays: the server side. On your own relay, turn them on with `PRIVACY_PILOT=1` |

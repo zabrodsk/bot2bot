@@ -4,6 +4,14 @@
 
 Use `b2b bind <contact>` in the session handling a direct conversation. `b2b unbind <contact>` removes that binding. A reply to a tracked question takes precedence over a contact binding. Group binding still uses `group bind`. Claude Code and Codex sessions can bind conversations.
 
+## Group questions
+
+`group send <group> "..." --ask` remembers the asking session the same way, keyed by the relay's post ID (`gp_…`) and the group. Readers of a group question see `group send <group> --reply-to gp_… "<text>"` as the way to answer. That answer goes back to the session that asked, even when another session leads the group. Everything else in the group, including posts without `--reply-to`, still goes to the lead.
+
+The post ID travels inside each member's sealed copy, never as relay metadata, so the relay cannot link an answer to its question. Older tools ignore the field and their answers go to the lead. The asking side accepts a match only when the answer arrived sealed in the same group, and, for a question that mentioned specific people, only from one of them. An ID reused in another group, an answer from someone who was not asked, or an answer to another session's question is never sent to this session. A run started by the watcher still cannot write in a group another session leads, even when it is the resumed asking session. With `group unattended <group> full`, other group messages are read by the run, but answers to tracked questions still go to the asking session.
+
+Limits: matching needs end-to-end encrypted groups (both bots have keys). The private MCP tool `send_to_group` and quick connect have no `reply_to` yet, so answers sent from them go to the lead.
+
 When session detection is unavailable, set `B2B_SESSION` to the provider's real session ID and `B2B_SESSION_AGENT` to `claude-code` or `codex`. Codex normally supplies `CODEX_THREAD_ID`. Claude Code session environment variables and its local session registry are supported. Do not invent a session ID if the watcher should resume it.
 
 ## Claude Code idle sessions
@@ -49,6 +57,6 @@ For delivery while a Codex chat stays open, use `b2b wait` or read `b2b handoff`
 
 Simulator tests cover concurrent asking sessions, reply routing overriding contact bindings, private MCP channel notifications, channel disconnects, queue preservation, stale lock recovery, retention of pending work, and the exact Codex resume arguments. Existing group-lead, unattended permission, inbox, and watcher-help regressions remain in `test/agents.test.mjs`.
 
-The automated tests use isolated relays and provider stand-ins. They also verify busy-thread backoff, watcher restart and delivery to the original session after the conflict clears. Group replies continue to follow the group's bound lead; individual question correlation currently applies to direct replies using `reply_to`.
+The automated tests use isolated relays and provider stand-ins. They also verify busy-thread backoff, watcher restart and delivery to the original session after the conflict clears. `test/group-reply-routing.test.mjs` covers group questions: two asking sessions plus a separate lead, an unasked member's answer, an ID reused in another group, the relay's view, the one-voice refusal for a resumed asker, and `unattended full`.
 
 Real-provider acceptance on 17 November 2026 verified waiting and closed sessions, direct bindings, structured replies and original-asking-session routing. The Codex writer conflict was reproduced with both an idle interactive session and an active turn. Claude Code's organization policy blocked Channels in the test account; its next-prompt hook, `wait`, `handoff` and closed-session resume remain the supported alternatives. See [issue #3](https://github.com/zabrodsk/bot2bot/issues/3) for the results. These restrictions do not establish Claude Desktop or Duet support.

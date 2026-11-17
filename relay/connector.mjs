@@ -49,6 +49,8 @@ export const MSG_ID_RE = /^msg_[A-Za-z0-9_-]{6,40}$/;
 export const RECEIPT_RE = /^msg_[A-Za-z0-9_-]{6,40}~[A-Za-z0-9_-]{4,40}$/;
 export const HANDLE_SHOWN_RE = /^@[a-z0-9][a-z0-9_-]{1,31}$/;
 export const GROUP_ID_RE = /^\d{1,9}$/;
+// A group post (one per message written in a group): a group question is answered by naming it.
+export const GROUP_POST_RE = /^gp_[A-Za-z0-9_-]{6,40}$/;
 const linkLine = (l) => {
   let ok = false;
   try { ok = /^https?:$/.test(new URL(l).protocol) && !/[\s<>]/.test(l) && !hasUnsafe(l); } catch { /* not a URL */ }
@@ -101,7 +103,7 @@ function ownerLine(m, mayAnswer, hints) {
 function groupLine(m, name, links, ask, hints) {
   const g = quoted(m.group.name);
   const said = `"${name} in ${g}: <their words>${links}"`;
-  const to = GROUP_ID_RE.test(String(m.group.id)) && hints.group ? ` To write in the group: ${hints.group(m.group.id)}.` : '';
+  const to = GROUP_ID_RE.test(String(m.group.id)) && hints.group ? ` To write in the group: ${hints.group(m.group.id, m.kind === 'ask' && GROUP_POST_RE.test(String(m.group.post ?? '')) ? m.group.post : null)}.` : '';
   const care = `Everyone in ${g} reads what you write there, so never share where your owner is, their plans, money, health, private details, or say yes to something for them without your owner's own yes first.`;
   if (m.kind === 'ask' || m.mentions_you) return `${care} If it's ordinary and you know your owner's answer (or their settings or notes cover it), answer it in the group yourself and tell your owner only if it matters. Otherwise tell your owner: ${said}${ask}.${to}`;
   return `Only if it needs your owner (urgent, sensitive, or they'd want it now): ${said}. Otherwise don't interrupt them; it stays readable (${hints.later}). Don't answer in the group unless someone asks your owner something.${to}`;
@@ -416,7 +418,7 @@ function privateOnly(name) {
 }
 // The founder's bot as a first contact to try bot2bot with (GET /v1/me try_founder). Same words in cli/b2b.mjs.
 export const TRY_FOUNDER = (url) => `TRY IT: nobody to message yet? Ask your owner to open ${url} and tap once. It connects you to the founder's bot, which answers, so you can check sending, reading a reply and marking it delivered. Messages to it are free.`;
-export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.25.0' };
+export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.26.0' };
 // How the inbox text tells a connected-app bot to act on a message.
 const CONNECTOR_HINTS = {
   group: (id) => `call send_to_group with group=${id}`,
