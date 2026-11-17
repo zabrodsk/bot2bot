@@ -26,6 +26,21 @@ If neither works, tell me exactly what to change, in numbered steps (for example
   // The keys live in the tool's folder. An assistant whose files don't survive a restart loses them, and with them
   // every message still waiting, so it keeps the folder somewhere that's kept.
   const keepKeys = `Your keys go in ~/.b2b. If your files don't survive a restart, use a folder that does: put B2B_HOME=<that folder> in front of every b2b command, from the join on, so a restart never loses them.`;
+  // An assistant can run commands in a sandbox that only reaches some sites, such as a cloud agent in a chat app. Then
+  // the download and the join fail, and so does every docs page the failure step points to. Its app can still reach a
+  // custom connector from outside the sandbox, so quick connect works. But the owner asked for private mode, so the bot
+  // asks before it gives up end-to-end encryption, only switches when no join link went out (an approved join would
+  // clash with the connector's new bot), and leaves the rest of the message behind: whoami gives every step from there.
+  // `invite` is the invite page to open again afterwards, since the accept step in `after` needs the tool.
+  const quickConnect = (invite) => {
+    const again = invite ? `, and once you're connected, to open ${invite} again to accept the invite` : '';
+    return `If step 1 or 2 fails because this computer can't reach ${origin}, try once more. If it still can't, and you haven't given me a join link yet, don't send me to another computer:
+- Tell me I can connect you through your app instead, as a custom connector. That's quick connect: it isn't end-to-end encrypted (bot2bot can read those messages) and it can't send or get files. Ask me if I want it, and wait for my yes.
+- If I say yes, tell me in numbered steps to add a custom connector in your app's settings (name: bot2bot, server URL: ${origin}/mcp), sign in and pick A new bot. Then call bot2bot's whoami tool and do the next step it gives you.${invite ? ` Once you're connected, tell me to open ${invite} again to accept the invite.` : ''}
+- If bot2bot's tools don't show up in this chat, tell me to start a new chat and say: "Set up bot2bot: call whoami and do the next step."${again ? `${again}.` : ''}
+- Then skip the rest of this message. whoami gives you every step from here, doorbell included. Don't offer end-to-end encryption while you can't reach ${origin}.
+If you already gave me a join link, don't switch: run the join command again until it finishes.`;
+  };
   const prompts = {
     agentTool,
     helping,
@@ -83,16 +98,17 @@ ${helpAfter()}
 Don't print any keys or tokens.`,
     // Another assistant that can run commands. It says so when it joins, so it's never given Grok Bot's routine;
     // the newest release knows "--agent other".
-    other: (after = '', agent = 'other') => `Help me set you up as my bot on ${product}, in private mode (end-to-end encrypted). ${helping}
+    other: (after = '', agent = 'other', invite = '') => `Help me set you up as my bot on ${product}, in private mode (end-to-end encrypted). ${helping}
 1. Install the tool (Node.js 20 or newer): ${agentTool} && node ~/bin/b2b.mjs version
 ${keepKeys}
 2. ${join.replace('--wait 100', `--agent ${agent} --wait 100`)}
 3. Add the "b2b messaging" skill from ${origin}/skill, the way you keep skills or instructions.
 4. The doorbell wakes you when a friend's bot writes. ${watchAny} ${scheduleAny}${step(after)}
+${quickConnect(invite)}
 ${helpAfter()}
 Don't print any keys or tokens.`,
     // Instinct: the same steps, saying it's Instinct, so the dashboard shows its name and logo.
-    instinct: (after = '') => prompts.other(after, 'instinct'),
+    instinct: (after = '', invite = '') => prompts.other(after, 'instinct', invite),
   };
   return prompts;
 }

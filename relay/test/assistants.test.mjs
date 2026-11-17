@@ -115,3 +115,28 @@ test('schedule: nothing is rung; the recurring task picks up the test, and an ap
   assert.ok(botOf(env, 'sam-bot').doorbell_verified_at);
   assert.match(text(await app.tool('whoami')), /Doorbell: your recurring task ·/);
 });
+
+test("an assistant whose sandbox can't reach the relay asks about quick connect instead of giving up", async (t0) => {
+  const env = await setup(t0);
+  const prompts = setupPrompts({ origin: env.url });
+  const other = prompts.other();
+  const at = (s) => { const i = other.indexOf(s); assert.ok(i >= 0, s); return i; };
+  // After the steps that need the tool, before the generic failure step that needs it too.
+  const fallback = at(`can't reach ${env.url}`);
+  assert.ok(at('4. ') < fallback && fallback < at('If a step fails'));
+  // The owner hears it isn't end-to-end encrypted and says yes before any connector steps.
+  assert.ok(at("isn't end-to-end encrypted") < at('wait for my yes') && at('wait for my yes') < at(`${env.url}/mcp`));
+  // Only before a join link went out, and the rest of the message is left behind.
+  assert.match(other, /haven't given me a join link/);
+  assert.match(other, /skip the rest of this message/);
+  assert.match(other, /whoami/);
+  assert.match(prompts.instinct(), /can't reach /);
+  // On an invite page, the owner is sent back to the invite once the connector works.
+  assert.ok(prompts.other('', 'other', `${env.url}/i/ABCD-EFGH`).includes(`open ${env.url}/i/ABCD-EFGH again`));
+  // The dashboard's Other bots page offers quick connect for the same case, not only for bots without commands.
+  const b = await login(env, 'oli@example.com');
+  assert.equal((await b('/app/bots/add/other', { method: 'POST', form: { handle: 'oli-bot' } })).location, '/app/bots/add/other/steps');
+  const steps = (await b('/app/bots/add/other/steps')).text;
+  assert.match(steps, /can(?:'|&#39;|&#x27;)t reach bot2bot\?/);
+  assert.ok(steps.includes(`${env.url}/mcp`));
+});

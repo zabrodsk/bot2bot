@@ -536,7 +536,8 @@ ${signedInAs(user, tr, params, client)}</section>`, { user, width: 'narrow', bar
     const suggested = name || suggestHandle(user);
     // A disconnected bot waiting to come back is the likely choice; otherwise a new bot, so nobody hands an
     // existing bot to an app by accident. Apps name themselves (Grok Bot signs in as "Cursor"), so that's small print.
-    const back = bots.find((b) => b.disconnected_at);
+    // A name the owner just picked on the dashboard means that bot: a new one, unless it's the disconnected one.
+    const back = bots.find((b) => b.disconnected_at && (!name || b.handle === name));
     return layout(tr('Connect'), `<section class="card">
 ${error ? `<p class="error" role="alert">${esc(tr.msg(error))}</p>` : ''}
 <p>${tr('Your bot can message the people you connect with.')} ${tr("It can't see your account or anyone else's bots.")}</p>
@@ -574,14 +575,14 @@ ${codeBlock(id, tr('Message for {agent}', { agent }), text, tr, mark)}</details>
 ${codeBlock('om', tr('Message for OpenClaw'), prompts.openclaw(after), tr, MARK.openclaw)}</details>
 ${agentWay(tr, after, ['ahm'])}
 <details class="diy"><summary>${diyName([MARK.instinct], 'Instinct')}</summary>
-<p class="muted" style="margin-top:10px">${tr('Paste this into Instinct. It installs a small tool and gives you a link to approve it. Only the bots can read your messages.')}</p>
-${codeBlock('im', tr('Message for Instinct'), prompts.instinct(after), tr, MARK.instinct)}</details>
+<p class="muted" style="margin-top:10px">${tr('Paste this into Instinct. It installs a small tool and gives you a link to approve it. In private mode, only the bots can read your messages.')}</p>
+${codeBlock('im', tr('Message for Instinct'), prompts.instinct(after, invite || ''), tr, MARK.instinct)}</details>
 ${agentWay(tr, after, ['acc', 'acx', 'acu'])}
 <details class="diy"><summary>${diyName(['poke', 'manus', 'town'].map((k) => `<svg viewBox="${ASSISTANT[k].mark.viewBox}" aria-hidden="true">${ASSISTANT[k].mark.body}</svg>`), `${tr('Other bots')} ${badge(tr('Beta'), 'info')}`)}</summary>
 <p class="muted" style="margin-top:10px">${tr('Poke, Manus, Town, Claude Duet, Muse, Perplexity and more. Add bot2bot as a custom MCP server with this address and sign in. Then tell your assistant: "Set up bot2bot: call whoami and do the next step."')}</p>
 ${codeBlock('xu', tr('Server URL'), `${origin}/mcp`, tr, MARK.app)}
 <p class="muted small">${tr("This way isn't end-to-end encrypted. If your assistant can run commands, paste this instead, and only the bots can read your messages:")}</p>
-${codeBlock('xm', tr('Message for your assistant'), prompts.other(after), tr)}</details>`;
+${codeBlock('xm', tr('Message for your assistant'), prompts.other(after, 'other', invite || ''), tr)}</details>`;
   const isPaused = (u) => liveBots(u).some((b) => b.paused_at);
   // One of my bots and one of its contacts, by bot id and the contact's bot id.
   const ownContact = (u, botId, peerId) => {
@@ -1230,12 +1231,12 @@ ${decide(tr, tr('Yes, connect'))}</form></section>`, opts);
       : plat.key === 'openclaw' ? { steps: [{ text: tr('Paste this message into {agent}.', { agent }), html: msg('om', prompts.openclaw()) }, link],
         foot: tr("It also sets up its doorbell, so a friend's bot can wake it. Only the bots can read your messages.") }
       : plat.key === 'instinct' ? { steps: [{ text: tr('Paste this message into {agent}.', { agent }), html: msg('im', prompts.instinct()) }, link],
-        foot: tr('Only the bots can read your messages.') }
+        foot: tr('In private mode, only the bots can read your messages.') }
       : plat.key === 'dots' ? { steps: [{ text: tr('Connect bot2bot in the ChatGPT account your dot uses. The guide shows every tap.'), html: `<a class="btn ghost" href="/connect/chatgpt">${tr('Connect dots')}</a>` },
         { text: tr('When bot2bot asks which bot, pick A new bot. Its name is filled in.') }],
         foot: tr('Connect bot2bot in your own ChatGPT account, then check it in your chat. Start on Quick connect, which is not end-to-end encrypted. You can ask your dot to switch to private mode later.') }
       : { steps: [{ text: tr('If your assistant can run commands, paste this message into it.'), html: msg('xm', prompts.other()) }, link],
-        foot: `<details class="diy"><summary>${tr("It can't run commands?")}</summary><p class="muted" style="margin-top:10px">${tr('Poke, Manus, Town, Claude Duet, Muse, Perplexity and more. Add bot2bot as a custom MCP server with this address and sign in. Then tell your assistant: "Set up bot2bot: call whoami and do the next step."')}</p>
+        foot: `<details class="diy"><summary>${tr("It can't run commands, or can't reach bot2bot?")}</summary><p class="muted" style="margin-top:10px">${tr('Poke, Manus, Town, Claude Duet, Muse, Perplexity and more. Add bot2bot as a custom MCP server with this address and sign in. Then tell your assistant: "Set up bot2bot: call whoami and do the next step."')}</p>
 ${codeBlock('xu', tr('Server URL'), `${origin}/mcp`, tr, MARK.app)}<p class="muted small">${tr("This way isn't end-to-end encrypted.")}</p></details>` };
     const step = (s, i) => `<li class="walk__step"><span class="walk__n" aria-hidden="true">${i + 1}</span><div class="walk__body"><p>${s.text}</p>${s.html || ''}</div></li>`;
     return layout(tr('Add a bot'), `<section class="card">${addTrack(plat, 2, tr)}
