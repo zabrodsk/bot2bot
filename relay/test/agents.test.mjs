@@ -686,3 +686,56 @@ if (args.includes('resume')) fs.writeFileSync(${JSON.stringify(received)}, outpu
   assert.match(readFileSync(received, 'utf8'), /\| Continue the API review/);
   assert.doesNotMatch(resumed.args.join(' '), /dangerously-bypass/);
 });
+
+test('a busy Codex thread retries its saved handoff after backoff, including after watcher restart', async (t0) => {
+  const env = await setup(t0, { limits: { watchHoldMs: 100 } });
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-codex', 'codex');
+  const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
+  await connectHandled(ann, cara, 'ann');
+  const d = mkdtempSync(join(tmpdir(), 'b2b-codex-busy-'));
+  t0.after(() => rmSync(d, { recursive: true, force: true }));
+  const bin = join(d, 'codex'), available = join(d, 'available'), attempts = join(d, 'attempts'), received = join(d, 'received');
+  writeFileSync(bin, `#!${process.execPath}
+const fs = require('node:fs');
+const resume = process.argv.includes('resume');
+if (resume) {
+  fs.appendFileSync(${JSON.stringify(attempts)}, process.env.B2B_SESSION + '\\n');
+  if (!fs.existsSync(${JSON.stringify(available)})) {
+    process.stderr.write('thread/resume failed: thread already has an active writer (code -32600)\\n');
+    process.exit(1);
+  }
+}
+const output = require('node:child_process').execFileSync(process.execPath, [${JSON.stringify(CLI)}, resume ? 'handoff' : 'inbox'], { encoding: 'utf8' });
+if (resume) fs.writeFileSync(${JSON.stringify(received)}, output);
+`);
+  chmodSync(bin, 0o755);
+  const id = '019a1234-5678-7000-8000-123456789abc';
+  await runIn(cara.home, { B2B_SESSION: id, B2B_SESSION_AGENT: 'codex' })('bind', 'ann');
+  const statePath = join(cara.home, 'sessions.json'), queuePath = join(cara.home, 'handoff.json');
+  const state = () => JSON.parse(readFileSync(statePath));
+  const queue = () => JSON.parse(readFileSync(queuePath)).items;
+  const w = startWatcher(t0, cara.home, bin, 'codex', '--only-b2b');
+  await waitFor(async () => (await cara.b(`/app/bots/${cara.botId}/state`)).json().watching);
+  await ann.cli('send', '@cara-codex', 'Keep this review in its original session', '--ask');
+  await waitFor(() => /retrying its saved messages in 30 s/.test(w.log()), 15_000);
+  assert.equal(state().contacts['@ann-bot'].session, id);
+  assert.equal(state().sessions[id].resume_failures, 1);
+  assert.ok(state().sessions[id].resume_retry_at > Date.now());
+  assert.equal(queue()[0].session, id);
+  assert.equal(queue()[0].woke, false);
+  await new Promise((resolve) => { w.p.once('exit', resolve); w.p.kill(); });
+  const restarted = startWatcher(t0, cara.home, bin, 'codex', '--only-b2b');
+  await waitFor(() => /watching @cara-codex/.test(restarted.log()));
+  await sleep(300);
+  assert.equal(readFileSync(attempts, 'utf8').trim().split('\n').length, 1, 'restart must retain the retry delay');
+  const saved = state();
+  saved.sessions[id].resume_retry_at = Date.now() - 1;
+  writeFileSync(available, 'thread closed');
+  writeFileSync(statePath, JSON.stringify(saved));
+  await waitFor(() => existsSync(received), 10_000);
+  await waitFor(() => !state().sessions[id].resume_retry_at, 5_000);
+  assert.match(readFileSync(received, 'utf8'), /Keep this review in its original session/);
+  assert.deepEqual(readFileSync(attempts, 'utf8').trim().split('\n'), [id, id]);
+  assert.deepEqual(queue(), []);
+  assert.equal(state().sessions[id].resume_failures, undefined);
+});

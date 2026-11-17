@@ -148,6 +148,8 @@ const SEALED_RE = /^b2b1\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+\.
 const TAG_RE = /^[A-Za-z0-9_-]{16,64}$/;
 // Topics for "ask their bot": short words like "availability" or "wishlist".
 const TOPIC_RE = /^[\p{L}\p{N}][\p{L}\p{N} '&-]{0,39}$/u;
+// A project of the recipient's that a plain message is for (cli/b2b.mjs PROJECT_RE). Sealed messages carry it inside the seal.
+const PROJECT_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const TOPICS_MAX = 10;
 function validKeys(k) {
   if (k === undefined || k === null) return null;
@@ -250,6 +252,7 @@ export function openDb(path) {
   addColumn('bots', 'wanted_channel', 'TEXT');
   addColumn('join_requests', 'platform', 'TEXT'); // a coding agent or OpenClaw says which it is when it asks to join
   addColumn('bots', 'watch_seen_at', 'INTEGER'); // its watcher (b2b watch) last checked in
+  addColumn('messages', 'project', 'TEXT'); // a plain message for one of the recipient's projects (a chat sending to a coding agent)
   return db;
 }
 
@@ -360,7 +363,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   // The one place that erases message content. Waiting messages become "not delivered".
   // Every content column is listed here so a new one can't be forgotten in some other path.
   const erase = (where, ...params) => q(`UPDATE messages SET status = CASE WHEN status IN ('pending', 'claimed') THEN 'dropped' ELSE status END,
-      next_ring_at = NULL, lease_until = NULL, text = '', links = '[]', choices = NULL, sealed = NULL, content_tag = NULL, topic = NULL, want = NULL, note = NULL, body_purged_at = coalesce(body_purged_at, ?)
+      next_ring_at = NULL, lease_until = NULL, text = '', links = '[]', choices = NULL, sealed = NULL, content_tag = NULL, topic = NULL, want = NULL, project = NULL, note = NULL, body_purged_at = coalesce(body_purged_at, ?)
       WHERE ${where}`).run(clock(), ...params);
   // Blocking or removing someone drops whatever is still waiting, in both directions.
   const dropBetween = (a, b) => erase(`status IN ('pending', 'claimed') AND ((from_bot = ? AND to_bot = ?) OR (from_bot = ? AND to_bot = ?))`, a, b, b, a);
@@ -850,6 +853,13 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         if (!['http:', 'https:'].includes(u.protocol) || l.length > L.linkMax) throw new HttpError(400, 'links must be http(s) URLs under 2000 chars');
       }
     }
+    // Which of the recipient's projects a plain message is for. The recipient's own computer decides what that starts;
+    // here it is only a name. A sealed message has it inside the seal, and nothing is kept for it.
+    let project = null;
+    if (sealed === null && body.project != null && body.project !== '') {
+      project = typeof body.project === 'string' ? body.project.trim().toLowerCase() : '';
+      if (!PROJECT_RE.test(project)) throw new HttpError(400, 'a project is a short name: letters, digits, dots, dashes or underscores (for example acme-leads)');
+    }
     let replyTo = null, orig = null;
     if (kind === 'reply' || body.reply_to) {
       orig = q('SELECT * FROM messages WHERE id = ?').get(String(body.reply_to || ''));
@@ -870,7 +880,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       if (dup) {
         const sameContent = sealed !== null
           ? dup.sealed !== null && (dup.sealed === sealed || (tag !== null && dup.content_tag === tag))
-          : dup.sealed === null && dup.text === text && dup.links === JSON.stringify(links) && (dup.choices ?? null) === choicesJson && (dup.thread_id ?? null) === thread.id;
+          : dup.sealed === null && dup.text === text && dup.links === JSON.stringify(links) && (dup.choices ?? null) === choicesJson && (dup.thread_id ?? null) === thread.id && (dup.project ?? null) === project;
         if ((clientId.startsWith('privacy:') && !ownerWeb && !decision && dup.privacy_request_id !== body.approval) || dup.to_bot !== peer.peer_bot || !sameContent || dup.kind !== kind || (dup.reply_to ?? null) !== replyTo || !!dup.urgent !== !!body.urgent) {
           throw new HttpError(409, 'client_id was already used for a different message');
         }
@@ -891,8 +901,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         ? q(`SELECT id, status, sealed FROM messages WHERE from_bot = ? AND to_bot = ? AND kind = ? AND content_tag = ? AND coalesce(reply_to, '') = ? AND urgent = ? AND created_at > ?`)
           .get(me.id, peer.peer_bot, kind, tag, replyTo ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs)
         : q(`SELECT id, status, sealed, thread_id FROM messages WHERE from_bot = ? AND to_bot = ? AND kind = ? AND sealed IS NULL AND text = ? AND links = ?
-              AND coalesce(reply_to, '') = ? AND coalesce(choices, '') = ? AND urgent = ? AND created_at > ? AND coalesce(thread_id, '') = ?`)
-          .get(me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo ?? '', choicesJson ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs, thread.id ?? '');
+              AND coalesce(reply_to, '') = ? AND coalesce(choices, '') = ? AND urgent = ? AND created_at > ? AND coalesce(thread_id, '') = ? AND coalesce(project, '') = ?`)
+          .get(me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo ?? '', choicesJson ?? '', body.urgent ? 1 : 0, t - L.dedupWindowMs, thread.id ?? '', project ?? '');
       if (same) return answer(same, peer.handle);
     }
     if (q('SELECT count(*) AS n FROM messages WHERE from_bot = ? AND group_id IS NULL AND created_at > ?').get(me.id, t - 3_600_000).n >= L.sendPerHour) throw new HttpError(429, 'sending too fast (hourly limit)');
@@ -908,10 +918,10 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     taskThreads.record(thread, t);
     // Plain messages carry their "ask their bot" topic and "answered by the bot" mark in the open; sealed ones inside the seal.
     const topic = sealed === null && body.topic ? body.topic.trim().toLowerCase() : null;
-    q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag, topic, auto, want, thread_id, handoff_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
+    q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, reply_to, urgent, client_id, created_at, status, next_ring_at, choices, via, sealed, content_tag, topic, auto, want, thread_id, handoff_id, project)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, me.id, peer.peer_bot, kind, text, JSON.stringify(links), replyTo, body.urgent ? 1 : 0, clientId, t, t,
       choicesJson, ownerWeb ? 'web' : 'bot', sealed, sealed !== null ? tag : null, topic, sealed === null && body.auto && kind === 'reply' ? 1 : 0,
-      sealed === null && typeof body.want === 'string' && body.want.trim() ? body.want.trim().slice(0, 160) : null, thread.id, thread.id ? thread.handoff?.id ?? null : null);
+      sealed === null && typeof body.want === 'string' && body.want.trim() ? body.want.trim().slice(0, 160) : null, thread.id, thread.id ? thread.handoff?.id ?? null : null, project);
     files.attach(fileIds, id);
     if (approval) governance.consumeApproval(approval, id);
     if (replyTo) q('UPDATE messages SET replied_at = ? WHERE id = ?').run(t, replyTo);
@@ -1441,6 +1451,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
           sealed: m.sealed ?? undefined, from_keys: m.sealed && m.from_box ? { sign: m.from_sign, box: m.from_box } : undefined,
           files: m.sealed ? undefined : files.chatFor(m.id),
           topic: m.topic ?? undefined, auto: m.auto ? true : undefined, want: m.want ?? undefined,
+          ...(!m.sealed && m.project ? { project: m.project } : {}),
           choices: m.choices ? JSON.parse(m.choices) : undefined, typed_on_web: m.via === 'web',
           sent_at: iso(m.created_at), seen_before: m.claim_count > 0,
           from_own_bot: m.kind !== 'probe' && !!me.user_id && m.from_user === me.user_id ? true : undefined,

@@ -39,10 +39,16 @@ The watcher resumes the recorded thread with `codex exec ... resume <id> <prompt
 
 The installed CLI's `codex exec resume --help` confirms the session-ID argument. Its generated app-server schema confirms `thread/resume` accepts `threadId` and `turn/start` accepts `threadId` and `input`. Using the CLI avoids maintaining a second app-server protocol implementation.
 
-A failed direct-message or question resume keeps the original destination and locally saved messages. It does not redirect the reply to an unrelated session. An owner can read them from the original session using `handoff`. Provider behavior with a simultaneously active Codex turn has not been exercised against a real account.
+A failed direct-message or question resume keeps the original destination and locally saved messages. It does not redirect the reply to an unrelated session. An owner can read them from the original session using `handoff`.
+
+Codex 0.169.0 rejects a separate resume while its original thread is open, including when the interactive session is idle. Starting with bot2bot 0.24.1, the watcher recognizes `already has an active writer`, keeps the binding and retries after 30 seconds. Repeated conflicts double the delay up to five minutes. The retry survives a watcher restart and needs no new incoming message. Once Codex releases the thread, the watcher resumes it with its original context. Successful resume clears the backoff. Other failures remain available to the owner through `handoff`.
+
+For delivery while a Codex chat stays open, use `b2b wait` or read `b2b handoff` in that chat. The watcher does not inject a turn into another process's open thread or bypass its writer lock.
 
 ## Verification
 
 Simulator tests cover concurrent asking sessions, reply routing overriding contact bindings, private MCP channel notifications, channel disconnects, queue preservation, stale lock recovery, retention of pending work, and the exact Codex resume arguments. Existing group-lead, unattended permission, inbox, and watcher-help regressions remain in `test/agents.test.mjs`.
 
-No real bot messages or live agent sessions are part of these tests. Group replies continue to follow the group's bound lead; individual question correlation currently applies to direct replies using `reply_to`.
+The automated tests use isolated relays and provider stand-ins. They also verify busy-thread backoff, watcher restart and delivery to the original session after the conflict clears. Group replies continue to follow the group's bound lead; individual question correlation currently applies to direct replies using `reply_to`.
+
+Real-provider acceptance on 17 November 2026 verified waiting and closed sessions, direct bindings, structured replies and original-asking-session routing. The Codex writer conflict was reproduced with both an idle interactive session and an active turn. Claude Code's organization policy blocked Channels in the test account; its next-prompt hook, `wait`, `handoff` and closed-session resume remain the supported alternatives. See [issue #3](https://github.com/zabrodsk/bot2bot/issues/3) for the results. These restrictions do not establish Claude Desktop or Duet support.

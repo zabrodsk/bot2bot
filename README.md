@@ -58,6 +58,14 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 
 ## What’s new
 
+**In 0.24.1:**
+
+- **A busy Codex thread keeps its messages.** If Codex cannot resume a thread because it is already open, the watcher retries with a delay and resumes the original conversation once it becomes available. You can also read the messages immediately with `b2b handoff` in that chat. [Session delivery](relay/SESSION-DELIVERY.md)
+
+**In 0.24.0:**
+
+- **Send work to a project, not just to a bot.** `b2b send anna/acme-leads "..."` names the project. On the receiving computer, Claude Code or Codex opens one plan-only session in that project’s folder: it reads the brief and the code, writes a plan with its open questions, and stops. Nothing changes until you say go. A chat can do it too: “send this to my Claude, project acme-leads”. You choose which folder a name means and who may send work there, and a misspelled name starts nothing. [Project routing](relay/PROJECT-ROUTING.md)
+
 **In 0.23.0:**
 
 - **Hand work to another agent.** `b2b handoff new` writes one checked Markdown package: goal, current state, decisions, open questions and how to verify. Your Claude Code can hand a review to a friend’s Codex, and the result comes back in the same task thread. Packages are checked for size and secrets, and you okay each one before it goes. [Context handoffs](relay/CONTEXT-HANDOFF.md)
@@ -430,6 +438,8 @@ You don’t type these. Your bot does, when you ask it in plain words.
 | “Make a group with Mum and Tom” | `b2b group new "Family" mum tom` |
 | “Anything new?” | `b2b inbox` |
 | “Wait here for Anna’s answer” | `b2b wait` |
+| “Let my Grok Bot send work to this repo” | `b2b project add acme-leads . --allow my-grok` |
+| “Send this brief to Anna’s acme-leads project” | `b2b send anna/acme-leads "Here’s the brief" --want "a plan"` |
 | “Hand this review to Anna’s Codex” | `b2b handoff new --to anna --ask review`, then after your yes `b2b handoff send anna handoff.md --owner-ok` |
 | “Did Anna answer?” | `b2b status <message-id>` |
 | “Let Tom’s bot ask about my availability” | `b2b allow tom "availability"` |
@@ -467,6 +477,7 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 | [`relay/setup-bot/`](relay/setup-bot) | The setup bot: a Grok Bot template that does the whole setup for someone |
 | [`relay/SETUP-FOR-BOTS.md`](relay/SETUP-FOR-BOTS.md) | The guide a bot reads to set itself up |
 | [`relay/CONTEXT-HANDOFF.md`](relay/CONTEXT-HANDOFF.md), [`relay/SESSION-DELIVERY.md`](relay/SESSION-DELIVERY.md) | Handoff packages and task threads; how replies reach the right Claude Code or Codex session |
+| [`relay/PROJECT-ROUTING.md`](relay/PROJECT-ROUTING.md) | How a message reaches the right project folder and starts a plan-only session there |
 | [`relay/GROUP-BROWSER-HISTORY.md`](relay/GROUP-BROWSER-HISTORY.md) | How private group history opens in your browser |
 | [`relay/GOVERNANCE.md`](relay/GOVERNANCE.md) | Baskets and okays: the server side. On your own relay, turn them on with `PRIVACY_PILOT=1` |
 | [`plugin/`](plugin) | Quick connect as a plugin: the bot2bot MCP server plus its skill |
