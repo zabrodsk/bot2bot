@@ -16,6 +16,7 @@ import { migrateGovernance, createGovernance } from './governance.mjs';
 import { migrateEvents, createEvents } from './events.mjs';
 import { migrateGroups, createGroups } from './groups.mjs';
 import { migrateGroupBrowserHistory, createGroupBrowserHistory } from './group-browser-history.mjs';
+import { migratePhone, createPhone } from './phone.mjs';
 import { migrateStatus, createStatus } from './status.mjs';
 import { migrateFiles, createFiles, FILE_LIMITS } from './files.mjs';
 import { migrateUpdates, createUpdates, UPDATE_LIMITS } from './updates.mjs';
@@ -335,6 +336,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   if (!db.prepare('PRAGMA table_info(bots)').all().some((c) => c.name === 'chat_app')) db.exec("ALTER TABLE bots ADD COLUMN chat_app TEXT; UPDATE bots SET chat_app = display_name WHERE platform = 'sender'");
   migrateGroups(db);
   migrateGroupBrowserHistory(db);
+  migratePhone(db);
   migrateStatus(db);
   migrateFiles(db);
   migrateUpdates(db);
@@ -550,6 +552,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     status.beat(t);
     governance.expire(t);
     groupBrowser.sweep();
+    phone.sweep();
     retention(t);
     void nudgeDoorbells(t);
     void nudgeApprovals(t);
@@ -772,6 +775,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     events.retention(t);
     groups.retention(t);
     groupBrowser.sweep();
+    phone.sweep();
     void files.sweep(t).catch((e) => console.error('files sweep', e));
     const expired = q(`UPDATE messages SET status = 'dropped', next_ring_at = NULL, lease_until = NULL, note = coalesce(note, 'expired')
                        WHERE status IN ('pending', 'claimed') AND kind != 'probe' AND created_at < ?
@@ -1731,6 +1735,9 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     kick: () => setImmediate(() => { void tick(); }), needTool: updates.need });
   const groupBrowser = createGroupBrowserHistory({ q, tx, clock, token, groups, HttpError });
   Object.assign(routes, groupBrowser.routes);
+  // Approve from your phone: encrypted cards from a coding agent to its owner's phone page, and signed answers back.
+  const phone = createPhone({ q, tx, clock, token, HttpError, publicUrl, fetchImpl, allowLocalWebhooks, log, limits: limits.phone });
+  Object.assign(routes, phone.routes);
   Object.assign(routes, groups.routes);
   Object.assign(routes, files.routes);
   Object.assign(routes, status.routes);
@@ -1783,7 +1790,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     return missing.length;
   }
   linkOwnBots();
-  const handleApp = createApp({ originFor, aliasUrls: aliases, analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, groupBrowser, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
+  const handleApp = createApp({ originFor, aliasUrls: aliases, analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, groupBrowser, phone, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
     decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, status, files, toolInfo, channelFor, toolTooOld, privateDoorbell, renameBot, latestUpdate, board, feedbackTo, markActive, usage, hostedAdmin, payments, invites, hostedInvites: invites ? hostedInvites : null, adminEmails, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, watching, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   const probeHash = probeToken ? sha(probeToken) : null;

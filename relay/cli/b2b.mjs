@@ -7,7 +7,7 @@ import { join, dirname, basename, extname, resolve, relative, isAbsolute } from 
 import { spawnSync, spawn } from 'node:child_process';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, randomUUID, sign, verify, createHash, createHmac, publicEncrypt } from 'node:crypto';
 
-const VERSION = '0.24.1';
+const VERSION = '0.25.0';
 // The "b2b messaging" skill and the doorbell routine instruction that go with this version: sha256 of
 // relay/skill/SKILL.md and of the instruction in relay/SETUP-FOR-BOTS.md, with {{RELAY}} left in (a test keeps
 // them in step). "refresh" only hands out texts that match, so they're as signed as the tool itself.
@@ -1178,6 +1178,175 @@ function briefText(items, b2b) {
   out.push("Tell your owner what came, in a few lines: who sent it, what it asks for, and the plan or the open questions. Start the work only after their own clear go.");
   return out.join('\n');
 }
+// ───── approve from the phone ─────
+// A coding agent that needs a yes while its owner is away asks the owner's phone (the page at /app/phone) and waits.
+// The owner links a phone once, at the keyboard, by telling the agent the code the phone shows: this bot then pins
+// that phone's two public keys (phone.json). A card is encrypted to each linked phone, so the relay carries it
+// without reading it. An answer counts only when it is signed by a linked phone for exactly this request (its id and
+// the hash of what was asked), so the relay, another bot or an old answer can never approve anything.
+// Some things are never asked on the phone: they wait for the keyboard (KEYBOARD_ONLY).
+const phonePath = join(dir, 'phone.json');
+const PHONE_AWAY_AFTER = 120; // seconds without keyboard or mouse before the phone is asked (mode auto)
+const PHONE_BACK_UNDER = 20;  // the owner touched the computer again: the question goes back to the screen
+const loadPhone = () => {
+  const p = readJson(phonePath);
+  return { mode: ['on', 'off', 'auto'].includes(p.mode) ? p.mode : 'auto', wait: typeof p.wait === 'number' && p.wait > 0 && p.wait <= 30 ? p.wait : 30,
+    devices: p.devices && typeof p.devices === 'object' && !Array.isArray(p.devices) ? p.devices : {}, rules: Array.isArray(p.rules) ? p.rules.filter((r) => r && typeof r.re === 'string') : [] };
+};
+const updatePhone = (fn) => sessionLock(() => { const p = loadPhone(); const out = fn(p); writeSessionJson(phonePath, p); return out; });
+const phoneDevices = () => Object.entries(loadPhone().devices).map(([id, d]) => ({ id, ...d }));
+// The code a phone shows (relay/phone.mjs phoneCode, and the page): 60 bits of the hash of its two public keys.
+export function phoneCode(signPub, boxPub) {
+  const h = createHash('sha256').update(`b2b-phone/1|${signPub}|${boxPub}`).digest();
+  let bits = 0n;
+  for (let i = 0; i < 8; i++) bits = (bits << 8n) | BigInt(h[i]);
+  let out = '';
+  for (let i = 0; i < 12; i++) out += 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Number((bits >> BigInt(59 - i * 5)) & 31n)];
+  return `${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8)}`;
+}
+const p256Key = (raw) => { const b = unb64(raw); if (b.length !== 65 || b[0] !== 4) throw new Error('not a P-256 key'); return createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: b64(b.subarray(1, 33)), y: b64(b.subarray(33)) }, format: 'jwk' }); };
+// One card, encrypted to one phone (ECDH P-256, HKDF-SHA-256, AES-256-GCM: what a browser's WebCrypto opens).
+function phoneBox(plain, device, cardId) {
+  const eph = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const j = eph.publicKey.export({ format: 'jwk' });
+  const ephRaw = Buffer.concat([Buffer.from([4]), unb64(j.x), unb64(j.y)]);
+  const key = Buffer.from(hkdfSync('sha256', diffieHellman({ privateKey: eph.privateKey, publicKey: p256Key(device.box) }), ephRaw, 'b2b-phone-card/1', 32));
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', key, iv);
+  c.setAAD(Buffer.from(`b2b-phone-card/1|${cardId}|${device.id}`));
+  return { eph: b64(ephRaw), iv: b64(iv), ct: b64(Buffer.concat([c.update(JSON.stringify(plain), 'utf8'), c.final(), c.getAuthTag()])) };
+}
+// What the owner answered, or null when the answer isn't signed by a linked phone for this very request.
+function phoneAnswer(card, a, devices) {
+  try {
+    const d = a && typeof a === 'object' && Object.hasOwn(devices, String(a.device)) ? devices[a.device] : null;
+    if (!d || !['allow', 'deny', 'reply'].includes(a.decision)) return null;
+    let text = '';
+    if (a.decision === 'reply') {
+      const ct = unb64(a.reply?.ct);
+      const dc = createDecipheriv('aes-256-gcm', card.rk, unb64(a.reply?.iv));
+      dc.setAAD(Buffer.from(`b2b-phone-reply/1|${card.id}`)); dc.setAuthTag(ct.subarray(-16));
+      text = Buffer.concat([dc.update(ct.subarray(0, -16)), dc.final()]).toString('utf8');
+      if (!text.trim()) return null;
+    }
+    const said = `b2b-phone-answer/1|${card.id}|${card.hash}|${a.decision}|${a.decision === 'reply' ? createHash('sha256').update(text).digest('hex') : ''}`;
+    if (!verify('sha256', Buffer.from(said), { key: p256Key(d.sign), dsaEncoding: 'ieee-p1363' }, unb64(a.sig))) return null;
+    return { decision: a.decision, text: text.slice(0, 2000), device: d.name ?? 'phone' };
+  } catch { return null; }
+}
+// Seconds since the owner last touched this computer, where that can be known (a Mac; elsewhere a file a helper keeps).
+function idleSeconds() {
+  if (process.env.B2B_IDLE_FILE) { const n = Number((() => { try { return readFileSync(process.env.B2B_IDLE_FILE, 'utf8'); } catch { return 'x'; } })()); return Number.isFinite(n) ? n : null; }
+  if (process.platform !== 'darwin') return null;
+  const r = spawnSync('/usr/sbin/ioreg', ['-c', 'IOHIDSystem', '-d', '4'], { encoding: 'utf8', timeout: 3_000 });
+  const m = String(r.stdout ?? '').match(/"HIDIdleTime" = (\d+)/);
+  return m ? Number(m[1]) / 1e9 : null;
+}
+// Should the phone be asked now? Always in a run nobody watches and in mode "on"; in "auto" when the computer has been
+// left alone for a couple of minutes.
+function phoneAway(ph) {
+  if (ph.mode === 'off' || !Object.keys(ph.devices).length) return false;
+  if (ph.mode === 'on' || process.env.B2B_UNATTENDED === '1') return true;
+  const idle = idleSeconds();
+  return idle !== null && idle >= PHONE_AWAY_AFTER;
+}
+// The owner is at the keyboard again (mode auto, a session they have open): the question belongs on their screen.
+const phoneBack = (ph) => ph.mode === 'auto' && process.env.B2B_UNATTENDED !== '1' && (() => { const i = idleSeconds(); return i !== null && i < PHONE_BACK_UNDER; })();
+// Never approved from a phone: deleting data, force pushes, secrets, production deploys. The owner adds more
+// (phone rule add), for everything or for one project.
+const KEYBOARD_ONLY = [
+  [/\brm\s+(-[a-z]*\s+)*-[a-z]*[rf][a-z]*\b|\bgit\s+clean\b|\bgit\s+reset\s+--hard\b|\bgit\s+branch\s+-D\b|\bdrop\s+(table|database|schema)\b|\btruncate\s+table\b|\bdelete\s+from\b|\bmkfs\b|\bdd\s+if=|\bshred\b/i, 'it deletes data'],
+  [/\bgit\s+push\b[^\n;|&]*(\s--force\b|\s--force-with-lease\b|\s-[a-z]*f[a-z]*\b|\s\+[\w/.-]+)/i, 'it is a force push'],
+  [/(^|[\s/"'=])\.env(\.[\w.-]+)?\b|\.ssh\/|\bid_(rsa|ed25519|ecdsa)\b|\.pem\b|\bprintenv\b|\bsecurity\s+(find|dump)-|\b(aws|gcloud|az|vault|op)\s[^\n;|&]*\b(secret|secrets|credential|credentials|password)\b|\.b2b\/config\.json|\.aws\/credentials|\.netrc\b|\bkeychain\b/i, 'it touches secrets'],
+  [/\brailway\s+up\b|\bvercel\b[^\n;|&]*--prod\b|\bnetlify\s+deploy\b[^\n;|&]*--prod\b|\bfly(ctl)?\s+deploy\b|\bkubectl\s+(apply|delete|rollout|scale)\b|\bterraform\s+(apply|destroy)\b|\bpulumi\s+(up|destroy)\b|\bhelm\s+(upgrade|install|uninstall)\b|\b(deploy|release)\b[^\n;|&]*\b(prod|production)\b|\bgit\s+push\b[^\n;|&]*\b(prod|production)\b/i, 'it is a production deploy'],
+  [/(^|[\s;|&(])sudo\s/i, 'it runs as administrator'],
+];
+const stableJson = (v) => JSON.stringify(v, (_k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
+// What a tool call does, in the words that go on the card.
+function toolCard(tool, input) {
+  const i = input && typeof input === 'object' ? input : {};
+  const name = String(tool ?? 'a tool');
+  const cmd = typeof i.command === 'string' ? i.command : Array.isArray(i.command) ? i.command.join(' ') : typeof i.cmd === 'string' ? i.cmd : null;
+  const file = typeof i.file_path === 'string' ? i.file_path : typeof i.path === 'string' ? i.path : typeof i.notebook_path === 'string' ? i.notebook_path : null;
+  const json = JSON.stringify(i, null, 2) ?? '';
+  if (cmd !== null) return { title: 'wants to run', summary: cmd, detail: typeof i.description === 'string' ? i.description : '', target: cmd };
+  if (file !== null) return { title: /write|create/i.test(name) ? 'wants to write a file' : 'wants to change a file', summary: file, detail: String(i.content ?? i.new_string ?? i.patch ?? '').slice(0, 5000), target: file };
+  if (typeof i.url === 'string') return { title: 'wants to open', summary: i.url, detail: typeof i.prompt === 'string' ? i.prompt : '', target: i.url };
+  return { title: `wants to use ${name.replace(/^mcp__/, '').replace(/__/g, ' · ')}`, summary: '', detail: json.slice(0, 5000), target: `${name} ${json}` };
+}
+// Why this call waits for the keyboard, or null when the phone may be asked.
+function keyboardOnly(target, project, rules) {
+  for (const [re, why] of KEYBOARD_ONLY) if (re.test(target)) return why;
+  for (const r of rules) {
+    if (r.project && r.project !== project) continue;
+    try { if (new RegExp(r.re, 'i').test(target)) return 'your owner keeps it for the keyboard'; } catch { /* a rule that isn't a pattern matches nothing */ }
+  }
+  return null;
+}
+// Like api(), but a hook must never die on a network error: it gets null and lets the agent's own prompt take over.
+async function phoneApi(method, path, body, ms = 20_000) {
+  const cfg = loadCfg();
+  try {
+    const r = await fetch(cfg.relay + path, { method, headers: { authorization: `Bearer ${cfg.token}`, 'content-type': 'application/json', ...toolHeaders() }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(ms) });
+    return { status: r.status, json: await r.json().catch(() => ({})) };
+  } catch { return null; }
+}
+// Puts one card on the owner's linked phones and waits for a signed answer.
+// → { state: 'answered', decision, text, device } | 'timeout' | 'back' (owner is at the keyboard again, or turned it off)
+//   | 'forged' (an answer no linked phone signed) | 'unreachable' (couldn't be asked at all)
+async function askPhone({ kind, title, summary = '', detail = '', context = '', project, agent, about, actions, waitMs, wait = true }) {
+  const cfg = loadCfg();
+  const ph = loadPhone();
+  const id = `apr_${b64(randomBytes(17)).slice(0, 22)}`;
+  const card = { id, rk: randomBytes(32), hash: createHash('sha256').update(`b2b-phone-request/1|${id}|${about}`).digest('hex') };
+  const plain = { v: 1, id, kind, agent, bot: `@${H(cfg.handle)}`, project: String(project ?? '').slice(0, 80), title: String(title).slice(0, 200), summary: String(summary).slice(0, 1200), detail: String(detail).slice(0, 5000), context: String(context).slice(0, 3500),
+    hash: card.hash, actions, rk: b64(card.rk), at: new Date().toISOString() };
+  const ttl = Math.min(Math.max(Math.ceil(waitMs / 1000), 30), 1800);
+  let devices = Object.entries(ph.devices).map(([did, d]) => ({ id: did, ...d }));
+  const post = () => phoneApi('POST', '/v1/phone/cards', { id, kind, ttl, boxes: Object.fromEntries(devices.map((d) => [d.id, phoneBox(plain, d, id)])) });
+  let made = devices.length ? await post() : null;
+  if (made?.status === 400) {
+    // A phone was removed on the dashboard: ask the ones that are still there, with the keys pinned here.
+    const there = new Set(((await phoneApi('GET', '/v1/phone/devices'))?.json?.devices ?? []).filter((d) => ph.devices[d.id]?.sign === d.sign && ph.devices[d.id]?.box === d.box).map((d) => d.id));
+    devices = devices.filter((d) => there.has(d.id));
+    made = devices.length ? await post() : null;
+  }
+  if (made?.status !== 200) return { state: 'unreachable' };
+  if (!wait) return { state: 'sent' };
+  const end = Date.now() + waitMs;
+  const close = () => phoneApi('POST', `/v1/phone/cards/${id}/close`, {}, 8_000);
+  for (;;) {
+    const left = end - Date.now();
+    if (left <= 0) { await close(); return { state: 'timeout' }; }
+    const now = loadPhone();
+    if (now.mode === 'off' || phoneBack(now)) { await close(); return { state: 'back' }; }
+    const r = await phoneApi('GET', `/v1/phone/cards/${id}?wait=${Math.max(1, Math.min(5, Math.ceil(left / 1000)))}`, null, 15_000);
+    if (!r || r.status !== 200) { await new Promise((ok) => setTimeout(ok, Math.min(3_000, Math.max(200, left)))); continue; }
+    if (r.json.state === 'answered') { const a = phoneAnswer(card, r.json.answer, now.devices); return a ? { state: 'answered', ...a } : { state: 'forged' }; }
+    if (r.json.state !== 'open') return { state: 'timeout' };
+  }
+}
+const AGENT_NAME = (a) => AGENT_LABEL[a] ?? 'Your agent';
+// Claude Code and Codex call these hooks: when a permission prompt is about to show, and when the agent stops.
+// Both wait for the phone, so they get half an hour. Only this bot's own entries are ever replaced.
+const PHONE_MARK = / phone hook (permission|stop) --agent [\w-]+$/;
+function phoneHooks(agent, on) {
+  const cmd = (what) => `${homePrefix()}${shq(process.execPath)} ${shq(realpathSync(process.argv[1]))} phone hook ${what} --agent ${agent}`;
+  const mine = (c) => c.includes('b2b.mjs') && PHONE_MARK.test(c) && (homePrefix() ? c.startsWith(homePrefix()) : !c.includes('B2B_HOME='));
+  const p = agent === 'codex' ? join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'hooks.json') : join(homedir(), '.claude', 'settings.json');
+  let st = {};
+  try { st = JSON.parse(readFileSync(p, 'utf8')); } catch (e) { if (existsSync(p)) return `Couldn't read ${p} (${e.message}), so it wasn't changed. Add two hooks yourself: PermissionRequest runs ${cmd('permission')}, Stop runs ${cmd('stop')} (timeout 1860).`; }
+  const hooks = { ...(st.hooks || {}) };
+  for (const [event, what] of [['PermissionRequest', 'permission'], ['Stop', 'stop']]) {
+    const keep = (Array.isArray(hooks[event]) ? hooks[event] : []).filter((g) => !(g.hooks || []).some((h) => mine(String(h.command || ''))));
+    hooks[event] = on ? [...keep, { ...(agent === 'codex' ? { matcher: '.*' } : {}), hooks: [{ type: 'command', command: cmd(what), timeout: 1860 }] }] : keep;
+    if (!hooks[event].length) delete hooks[event];
+  }
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, `${JSON.stringify({ ...st, hooks }, null, 2)}\n`);
+  return null;
+}
+const phoneHooksOn = (agent) => { try { const p = agent === 'codex' ? join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'hooks.json') : join(homedir(), '.claude', 'settings.json'); return readFileSync(p, 'utf8').includes(`phone hook permission --agent ${agent}`); } catch { return false; } };
 // Which agent runs this tool right now, from what Claude Code, Codex and Cursor put in their commands' environment.
 const detectAgent = () => (process.env.CLAUDECODE ? 'claude-code' : Object.keys(process.env).some((k) => k.startsWith('CODEX_')) ? 'codex' : process.env.CURSOR_AGENT ? 'cursor' : null);
 // This tool, as the agent should call it: the same file, and this bot's own folder when it isn't the default.
@@ -1772,6 +1941,11 @@ const HELP = `b2b ${VERSION}: talk to your contacts' bots
   project load [<name>]            in a session your owner has open: read the briefs waiting for this folder's project
   project route <message-id> <name> | drop <message-id>   a message held because its project isn't set up here
   send <alias>/<project> "<text>"  send to one of THEIR projects (or --project NAME; handoff send takes it too)
+  phone                            your owner's phone for approvals: when you need a yes and they are away, you ask it and wait
+  phone link <code>                link the phone whose code your owner reads to you (they open <relay>/app/phone on it)
+  phone on | off | auto | wait <minutes> | test | unlink <name> | rule list | rule add "<pattern>"
+                                   only when your owner says so. Deleting data, force pushes, secrets, production deploys
+                                   and sudo are never asked on the phone
   mcp [--channels --session ID]     serve these as tools for your bot (private mode, end-to-end encrypted)
   backup                           save this bot's connection as one secret (survives a computer reset)
   backup-check <hours>|off         note that your routine also checks on a schedule
@@ -3684,6 +3858,140 @@ Only if you can't change your skills or routines yourself, tell your owner: "My 
       break;
     }
     die(USAGE);
+  }
+  case 'phone': {
+    const [sub, a1] = pos;
+    const b2b = selfCmd();
+    const ph = loadPhone();
+    const USAGE = 'Usage: b2b phone | link <code> | unlink <name|code|all> | on | off | auto | wait <minutes> | test | rule list | rule add "<pattern>" [--project NAME] | rule remove "<pattern>"';
+    if (sub === 'hook') {
+      // The agent itself calls this. Whatever goes wrong, the hook says nothing and the agent's own prompt takes over.
+      const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
+      try {
+        if (!existsSync(cfgPath) || !['permission', 'stop'].includes(a1) || !phoneAway(ph)) break;
+        const input = await hookInput();
+        const agent = AGENT_NAME(typeof flags.agent === 'string' ? flags.agent : 'claude-code');
+        const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd();
+        const here = projectAt(cwd)?.name ?? null;
+        const project = here ?? basename(cwd);
+        const unattended = process.env.B2B_UNATTENDED === '1';
+        const waitMs = ph.wait * 60_000;
+        const forged = () => saveForOwner(`An answer to a phone request came that none of your linked phones signed, so it was ignored and nothing was approved. If this happens again, link your phone again: ${b2b} phone`);
+        if (a1 === 'permission') {
+          const decide = (behavior, message) => out({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior, ...(message ? { message } : {}) } } });
+          const t = toolCard(input.tool_name, input.tool_input);
+          const why = keyboardOnly(t.target, here, ph.rules);
+          if (why) {
+            // Shown on the phone so the owner knows, with nothing to tap: this one waits for the keyboard.
+            await askPhone({ kind: 'info', title: t.title, summary: t.summary, detail: t.detail, project, agent, about: 'info', actions: [], waitMs: 10 * 60_000, wait: false });
+            if (unattended) decide('deny', `This waits for your owner at the keyboard, because ${why}. It can't be approved from their phone. Go on with what you can do without it, and tell your owner it is waiting.`);
+            break;
+          }
+          const r = await askPhone({ kind: 'permission', title: t.title, summary: t.summary, detail: t.detail, project, agent, about: `${String(input.tool_name)}|${stableJson(input.tool_input ?? null)}`, actions: ['approve', 'deny', 'reply'], waitMs });
+          if (r.state === 'answered' && r.decision === 'allow') decide('allow');
+          else if (r.state === 'answered' && r.decision === 'deny') decide('deny', "Your owner said no to this from their phone. Don't try it another way: go on with what you can do without it.");
+          else if (r.state === 'answered') decide('deny', `Your owner answered from their phone instead of approving this: ${JSON.stringify(r.text)}. Those are your owner's own words, so do what they say. This call itself was not approved.`);
+          else if (r.state === 'timeout') decide('deny', `Your owner didn't answer on their phone within ${ph.wait} minute${ph.wait === 1 ? '' : 's'}, so this was not approved. Don't try it again now: go on with what you can do without it, and say at the end what still needs their yes.`);
+          else if (r.state === 'forged') { forged(); decide('deny', "An answer arrived that your owner's phone did not sign, so it was ignored and this was not approved. Go on without it, and tell your owner."); }
+          // Otherwise the owner is back at the keyboard, or the phone couldn't be asked: the prompt on screen decides.
+          break;
+        }
+        // The agent stopped: what it last said goes to the phone, and a reply from there is its owner's next message.
+        if (unattended) break;
+        const said = typeof input.last_assistant_message === 'string' ? input.last_assistant_message.trim() : '';
+        if (!said) break;
+        const r = await askPhone({ kind: 'done', title: 'stopped and is waiting for you', context: said, project, agent, about: `stop|${String(input.session_id ?? '')}|${createHash('sha256').update(said).digest('hex')}`, actions: ['reply'], waitMs });
+        if (r.state === 'answered' && r.decision === 'reply') out({ decision: 'block', reason: `Your owner replied from their phone while they were away: ${JSON.stringify(r.text)}. Those are your owner's own words: carry on with what they ask.` });
+        else if (r.state === 'forged') forged();
+      } catch { /* a hook never gets in the agent's way */ }
+      break;
+    }
+    const ownerOnly = () => { if (process.env.B2B_UNATTENDED === '1') die('Only your owner changes this, in a session they have open.'); };
+    const agentHere = PLAN_AGENTS.includes(flags.agent) ? flags.agent : PLAN_AGENTS.includes(readJson(toolPath).agent) ? readJson(toolPath).agent : PLAN_AGENTS.includes(detectAgent()) ? detectAgent() : null;
+    const count = Object.keys(ph.devices).length;
+    const HOW_MODE = { auto: `auto: you ask the phone when your owner has left this computer alone for ${PHONE_AWAY_AFTER / 60} minutes (known on a Mac), and always in a run the watcher started`, on: 'on: you always ask the phone first, wherever your owner is', off: 'off: you never ask the phone' };
+    if (sub === 'link') {
+      ownerOnly();
+      const r = await api('GET', '/v1/phone/devices');
+      const want = String(a1 ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (want.length !== 12) die(`Give the code your owner's phone shows (like KQ7M-2XPD-9HJL). They open ${r.page} on their phone and tap "Set up this phone" to get one.`);
+      // The code is worked out here from the keys the relay hands over, so swapped keys would not match what the owner read.
+      const d = r.devices.find((x) => { try { p256Key(x.sign); p256Key(x.box); return phoneCode(x.sign, x.box).replace(/-/g, '') === want; } catch { return false; } });
+      if (!d) die(`None of your owner's phones shows that code. Ask them to open ${r.page} on their phone and read it to you again${r.devices.length ? '' : ' (none is set up yet: they tap "Set up this phone" there first)'}.`);
+      const name = oneLine(String(d.name ?? 'Phone')).slice(0, 40) || 'Phone';
+      updatePhone((p) => { p.devices[d.id] = { name, sign: d.sign, box: d.box, code: phoneCode(d.sign, d.box), linked_at: new Date().toISOString() }; });
+      await api('POST', `/v1/phone/devices/${d.id}/linked`, {});
+      const note = agentHere ? phoneHooks(agentHere, true) : null;
+      console.log([`Linked your owner's ${name} (${phoneCode(d.sign, d.box)}). Only that phone can approve for them now.`,
+        `From now on, when you need a yes and your owner is away, you ask their phone and wait up to ${ph.wait} minutes. It's ${HOW_MODE[ph.mode]}.`,
+        note ?? (agentHere === 'codex' ? `Codex asks through two hooks added to its hooks.json (PermissionRequest and Stop). Codex runs a new hook only once its owner trusts it: ask your owner to type /hooks in Codex and trust the two bot2bot hooks.`
+          : agentHere ? 'Claude Code asks through two hooks added to ~/.claude/settings.json (PermissionRequest and Stop). They apply to sessions started from now on.'
+            : "This assistant has no hooks bot2bot can use yet, so it can't ask the phone by itself. Claude Code and Codex can."),
+        'Never asked on the phone: deleting data, force pushes, secrets, production deploys and sudo. Those wait for the keyboard.',
+        `Try it now: ${b2b} phone test`,
+        `Tell your owner, in their language: "Your phone is linked. When I need a yes and you're away, I'll ask you there."`].join('\n'));
+      break;
+    }
+    if (sub === 'unlink') {
+      ownerOnly();
+      const ref = String(a1 ?? '').trim();
+      if (!ref) die(USAGE);
+      const norm = (v) => String(v).toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const gone = Object.entries(ph.devices).filter(([, d]) => ref.toLowerCase() === 'all' || String(d.name).toLowerCase() === ref.toLowerCase() || norm(d.code) === norm(ref));
+      if (!gone.length) die(`No linked phone is called ${quoted(ref)}. See: ${b2b} phone`);
+      const left = updatePhone((p) => { for (const [id] of gone) delete p.devices[id]; return Object.keys(p.devices).length; });
+      for (const [id] of gone) await phoneApi('POST', `/v1/phone/devices/${id}/linked`, { linked: false });
+      if (!left && agentHere) phoneHooks(agentHere, false);
+      console.log(`Unlinked ${gone.map(([, d]) => oneLine(d.name)).join(', ')}.${left ? '' : " No phone is linked now, so you don't ask one, and the hooks are gone."} To link one again: ${b2b} phone link <code>`);
+      break;
+    }
+    if (['on', 'off', 'auto'].includes(sub)) {
+      ownerOnly();
+      updatePhone((p) => { p.mode = sub; });
+      console.log(`Phone approvals are ${HOW_MODE[sub]}.${count ? '' : ` No phone is linked yet: ${b2b} phone`}`);
+      break;
+    }
+    if (sub === 'wait') {
+      ownerOnly();
+      const n = Math.round(Number(a1));
+      if (!(n >= 1 && n <= 30)) die('Usage: b2b phone wait <minutes> (1 to 30): how long you wait for an answer before going on without it.');
+      updatePhone((p) => { p.wait = n; });
+      console.log(`You wait up to ${n} minute${n === 1 ? '' : 's'} for your owner's answer. With no answer, the request counts as a no and you go on with what you can.`);
+      break;
+    }
+    if (sub === 'rule') {
+      const [, op, pattern] = pos;
+      if (op === 'list' || op === undefined) {
+        console.log(['Never asked on the phone (they wait for the keyboard): deleting data, force pushes, secrets, production deploys, sudo.',
+          ...(ph.rules.length ? ph.rules.map((r) => `also: ${quoted(r.re)}${r.project ? ` in the project ${quoted(r.project)}` : ''}`) : [`Your owner can add more: ${b2b} phone rule add "<pattern>" [--project NAME]`])].join('\n'));
+        break;
+      }
+      ownerOnly();
+      if (!['add', 'remove'].includes(op) || !pattern) die(USAGE);
+      try { new RegExp(pattern, 'i'); } catch { die('That pattern is not a regular expression. A plain word works too, like "npm publish".'); }
+      const project = typeof flags.project === 'string' ? projectName(flags.project) ?? die('--project is a project name; see: project list') : null;
+      updatePhone((p) => { p.rules = p.rules.filter((r) => !(r.re === pattern && (r.project ?? null) === project)); if (op === 'add') p.rules.push({ re: String(pattern).slice(0, 200), ...(project ? { project } : {}) }); p.rules = p.rules.slice(-50); });
+      console.log(op === 'add' ? `Anything matching ${quoted(pattern)}${project ? ` in the project ${quoted(project)}` : ''} waits for the keyboard now.` : `Removed ${quoted(pattern)}.`);
+      break;
+    }
+    if (sub === 'test') {
+      ownerOnly();
+      if (!count) die(`No phone is linked yet. Your owner opens ${loadCfg().relay}/app/phone on their phone, taps "Set up this phone", and tells you the code.`);
+      console.log('Asking your owner\'s phone. Waiting up to 2 minutes for a tap…');
+      const t0 = Date.now();
+      const r = await askPhone({ kind: 'test', title: 'is testing your phone', summary: 'Tap Approve once. Nothing runs: this only checks that your answer gets back.', project: 'test', agent: AGENT_NAME(agentHere), about: 'test', actions: ['approve', 'deny', 'reply'], waitMs: 120_000 });
+      console.log(r.state === 'answered' ? `It works: ${r.decision === 'allow' ? 'approved' : r.decision === 'deny' ? 'denied' : `a reply (${JSON.stringify(r.text)})`} from ${oneLine(r.device)} after ${Math.round((Date.now() - t0) / 1000)} s, signed by that phone.`
+        : r.state === 'forged' ? "An answer came back that the linked phone did not sign, so it was ignored. Unlink and link the phone again."
+          : r.state === 'unreachable' ? `The phone couldn't be asked. If it was removed on the dashboard, link it again: ${b2b} phone link <code>`
+            : `No answer in 2 minutes. Your owner opens ${loadCfg().relay}/app/phone on their phone (and turns on notifications there), then you try again.`);
+      break;
+    }
+    if (sub !== undefined) die(USAGE);
+    console.log([count ? `Linked: ${Object.values(ph.devices).map((d) => `${oneLine(d.name)} (${oneLine(d.code)})`).join(', ')}.` : `No phone is linked. Your owner opens ${existsSync(cfgPath) ? loadCfg().relay : 'bot2bot'}/app/phone on their phone, taps "Set up this phone" and tells you the code. Then: ${b2b} phone link <code>`,
+      `Mode ${HOW_MODE[ph.mode]}. You wait up to ${ph.wait} minutes for an answer.`,
+      ...(count && agentHere ? [phoneHooksOn(agentHere) ? `${AGENT_NAME(agentHere)} asks the phone through its PermissionRequest and Stop hooks.` : `${AGENT_NAME(agentHere)}'s hooks are missing: link the phone again to add them.`] : []),
+      `Change it only when your owner says so: ${b2b} phone on|off|auto · phone wait <minutes> · phone rule list · phone unlink <name> · phone test`].join('\n'));
+    break;
   }
   case 'watch': {
     const cfg = loadCfg();

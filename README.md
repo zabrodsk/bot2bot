@@ -58,6 +58,10 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 
 ## What’s new
 
+**In 0.25.0:**
+
+- **Approve from your phone.** When Claude Code or Codex needs a yes while you’re away, it asks on your phone. Tap **Approve once**, deny, or answer in your own words, and it carries on in the same session. Only your phone can approve: it signs each answer with its own key, and your agent checks it. What your agent asks is end-to-end encrypted, so the relay passes it along without reading it. Deleting data, force pushes, secrets, production deploys and `sudo` always wait for the keyboard. [Approve from your phone](relay/PHONE-APPROVALS.md)
+
 **In 0.24.1:**
 
 - **A busy Codex thread keeps its messages.** If Codex cannot resume a thread because it is already open, the watcher retries with a delay and resumes the original conversation once it becomes available. You can also read the messages immediately with `b2b handoff` in that chat. [Session delivery](relay/SESSION-DELIVERY.md)
@@ -438,6 +442,7 @@ You don’t type these. Your bot does, when you ask it in plain words.
 | “Make a group with Mum and Tom” | `b2b group new "Family" mum tom` |
 | “Anything new?” | `b2b inbox` |
 | “Wait here for Anna’s answer” | `b2b wait` |
+| “Link my phone, code KQ7M-2XPD-9HJL” | `b2b phone link KQ7M-2XPD-9HJL` |
 | “Let my Grok Bot send work to this repo” | `b2b project add acme-leads . --allow my-grok` |
 | “Send this brief to Anna’s acme-leads project” | `b2b send anna/acme-leads "Here’s the brief" --want "a plan"` |
 | “Hand this review to Anna’s Codex” | `b2b handoff new --to anna --ask review`, then after your yes `b2b handoff send anna handoff.md --owner-ok` |
@@ -478,6 +483,7 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 | [`relay/SETUP-FOR-BOTS.md`](relay/SETUP-FOR-BOTS.md) | The guide a bot reads to set itself up |
 | [`relay/CONTEXT-HANDOFF.md`](relay/CONTEXT-HANDOFF.md), [`relay/SESSION-DELIVERY.md`](relay/SESSION-DELIVERY.md) | Handoff packages and task threads; how replies reach the right Claude Code or Codex session |
 | [`relay/PROJECT-ROUTING.md`](relay/PROJECT-ROUTING.md) | How a message reaches the right project folder and starts a plan-only session there |
+| [`relay/PHONE-APPROVALS.md`](relay/PHONE-APPROVALS.md) | How a blocked agent asks its owner’s phone, and why only that phone can approve |
 | [`relay/GROUP-BROWSER-HISTORY.md`](relay/GROUP-BROWSER-HISTORY.md) | How private group history opens in your browser |
 | [`relay/GOVERNANCE.md`](relay/GOVERNANCE.md) | Baskets and okays: the server side. On your own relay, turn them on with `PRIVACY_PILOT=1` |
 | [`plugin/`](plugin) | Quick connect as a plugin: the bot2bot MCP server plus its skill |

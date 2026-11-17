@@ -140,7 +140,7 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
-  const { originFor = () => publicUrl || '', analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, groupBrowser = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { originFor = () => publicUrl || '', analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, phone = null, groupBrowser = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -1904,7 +1904,8 @@ ${on ? `<p class="setrow__desc">${esc(allowance)}</p>` : ''}</div>
 <div class="setrow"><div><p class="setrow__label" id="lang-l">${tr('Language')}</p></div>${langPick}</div>
 <div class="setrow"><div><p class="setrow__label" id="theme-l">${tr('Appearance')}</p></div>${themePick}</div>
 <div class="setrow"><p class="setrow__desc">${tr('Friends see your name, your picture and that your email is verified. They never see the address itself.')}</p></div>
-${hosted ? `<div class="setrow"><div><p class="setrow__label">${tr('Plan')}</p><p class="setrow__desc">${tr('What you can send and who your plan covers.')}</p></div><a class="btn small ghost" href="/app/billing">${tr('See my plan')}</a></div>` : ''}</div></section>
+${hosted ? `<div class="setrow"><div><p class="setrow__label">${tr('Plan')}</p><p class="setrow__desc">${tr('What you can send and who your plan covers.')}</p></div><a class="btn small ghost" href="/app/billing">${tr('See my plan')}</a></div>` : ''}
+${phone ? `<div class="setrow"><div><p class="setrow__label">${tr('Approve from your phone')}</p><p class="setrow__desc">${tr("When Claude Code or Codex needs a yes while you're away, it asks you on your phone.")}</p></div><a class="btn small ghost" href="/app/phone">${tr('Open on this device')}</a></div>` : ''}</div></section>
 ${hiddenCard(user, tr)}<section class="group" aria-labelledby="quiet-h"><h2 id="quiet-h">${tr('Quiet hours')}</h2><div class="card">
 <form method="post" action="/app/account/quiet" class="quietform">
 <div class="setrow setrow--flush"><div><p class="setrow__label" id="quiet-l">${tr('Quiet hours')}</p><p class="setrow__desc">${tr('Nobody can wake your bot or email you during these hours. Messages wait and arrive when they end.')}</p></div>
@@ -1955,6 +1956,7 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
       governance?.deleteDataInTx(ids);
       files?.forgetBots(ids);
       q(`DELETE FROM group_browser_views WHERE user_id = ? OR bot_id IN (${ph})`).run(user.id, ...ids);
+      phone?.forget(user.id, ids);
       q(`UPDATE group_posts SET self_sealed = NULL WHERE from_bot IN (${ph})`).run(...ids);
       for (const id of ids) events?.revokeAll(id);
       q(`UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, paused_at = NULL, disconnected_at = coalesce(disconnected_at, ?), display_name = 'Deleted user' WHERE id IN (${ph})`).run(t, ...ids);
@@ -2782,6 +2784,20 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         } else throw new HttpError(404, 'Page not found');
         return redirect(res, '/app'), true;
       }
+
+      // Approve from your phone: its own page too (no analytics), with this phone's keys kept in its browser.
+      if (phone && p === '/app/phone' && req.method === 'GET') {
+        const view = phone.page({ lang: user.lang, theme: user.theme });
+        res.writeHead(200, view.headers); res.end(view.html); return true;
+      }
+      if (phone && p === '/app/phone/sw.js' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' }); res.end(phone.sw); return true; }
+      if (phone && p === '/app/phone/manifest.webmanifest' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/manifest+json', 'cache-control': 'no-cache' }); res.end(JSON.stringify(phone.manifest())); return true; }
+      if (phone && p === '/app/phone/state' && req.method === 'GET') return json(res, 200, phone.view(user, url.searchParams.get('device'))), true;
+      if (phone && p === '/app/phone/devices' && req.method === 'POST') return json(res, 200, phone.addDevice(user, await form(req, 2000))), true;
+      const phoneDevice = phone && req.method === 'POST' && p.match(/^\/app\/phone\/devices\/(dev_[A-Za-z0-9_-]{16})\/(remove|push)$/);
+      if (phoneDevice) return json(res, 200, phoneDevice[2] === 'remove' ? phone.removeDevice(user, phoneDevice[1]) : phone.setPush(user, phoneDevice[1], (await form(req, 4000)).endpoint)), true;
+      const phoneAnswer = phone && req.method === 'POST' && p.match(/^\/app\/phone\/cards\/(apr_[A-Za-z0-9_-]{22})\/answer$/);
+      if (phoneAnswer) return json(res, 200, phone.answer(user, phoneAnswer[1], await form(req, 12_000))), true;
 
       // Private history uses its own page with no analytics and no persistent browser keys.
       const historyPage = groupBrowser && p.match(/^\/app\/groups\/(\d+)\/history$/);
