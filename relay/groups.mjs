@@ -119,6 +119,7 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
   // and quotes the names people chose). It comes "from" the member it's about. Invites wake the bot (its owner has
   // to say yes); everything else rides along with the next wake.
   function notice(gid, toBot, aboutBot, event, { wake = false } = {}) {
+    if (bot(toBot)?.vendor === 'service') return;
     const t = clock();
     q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, created_at, status, next_ring_at, via, group_id)
        VALUES (?, ?, ?, 'group_event', ?, '[]', ?, 'pending', ?, 'relay', ?)`).run(token('msg_', 9), aboutBot, toBot, JSON.stringify({ group_id: gid, ...event }), t, wake ? t : null, gid);
@@ -234,6 +235,7 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
   // ───── joining: only ever the owner's own yes ─────
   // byOwner: the person signed in on the dashboard. Bots of self-hosted relays without accounts join on their own.
   function join(b, gid, { linkCode = null, basket = null, byOwner = false, inTransaction = false } = {}) {
+    if (b.vendor === 'service' && !q('SELECT 1 FROM job_senders WHERE bot_id = ? AND group_id = ?').get(b.id, gid)) throw new HttpError(403, 'service senders cannot join other groups');
     if (b.user_id && !byOwner) throw new HttpError(403, `only your owner can say yes to a group, on their page: ${publicUrl}/app/groups/${gid}`);
     if (!live(b)) throw new HttpError(403, 'this bot is not connected');
     if (!toolReady(b)) throw new HttpError(426, 'tool_too_old');
@@ -418,7 +420,13 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
     if (m?.state !== 'joined') throw new HttpError(403, m?.state === 'invited' ? `your owner hasn't joined "${g.name}" yet. They say yes here: ${publicUrl}/app/groups/${gid}` : "you're not in this group");
     const kind = body.kind ?? 'note';
     if (!['note', 'ask'].includes(kind)) throw new HttpError(400, 'kind must be note or ask');
-    const recipients = joined(gid).filter((r) => r.bot_id !== me.id && live(r) && !blockedBetween(me.id, r.bot_id));
+    // A diagnosis may quote a log too: every post in a jobs group must refuse plaintext fallback.
+    if (q('SELECT 1 FROM job_senders WHERE group_id = ?').get(gid) && (!encrypted(gid) || body.text || body.links?.length || body.choices?.length)) throw new HttpError(403, 'job logs must stay end-to-end encrypted; plaintext fallback is refused');
+    if (me.vendor === 'service') {
+      const creator = bot(g.created_by);
+      if (!me.user_id || creator?.user_id !== me.user_id || !q('SELECT 1 FROM job_senders WHERE bot_id = ? AND group_id = ?').get(me.id, gid)) throw new HttpError(403, 'service senders post only to their own jobs groups');
+    }
+    const recipients = joined(gid).filter((r) => r.bot_id !== me.id && r.vendor !== 'service' && live(r) && !blockedBetween(me.id, r.bot_id));
     if (ownerWeb && recipients.some((r) => r.box_pub) && me.box_pub) throw new HttpError(400, 'this group is end-to-end encrypted, so only your bot can write in it. Tell your bot what to say');
     // The plain part: for members without keys (and the dashboard of a group that isn't encrypted).
     const text = typeof body.text === 'string' ? body.text.trim() : '';
