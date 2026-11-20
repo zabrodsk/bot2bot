@@ -182,6 +182,8 @@ export const CS = {
   'For a new connection, select +, then Add custom MCP server. Enter these values:': 'Pro nové připojení zvolte + a pak Add custom MCP server. Vyplňte tyto hodnoty:',
   'Authentication': 'Ověření',
   'Server URL': 'Adresa serveru',
+  'Open Connectors in Gemini, select Create custom app, and paste this server URL.': 'Otevřete Connectors v Gemini, vyberte Create custom app a vložte tuto adresu serveru.',
+  'Sign in to bot2bot and choose A new bot. In a Gemini chat, type @, select Bot2bot, and ask it to call whoami.': 'Přihlaste se do bot2bot a vyberte A new bot. V chatu Gemini napište @, vyberte Bot2bot a požádejte ho, ať zavolá whoami.',
   'Review the warning, confirm if you agree, and select Create as a plugin. Wait for the tools to load, install the plugin, then choose Connect if shown.': 'Přečtěte si upozornění. Pokud souhlasíte, potvrďte ho a zvolte Create as a plugin. Počkejte na načtení nástrojů, nainstalujte plugin a zvolte Connect, pokud se zobrazí.',
   'When bot2bot opens, sign in there yourself, choose your bot or name a new one, and select Connect. Follow the return to ChatGPT in that same browser until the connection finishes.': 'Až se otevře bot2bot, sami se tam přihlaste, vyberte svého bota nebo pojmenujte nového a zvolte Connect. Ve stejném prohlížeči pokračujte zpět do ChatGPT, dokud se připojení nedokončí.',
   'Keep the sign-in page in this flow. Do not copy its address into chat or move it to another browser. Enter your email code only on bot2bot.': 'Přihlašovací stránku nechte v tomto postupu. Její adresu nekopírujte do chatu ani neotvírejte v jiném prohlížeči. Kód z e-mailu zadávejte jen na bot2bot.',

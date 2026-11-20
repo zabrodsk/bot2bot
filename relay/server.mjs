@@ -4,7 +4,7 @@ import { messageRoute, messagePlatform } from './message-metadata.mjs';
 import { inviteAddress } from './invite-email.mjs';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes, timingSafeEqual, createCipheriv, createDecipheriv, createPublicKey } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual, createCipheriv, createDecipheriv, createPublicKey } from 'node:crypto';
 import { readFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve, sep, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,7 @@ import { createConnector, migrateConnector, SENDER } from './connector.mjs';
 import { messageEmail, doorbellEmail, approveEmail, waitingEmail, updateEmail } from './email.mjs';
 import { migrateGovernance, createGovernance } from './governance.mjs';
 import { migrateEvents, createEvents } from './events.mjs';
+import { migrateTeamFolders, teamFolderRoutes } from './team-folders.mjs';
 import { migrateGroups, createGroups } from './groups.mjs';
 import { migrateScheduledJobs, createScheduledJobs } from './scheduled-jobs.mjs';
 import { migrateGroupBrowserHistory, createGroupBrowserHistory } from './group-browser-history.mjs';
@@ -214,6 +215,7 @@ export function openDb(path) {
       UNIQUE (from_bot, client_id)
     );
     CREATE INDEX IF NOT EXISTS messages_inbox ON messages (to_bot, status, created_at);
+    CREATE INDEX IF NOT EXISTS messages_sender_time ON messages (from_bot, created_at, to_bot);
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, bot INTEGER, kind TEXT NOT NULL, detail TEXT
     );
@@ -338,6 +340,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   // A send-only chat's app (ChatGPT, Gemini…). Its name can be the owner's own ("Gemini work"); before names, it was the app.
   if (!db.prepare('PRAGMA table_info(bots)').all().some((c) => c.name === 'chat_app')) db.exec("ALTER TABLE bots ADD COLUMN chat_app TEXT; UPDATE bots SET chat_app = display_name WHERE platform = 'sender'");
   migrateGroups(db);
+  migrateTeamFolders(db);
   migrateScheduledJobs(db);
   migrateGroupBrowserHistory(db);
   migratePhone(db);
@@ -452,6 +455,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
 
   // A Grok routine webhook, or an OpenClaw gateway's /hooks/wake on any public HTTPS host.
   function doorbellTarget(raw, kind) {
+    if (kind === 'webhook') return { url: anyWebhook(raw), kind };
     let u = null; try { u = new URL(raw); } catch { /* validWebhook explains */ }
     if (kind === 'hook' || (u && /\/hooks\/wake$/.test(u.pathname) && !webhookHosts.includes(u.hostname.toLowerCase()))) return { url: validHook(raw), kind: 'hook' };
     return { url: validWebhook(raw), kind: 'grok_webhook' };
@@ -496,7 +500,15 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     q('UPDATE bots SET last_ring_at = ?, wake_count = CASE WHEN wake_day = ? THEN wake_count + 1 ELSE 1 END, wake_day = ? WHERE id = ?').run(started, day, day, bot.id);
     try {
       // Never put message content in the ring: the bot pulls it with its own token.
-      const res = bot.doorbell_kind === 'mcp_events' ? await events.deliver(bot, { pending, urgent })
+      let openBotRequest;
+      if (bot.platform === 'openbot' && bot.doorbell_kind === 'webhook') {
+        const body = JSON.stringify({ type: 'b2b_pending' });
+        const timestamp = String(Math.floor(started / 1000));
+        const signature = createHmac('sha256', openKey(bot.webhook_key)).update(`${timestamp}.${ringId}.${body}`).digest('hex');
+        openBotRequest = { body, headers: { 'x-openbot-timestamp': timestamp, 'x-openbot-delivery-id': ringId, 'x-openbot-signature': `sha256=${signature}` } };
+      }
+      const res = openBotRequest ? await safePost(bot.webhook_url, openBotRequest.body, openBotRequest.headers)
+        : bot.doorbell_kind === 'mcp_events' ? await events.deliver(bot, { pending, urgent })
         : bot.doorbell_kind === 'watch' ? watchRing(bot, { pending, urgent, ring_id: ringId, reason })
         : bot.doorbell_kind === 'webhook' ? await safePost(bot.webhook_url, { event: 'b2b_pending', pending, urgent, ring_id: ringId, reason,
           message: WAKE_TEXT(bot), text: WAKE_TEXT(bot), data: WAKE_TEXT(bot) }, { authorization: `Bearer ${openKey(bot.webhook_key)}` })
@@ -1436,7 +1448,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
          OR (group_id IS NULL AND NOT EXISTS (SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = messages.from_bot))
          OR (group_id IS NOT NULL AND kind != 'group_event' AND NOT EXISTS (SELECT 1 FROM group_members g WHERE g.group_id = messages.group_id AND g.bot_id = messages.to_bot AND g.state = 'joined')))`, me.id, t - L.undeliveredExpiryMs, t, me.id, me.id, me.id);
       // Messages held because the sender's key changed stay put until the owner trusts the new key.
-      const rows = q(`SELECT m.*, b.handle AS from_handle, b.user_id AS from_user, b.vendor AS from_vendor, b.sign_pub AS from_sign, b.box_pub AS from_box, c.alias AS from_alias, u.name AS from_person, u.email_verified_at AS from_verified, g.name AS group_name FROM messages m
+      const rows = q(`SELECT m.*, b.handle AS from_handle, b.user_id AS from_user, b.vendor AS from_vendor, b.sign_pub AS from_sign, b.box_pub AS from_box, c.alias AS from_alias, c.can_ask AS allowed_topics, u.name AS from_person, u.email_verified_at AS from_verified, g.name AS group_name FROM messages m
                       JOIN bots b ON b.id = m.from_bot LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot LEFT JOIN users u ON u.id = b.user_id LEFT JOIN chat_groups g ON g.id = m.group_id
                       WHERE m.to_bot = ? AND m.status = 'pending' AND coalesce(m.note, '') != 'key_check' AND b2b_device_can_open(m.sealed, ?) ORDER BY m.created_at LIMIT ?`).all(me.id, me.device_id ?? 'primary', limit);
       for (const m of rows) {
@@ -1451,6 +1463,12 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         log(me.id, 'doorbell_verified', { via: VIA.has(body.via) ? body.via : null });
       }
       return {
+        ...(body.inbox_context === true ? { inbox_context: {
+          settings: governance.inboxSettings(me, rows),
+          topics: [...new Map(rows.filter((m) => m.from_alias).map((m) => [m.from_bot, {
+            handle: `@${m.from_handle}`, may_ask_you_about: JSON.parse(m.allowed_topics || '[]'),
+          }])).values()],
+        } } : {}),
         lease_seconds: L.leaseMs / 1000,
         ...(files.isOn(me) ? { files: files.statusFor(me) } : {}),
         ...(news ? { news } : {}),
@@ -1529,7 +1547,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         log(me.id, 'doorbell_set', { host: 'schedule' });
         return { ok: true, verified: false, next: 'test it, then let your recurring task pick up the test message on its next run' };
       }
-      const { url, kind } = body.kind === 'webhook' ? { url: anyWebhook(String(body.url || '')), kind: 'webhook' } : doorbellTarget(String(body.url || ''), body.kind);
+      const { url, kind } = doorbellTarget(String(body.url || ''), body.kind);
       q("DELETE FROM messages WHERE to_bot = ? AND kind = 'probe' AND status != 'delivered'").run(me.id);
       const key = webhookKey(body.key);
       if (key.length < 8 || key.length > 512 || /[\r\n]/.test(key)) throw new HttpError(400, 'webhook key looks wrong (8-512 chars, one line)');
@@ -1755,6 +1773,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   // Approve from your phone: encrypted cards from a coding agent to its owner's phone page, and signed answers back.
   const phone = createPhone({ q, tx, clock, token, HttpError, publicUrl, fetchImpl, allowLocalWebhooks, log, limits: limits.phone });
   Object.assign(routes, phone.routes);
+  Object.assign(routes, teamFolderRoutes({ q, tx, clock, HttpError }));
   Object.assign(routes, groups.routes);
   Object.assign(routes, files.routes);
   Object.assign(routes, status.routes);

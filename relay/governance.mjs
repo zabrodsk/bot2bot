@@ -581,15 +581,28 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
     }
     return [...out.values()].slice(0, 20).map((a) => ({ ...a, days: DAYS.filter((x) => a.days.includes(x)) }));
   }
+  function contactSettings(ownerBot, pilot, circles, peers) {
+    return contactModes(ownerBot, pilot).filter((c) => !peers || peers.has(c.peer_bot)).map((c) => ({ peer_bot: c.peer_bot, handle: `@${bot(c.peer_bot).handle}`, alias: c.alias,
+        circle: circles.find((g) => g.id === c.circle_id) ?? null, effective_mode: c.effective_mode, mode_override: c.mode_override,
+        purpose: c.purpose, notes: c.notes, topics: JSON.parse(c.can_ask || '[]'), rules: rules(ownerBot, c.peer_bot),
+        past_answers: pastAnswers(ownerBot, c.peer_bot), blocked: !!c.blocked }));
+  }
+  function inboxSettings(me, rows) {
+    if (!inPilot(me)) return null;
+    expire();
+    const peers = new Set(rows.filter((m) => m.kind !== 'probe').map((m) => m.from_bot));
+    const circles = peers.size ? q('SELECT * FROM circles WHERE owner_bot = ?').all(me.id) : [];
+    return {
+      contacts: peers.size ? contactSettings(me.id, true, circles, peers) : [],
+      open_requests: q("SELECT id, state FROM privacy_requests WHERE owner_bot = ? AND state = 'APPROVED' ORDER BY created_at, id").all(me.id),
+    };
+  }
   function getSettings(ownerBot) {
     const me = bot(ownerBot), pilot = inPilot(me); if (!pilot) fail('not found', 404); ensureCircles(ownerBot, pilot); expire();
     const user = me.user_id ? q('SELECT * FROM users WHERE id = ?').get(me.user_id) : null;
     const circles = q('SELECT * FROM circles WHERE owner_bot = ? ORDER BY position, id').all(ownerBot);
     return {
-      circles, contacts: contactModes(ownerBot, pilot).map((c) => ({ peer_bot: c.peer_bot, handle: `@${bot(c.peer_bot).handle}`, alias: c.alias,
-        circle: circles.find((g) => g.id === c.circle_id) ?? null, effective_mode: c.effective_mode, mode_override: c.mode_override,
-        purpose: c.purpose, notes: c.notes, topics: JSON.parse(c.can_ask || '[]'), rules: rules(ownerBot, c.peer_bot),
-        past_answers: pastAnswers(ownerBot, c.peer_bot), blocked: !!c.blocked })),
+      circles, contacts: contactSettings(ownerBot, pilot, circles),
       quiet_hours: user ? { on: !!user.quiet_on, start: user.quiet_start, end: user.quiet_end, tz: user.tz } : null,
       paused: !!me.paused_at,
       pending_proposals: q("SELECT * FROM settings_proposals WHERE owner_bot = ? AND state = 'PENDING_OWNER' ORDER BY created_at, id").all(ownerBot).map((p) => ({ ...p, ops: JSON.parse(p.ops), approve_url: `${publicUrl}/app/proposals/${p.id}` })),
@@ -637,7 +650,7 @@ export function createGovernance({ db, q, tx, clock, token, HttpError, publicUrl
       }
     }
   });
-  return { inPilot, effectiveMode, ensureCircles, basketName, placeInBasket, expire, retention, getSettings, applySettings, applySettingsInTx,
+  return { inPilot, effectiveMode, ensureCircles, basketName, placeInBasket, expire, retention, getSettings, inboxSettings, applySettings, applySettingsInTx,
     applyOwnerOps, applyOwnerOpsInTx, decideProposal, decideProposalInTx, getRequest, openRequests,
     proposeReplyInTx, decideRequest, decideRequestInTx, wakeRequest, wakeOwner, wakeSettings, checkApproval, consumeApproval,
     recordDecisionInTx, exportData, deleteDataInTx };

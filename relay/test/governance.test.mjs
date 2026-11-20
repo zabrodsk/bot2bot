@@ -40,6 +40,20 @@ async function fixture(t, opts = {}) {
   return { ...env, db, a, b, c, row, settings, patch, ownerOps, send, inTx, inbound, propose, encrypt };
 }
 
+test('inbox claim includes only the current senders’ settings when requested', async (t) => {
+  const e = await fixture(t);
+  e.inbound();
+  e.db.prepare('UPDATE contacts SET can_ask = ? WHERE owner_bot = ? AND peer_bot = ?')
+    .run('["availability"]', e.a.id, e.b.id);
+  const claim = async (body) => (await e.a.api('POST', '/v1/inbox/claim', body)).json;
+  const batch = await claim({ inbox_context: true });
+  const bob = e.settings().contacts.find((c) => c.peer_bot === e.b.id);
+  assert.deepEqual(batch.inbox_context.settings.contacts, [bob]);
+  assert.deepEqual(batch.inbox_context.topics, [{ handle: '@bob', may_ask_you_about: ['availability'] }]);
+  assert.deepEqual((await claim({ inbox_context: true })).inbox_context.settings.contacts, []);
+  assert.equal((await claim({})).inbox_context, undefined);
+});
+
 test('governance: email pilot membership, lazy defaults and outside-pilot 404s', async (t) => {
   const e = await fixture(t, { privacyPilot: [' ALICE@example.com '] });
   assert.equal(e.relay.inPilot(e.a.me()), true);

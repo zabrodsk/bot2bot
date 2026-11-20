@@ -51,7 +51,15 @@ test('connected app: sign in with OAuth, tools over MCP, chat with a private-mod
   const inbox = (await app.tool('check_inbox')).content[0].text;
   assert.match(inbox, /QUESTION[^]*\[(\w{4}) start\]\n\| Lunch Sunday\?\n\[\1 end\][^]*answer options: "Yes" \/ "No"/);
   const receipt = inbox.match(/receipt=(msg_[\w~-]+)/)[1];
+  const overlapping = await app.tool('check_inbox');
+  const reserved = overlapping.structuredContent.records.find((record) => record.code === 'reserved');
+  assert.equal(reserved?.count, 1);
+  assert.ok(Number.isFinite(Date.parse(reserved.free_at)));
+  assert.ok(overlapping.content[0].text.includes(reserved.free_at));
+  assert.doesNotMatch(overlapping.content[0].text, /Lunch Sunday/);
   assert.match((await app.tool('mark_delivered', { receipt })).content[0].text, /delivered/);
+  const cleared = await app.tool('check_inbox');
+  assert.ok(!cleared.structuredContent.records.some((record) => record.code === 'reserved'));
   await waitFor(async () => /passed_on/.test(await ben.cli('status', msgId(sent))));
   await app.tool('reply', { message_id: msgId(sent), text: 'Yes!' });
   assert.match(await ben.cli('status', msgId(sent)), /reply \([^)]*\), written by their bot[^]*\n\| Yes!/);
@@ -225,6 +233,30 @@ test('connected app: app registrations are limited per address, and unused ones 
   env.advance(8 * 86_400_000);
   env.relay.retention(env.now());
   assert.equal(env.relay.db.prepare('SELECT count(*) AS n FROM oauth_clients').get().n, 0, 'registrations that never signed anyone in are cleared after a week');
+});
+
+test('Gemini can register all six Google callbacks and keep exact redirect matching', async (t0) => {
+  const env = await setup(t0);
+  const b = await login(env, 'mia@example.com');
+  const redirects = ['', '-sandbox', '-test'].flatMap((suffix) => ['r', 'a'].map((path) =>
+    `https://oauth-redirect${suffix}.googleusercontent.com/${path}/gemini-test`));
+  const register = (redirect_uris) => fetch(`${env.url}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_name: 'OpenAuth', redirect_uris }) });
+  const registered = await register(redirects);
+  assert.equal(registered.status, 201);
+  const client = await registered.json();
+  assert.deepEqual(client.redirect_uris, redirects);
+  assert.equal((await register([...redirects.slice(0, 5), REDIRECT])).status, 400);
+  assert.equal((await register([...redirects, `${redirects[0]}-extra`])).status, 400);
+
+  const oauth = { client_id: client.client_id, response_type: 'code', code_challenge_method: 'S256', code_challenge: 'x'.repeat(43) };
+  const authorize = (redirect_uri) => b(`/oauth/authorize?${new URLSearchParams({ ...oauth, redirect_uri })}`);
+  assert.equal((await authorize(`${redirects[0]}-extra`)).status, 400);
+  assert.equal((await authorize(redirects[0])).status, 200);
+  const consent = await b('/oauth/authorize', { method: 'POST', form: { ...oauth, redirect_uri: redirects[0], decision: 'allow', bot: 'new', handle: 'mia-spark' } });
+  assert.equal(consent.status, 303);
+  assert.ok(new URL(consent.location).searchParams.get('code'));
+  assert.equal(env.relay.db.prepare('SELECT platform FROM bots WHERE handle = ?').get('mia-spark').platform, 'gemini');
 });
 
 test('connected app consent: a new bot by default, a disconnected bot when one waits to come back', async (t0) => {

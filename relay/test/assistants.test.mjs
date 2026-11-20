@@ -25,6 +25,11 @@ test('only recognized app names get specific setup steps; unnamed apps and Curso
   assert.equal(platformForApp('instinctools'), 'other');
   assert.equal(platformForApp('Town'), 'town');
   assert.equal(platformForApp('Manus'), 'manus');
+  assert.equal(platformForApp('Cue'), 'cue');
+  assert.equal(platformForApp('Cue by Manus'), 'cue');
+  assert.equal(platformForApp('Manus Cue'), 'cue');
+  assert.equal(platformForApp('Cue OS'), 'other');
+  assert.equal(platformForApp('Rescue'), 'other');
   assert.equal(platformForApp('Perplexity'), 'perplexity');
   assert.equal(platformForApp('Gemini'), 'other');
   assert.equal(platformForApp('ChatGPT'), 'chatgpt');
@@ -33,6 +38,15 @@ test('only recognized app names get specific setup steps; unnamed apps and Curso
   assert.equal(platformForApp('xAI'), 'grok');
   for (const name of [undefined, null, '', ' ', 'An app', 'Cursor']) assert.equal(platformForApp(name), 'other');
   assert.equal(platformForApp('Some New Assistant'), 'other');
+});
+
+test('Cue setup uses its scheduled private-mode doorbell and waits for an independent test', () => {
+  const prompt = setupPrompts({ origin: 'https://bot2bot.link' }).cue();
+  assert.match(prompt, /join \S+ --agent cue --wait 100/);
+  assert.match(prompt, /every 30 minutes[^]*same absolute B2B_HOME[^]*inbox --via doorbell/);
+  assert.match(prompt, /Only after the task exists[^]*doorbell set --schedule[^]*separate scheduled run/);
+  assert.match(prompt, /Do not read the test manually/);
+  assert.doesNotMatch(prompt, /custom MCP|Grok Bot routine/);
 });
 
 test('an OAuth app with no name gets generic setup and encryption steps', async (t0) => {

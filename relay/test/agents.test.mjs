@@ -65,6 +65,38 @@ const startWatcher = (t0, home, bin, agent = 'claude-code', ...extra) => {
   return { p, log: () => log };
 };
 
+test('Cue joins in private mode and verifies delivery from its scheduled inbox check', async (t0) => {
+  const env = await setup(t0);
+  const cue = await joinAgent(env, 'cue@example.com', 'aurora-cue', 'cue');
+  assert.equal(cue.done.code, 0, cue.done.out);
+  assert.equal(env.relay.db.prepare('SELECT platform FROM bots WHERE id = ?').get(cue.botId).platform, 'cue');
+  assert.doesNotMatch(cue.done.out, /routine called|watch --install --agent cue/);
+  const steps = (await cue.b('/app/bots/add/cue')).text;
+  assert.match(steps, /Cue/);
+  const named = await cue.b('/app/bots/add/cue', { method: 'POST', form: { handle: 'another-cue' } });
+  assert.equal(named.status, 303);
+  const connect = (await cue.b(named.location)).text;
+  assert.match(connect, /--name another-cue --agent cue --wait 100[^]*every 30 minutes/);
+  assert.equal((await cue.cli('doorbell', 'set', '--schedule')).code, 0);
+  assert.match((await cue.cli('doorbell', 'test')).out, /recurring task picks it up/);
+  assert.match((await cue.cli('doorbell', 'status')).out, /not verified/);
+  env.advance(31 * 60_000);
+  // Each call starts a separate process with the same persistent home, as Cue's scheduled task does.
+  const inbox = await cue.cli('inbox', '--via', 'doorbell');
+  assert.equal(inbox.code, 0, inbox.out);
+  const receipt = inbox.out.match(/^[^|\n].*b2b\.mjs'? ack (msg_[\w~-]+)$/m)?.[1];
+  assert.ok(receipt, inbox.out);
+  assert.equal((await cue.cli('ack', receipt)).code, 0);
+  assert.match((await cue.cli('doorbell', 'status')).out, /Doorbell: verified/);
+  assert.match((await cue.cli('whoami')).out, /Encryption: on[^]*docs\/cue\.md/);
+  const dashboard = (await cue.b('/app')).text;
+  const at = dashboard.indexOf('data-origin="cue"');
+  assert.ok(at >= 0);
+  const row = dashboard.slice(dashboard.lastIndexOf('<li>', at), dashboard.indexOf('</li>', at));
+  assert.match(row, /Cue/);
+  assert.doesNotMatch(row, /Beta/);
+});
+
 // An hour and a day in, when a Grok bot's owner would get a doorbell reminder, nothing is sent about this one.
 async function noReminders(env, handle) {
   for (const ms of [61 * 60_000, 24 * 3_600_000]) {

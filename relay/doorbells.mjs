@@ -32,7 +32,7 @@ export const agentPlatform = (name) => AGENT_NAMES[String(name ?? '').trim().toL
 // What a bot may say it is when it joins in private mode: a coding agent, OpenClaw (woken by its own webhook,
 // /hooks/wake), Instinct, T3 Code or another assistant (no doorbell unless it has a webhook). T3 Code is an inbox its
 // owner opens from a T3 Code thread ("pick up the brief"), so nothing wakes it. Saying nothing means Grok Bot's routine.
-export const JOIN_AS = { ...AGENT_NAMES, openclaw: 'openclaw', instinct: 'instinct', t3code: 't3code', 't3-code': 't3code', other: 'other' };
+export const JOIN_AS = { ...AGENT_NAMES, openclaw: 'openclaw', openbot: 'openbot', instinct: 'instinct', cue: 'cue', t3code: 't3code', 't3-code': 't3code', other: 'other' };
 export const joinPlatform = (name) => JOIN_AS[String(name ?? '').trim().toLowerCase()] ?? null;
 
 // A webhook key as the owner pasted it. Grok Bot also offers the whole "Authorization: Bearer <key>" header to

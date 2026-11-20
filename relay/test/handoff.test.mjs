@@ -119,6 +119,8 @@ test('capability profiles: what each kind of bot can do, never which app it is',
   const p = (vendor, platform) => { const x = capabilityProfile({ vendor, platform }); return `${x.files}/${x.repo}/${x.shell}/${x.transport}`; };
   for (const a of ['claude_code', 'codex', 'cursor', 'hermes', 'openclaw', 't3code']) assert.equal(p('grokbot', a), 'true/true/true/attachment', a);
   assert.equal(p('grokbot', 'grok'), 'true/false/true/attachment+inline', 'Grok Bot: files yes, no repo access');
+  assert.equal(p('grokbot', 'cue'), 'true/false/true/attachment+inline', 'Cue: verified files and shell, no assumed repository access');
+  assert.equal(p('connector', 'cue'), 'false/false/false/inline', 'file support is private-mode only');
   assert.equal(p('grokbot', 'chatgpt'), 'null/false/true/inline', 'a dot in private mode: files not assumed');
   assert.equal(p('grokbot', 'instinct'), 'null/false/true/inline');
   assert.equal(p('connector', 'chatgpt'), 'false/false/false/inline', 'quick connect: package in the message');

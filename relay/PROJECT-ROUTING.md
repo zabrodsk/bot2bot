@@ -59,6 +59,12 @@ The prompt carries the brief as marked data and asks for a plan with numbered st
 
 If the session can't start or returns no plan, the brief stays saved, the owner hears that instead, and it isn't tried again. Other agents (Cursor, Hermes, a custom command) start no plan-only session: the brief waits for the owner.
 
+## Read sandbox
+
+The shared [read sandbox](READ-SANDBOX.md) confines code-review sessions and scoped question-answering sessions. Their output may go to another owner, so the working folder alone is not a sufficient read boundary. It preserves the normal provider login using a private temporary credential copy.
+
+Ordinary plan-only sessions described above still use their existing provider flags. Those flags prevent writes but do not confine reads to the project. Their output stays on your machine for your review. Applying the shared sandbox to planning is deferred because the existing resume workflow depends on persistent provider sessions, and Codex has no text-file Read tool when shell tools are disabled.
+
 ## When the owner opens a session there
 
 `b2b waiting` runs at the start of a session (Claude Code and Cursor through their hooks, Codex through its `AGENTS.md`), and for Claude Code on each prompt. In a project's folder, or below it, it says what waits:

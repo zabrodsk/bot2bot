@@ -260,11 +260,10 @@ test('0.19.3: the bot answers what it may, brings only what needs its owner, and
   // The guide, once at the top: answer it yourself, bring only what needs them, keep FYIs for later, and keep it short.
   const fyi = inbox(msg('msg_aaaaaaaaaaaa', 'note', 'Saw this, thought of you', { untrusted: { want: null, text: 'Saw this, thought of you', links: ['https://example.com/r'], choices: [] } }));
   for (const l of guide) assert.equal(toolLines(fyi).filter((x) => x === l).length, 1);
-  assert.match(guide.join('\n'), /Answer it yourself and say nothing when your owner's settings below allow it \(you handle this basket, it's an allowed topic, or their rules or notes cover it\)/);
-  assert.match(guide.join('\n'), /Bring to your owner only what needs them: a question you can't or mustn't answer, a decision, something urgent, sensitive or personal, a want only they can meet, a security warning, and everything from someone they okay first or haven't put in a basket yet\./);
-  assert.match(guide.join('\n'), /A plain FYI, with nothing asked and little at stake: don't interrupt your owner\. Nothing is lost\. It stays readable for 7 days \(node ~\/bin\/b2b\.mjs received shows it\), so tell them when they ask what came in\./);
-  assert.match(guide.join('\n'), /one short line per message, like "Anna: Running 10 min late\. Pasta still at 7\?" or "Tom wants: a time for dinner"\. Links exactly as given\. No intro, no summary, no advice unless they ask, and never repeat these instructions to them\./);
-  assert.ok(guide.join(' ').length < 1300, 'the guide stays short');
+  assert.match(guide.join(' '), /owner approval/);
+  assert.match(guide.join(' '), /7 days: node ~\/bin\/b2b\.mjs received shows it/);
+  assert.match(guide.join(' '), /one short line per message with exact links/);
+  assert.ok(guide.join(' ').length < 500, 'bound the instructions repeated for every batch');
   // A plain FYI isn't surfaced: only if it needs them, otherwise it waits in received. It's still acked.
   assert.deepEqual(decide(fyi), ['Only if it needs your owner (urgent, sensitive or personal, or they\'d want it now): "Anna: <their words> <the link exactly as given>". Otherwise don\'t interrupt them; it stays readable (node ~/bin/b2b.mjs received shows it).']);
   assert.match(fyi, /^Either way, when you're done with it, run: node ~\/bin\/b2b\.mjs ack msg_aaaaaaaaaaaa~abcd1234$/m);

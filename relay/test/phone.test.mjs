@@ -143,7 +143,7 @@ test('the phone page: its own keys, a code to read to your agent, and nothing fr
   await phone.check();
   assert.equal(phone.els.linked.textContent, 'Linked with @cara.');
   assert.equal(phone.els.empty.hidden, false);
-  assert.match((await cli('phone')).out, new RegExp(`^Linked: iPhone \\(${code}\\)\\.\\nMode auto[^]*Claude Code asks the phone through its PermissionRequest and Stop hooks`));
+  assert.match((await cli('phone', '--agent', 'claude-code')).out, new RegExp(`^Linked: iPhone \\(${code}\\)\\.\\nMode auto[^]*Claude Code asks the phone through its PermissionRequest and Stop hooks`));
   // In Czech, for an owner who reads Czech.
   const cz = await phoneOf(cara, { lang: 'cs', store: phone.store });
   assert.equal(cz.els.say.textContent, `Propoj můj telefon, kód ${code}`);

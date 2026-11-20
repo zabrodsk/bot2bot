@@ -16,9 +16,9 @@ export function capabilityProfile(bot) {
   // A web inbox is a person reading in a browser; a quick connect app has no files and no shell of ours.
   if (bot.vendor === 'web' || bot.vendor === 'connector') return p(false, false, false, 'inline');
   if (CODING.has(bot.platform)) return p(true, true, true, 'attachment');
-  // Grok Bot: a cloud computer with a terminal and files, seen sending and saving files, but no
+  // Grok Bot and Cue: cloud computers with a terminal and files, seen sending and saving files, but no
   // access to the owner's repositories.
-  if (!bot.platform || bot.platform === 'grok') return p(true, false, true, 'attachment+inline');
+  if (!bot.platform || bot.platform === 'grok' || bot.platform === 'cue') return p(true, false, true, 'attachment+inline');
   // A dot in private mode, Instinct, other assistants: they run the tool, but whether they can open a saved file
   // isn't known, so the package goes in the (still end-to-end encrypted) message.
   return p(null, false, true, 'inline');
