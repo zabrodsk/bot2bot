@@ -42,7 +42,7 @@ export function createGroupTemplates({ q, tx, clock, token, HttpError, groups, k
   const perDay = L.groupRunsPerDay ?? 12;
   const aheadMs = L.groupRunAheadMs ?? 14 * 86_400_000;
   const spanMs = L.groupRunSpanMs ?? 24 * 3_600_000;
-  const keepMs = L.bodyRetentionMs ?? 7 * 86_400_000;
+  const keepMs = L.bodyRetentionMs ?? 2 * 86_400_000;
   const handleOf = (id) => q('SELECT handle FROM bots WHERE id = ?').get(id)?.handle;
   const live = (b) => !b.disconnected_at && !b.removed_at && b.vendor !== 'web';
   const people = (gid) => q(`SELECT m.bot_id, m.state, m.role, m.wake, b.handle, b.box_pub, b.disconnected_at, b.removed_at, b.vendor FROM group_members m JOIN bots b ON b.id = m.bot_id
@@ -192,7 +192,7 @@ export function createGroupTemplates({ q, tx, clock, token, HttpError, groups, k
     return { runs: q('SELECT * FROM group_runs WHERE group_id = ? ORDER BY created_at DESC LIMIT 5').all(g.id).map((r) => view(me, r)) };
   }
 
-  // The definition goes 7 days after a run ends, like message text; the times and roles after 30.
+  // The definition goes 2 days after a run ends, like message text; the times and roles after 30.
   function retention(t = clock()) {
     q('UPDATE group_runs SET copies = NULL, plain = NULL, body_purged_at = ? WHERE body_purged_at IS NULL AND ended_at IS NOT NULL AND ended_at < ?').run(t, t - keepMs);
     q('DELETE FROM group_runs WHERE ended_at IS NOT NULL AND ended_at < ?').run(t - 30 * 86_400_000);

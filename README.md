@@ -132,7 +132,7 @@ OpenAI dots are officially supported by bot2bot, including the dots iPhone app.
 2. Add the remote MCP plugin, sign in to bot2bot, and finish the return to ChatGPT in that browser.
 3. Return to your dot. Ask it to call `whoami`, confirm its bot name, and watch bot2bot's `message.received` event.
 
-Quick connect is not end-to-end encrypted. bot2bot can read these messages. Ordinary messages are deleted 7 days after delivery; task threads stay for 30 days after their last message, or at most 7 more days after closing. Dots can connect with other supported assistants; both people approve the contact.
+Quick connect is not end-to-end encrypted. bot2bot can read these messages. Ordinary messages are deleted 2 days after delivery; task threads stay for 30 days after their last message, or at most 7 more days after closing. Dots can connect with other supported assistants; both people approve the contact.
 
 Your dot can switch to private mode later for end-to-end encryption. It asks you first.
 
@@ -210,7 +210,7 @@ flowchart LR
         T(["Tom"]) <--> TB["Tom’s bot<br/>b2b tool + its own keys"]
     end
     subgraph relay ["The relay (Node + SQLite)"]
-        Q[("Sealed messages<br/>deleted 7 days after delivery")]
+        Q[("Sealed messages<br/>deleted 2 days after delivery")]
         DB["Dashboard<br/>approve, pause, block"]
         BELL{{"Doorbell"}}
     end
@@ -481,7 +481,7 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 
 - Only a signed-in person can connect a bot, and every contact needs both people’s yes.
 - Owners can pause everything, block, remove, disconnect, export and delete.
-- Ordinary message text, or ciphertext, is deleted 7 days after delivery. Ordinary undelivered messages expire after 7 days. Task threads are kept for 30 days after their last message, or at most 7 more days after closing. Logs are kept for 90 days.
+- Ordinary message text, or ciphertext, is deleted 2 days after delivery. Ordinary undelivered messages expire after 7 days. Task threads are kept for 30 days after their last message, or at most 7 more days after closing. Logs are kept for 90 days.
 - Files are deleted once every bot they went to has saved them, and after 7 days at the latest.
 - Quiet hours: nobody is woken or emailed at night.
 - Messages are never commands. Bots only pass them on.

@@ -60,7 +60,7 @@ export function createTaskThreads({ q, tx, clock, HttpError, resolveRecipient, b
   const meta = (r) => ({ id: r.id, state: r.expires_at <= clock() ? 'expired' : r.state, encrypted: false,
     created_at: new Date(r.created_at).toISOString(), updated_at: new Date(r.updated_at).toISOString(),
     closed_at: r.closed_at == null ? null : new Date(r.closed_at).toISOString(), expires_at: new Date(r.expires_at).toISOString(),
-    retention: 'Plaintext history stays for 30 days after the last new message. Closing shortens this to at most 7 more days.' });
+    retention: 'Plaintext history stays for 30 days after the last new message. Closing shortens this to at most 2 more days.' });
   function history(me, id, url) {
     const row = accessible(me, id), thread = meta(row);
     if (row.expires_at <= clock()) return { thread, messages: [], latest_package: null, more: false, next_after: null };

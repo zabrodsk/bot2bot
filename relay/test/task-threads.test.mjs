@@ -117,13 +117,13 @@ test('closing is pair scoped and idempotent, caps retention and refuses new mess
   env.advance(8 * DAY);
   const closed = await close(b);
   assert.equal(closed.status, 200); assert.equal(closed.json.thread.state, 'closed');
-  assert.ok(Date.parse(closed.json.thread.expires_at) <= env.now() + 7 * DAY);
+  assert.ok(Date.parse(closed.json.thread.expires_at) <= env.now() + 2 * DAY);
   assert.equal((await send(a, b, 'New message', { thread: T })).status, 409);
   assert.equal((await send(a, b, pkg(), { client_id: 'package' })).json.id, sent.json.id);
-  env.advance(3 * DAY);
+  env.advance(1 * DAY);
   assert.equal((await close(a)).json.thread.expires_at, closed.json.thread.expires_at);
   env.relay.retention(); assert.ok((await get(a)).json.messages.length);
-  env.advance(5 * DAY); env.relay.retention();
+  env.advance(2 * DAY); env.relay.retention();
   assert.equal(q('SELECT text FROM messages WHERE id = ?').get(sent.json.id).text, '');
   assert.deepEqual((await get(b)).json.messages, []);
 });

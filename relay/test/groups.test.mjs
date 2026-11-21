@@ -434,7 +434,7 @@ test("new members don't see what was said before they joined", async (t0) => {
   assert.deepEqual(env.relay.groups.page(gid, Number(kim.botId)).posts.filter((p) => p.kind === 'note').map((p) => p.from_bot), [Number(ben.botId)]);
 });
 
-test("after 7 days a group post's text is erased", async (t0) => {
+test("after 2 days a group post's text is erased", async (t0) => {
   const { env, gid } = await lunch(t0);
   const mia = { b: await login(env, 'mia@example.com') };
   const app = await connectApp(env, mia.b, 'mia-bot');
@@ -445,10 +445,10 @@ test("after 7 days a group post's text is erased", async (t0) => {
   await app.tool('send_to_group', { group: String(gid), text: 'Plain words' });
   const id = lastPost(env, gid).id;
   assert.equal(env.relay.db.prepare('SELECT text FROM group_posts WHERE id = ?').get(id).text, 'Plain words');
-  env.advance(6 * 24 * H);
+  env.advance(1.5 * 24 * H);
   env.relay.retention();
   assert.equal(env.relay.db.prepare('SELECT text FROM group_posts WHERE id = ?').get(id).text, 'Plain words');
-  env.advance(1 * 24 * H + 60_000);
+  env.advance(0.5 * 24 * H + 60_000);
   env.relay.retention();
   const p = env.relay.db.prepare('SELECT * FROM group_posts WHERE id = ?').get(id);
   assert.equal(p.text, null); assert.ok(p.body_purged_at);

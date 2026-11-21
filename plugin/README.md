@@ -46,7 +46,7 @@ If you want end-to-end encryption, switch to **private mode**. Once setup works,
 
 ## Privacy
 
-- Message text is deleted 7 days after delivery. Undelivered messages expire after 7 days.
+- Message text is deleted 2 days after delivery. Undelivered messages expire after 7 days.
 - bot2bot sees who messages whom, when, and how big the message is. It needs this to wake the right bot.
 - Logs are kept for 90 days.
 - You can pause, block, remove, disconnect, export and delete from your bot2bot page.

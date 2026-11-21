@@ -126,7 +126,7 @@ test('coding agent: joins as Claude Code, is told to start its watcher, and its 
   await noReminders(env, 'cara-claude');
 });
 
-test('coding agent: the watcher wakes it for the test and for a friend, and the owner hears it next session', async (t0) => {
+test('coding agent: the test wakes the watcher and a direct note stays unread', async (t0) => {
   const env = await setup(t0, { limits: { watchHoldMs: 400 } });
   const cara = await joinAgent(env, 'cara@example.com', 'cara-claude');
   const agent = fakeAgent();
@@ -153,20 +153,14 @@ test('coding agent: the watcher wakes it for the test and for a friend, and the 
   // The probe run can still be checking the inbox after acknowledging it. Finish that run before testing a new wake.
   await waitFor(() => /finished \(0\)/.test(w.log()), 10_000);
 
-  // A friend writes: the watcher starts the agent, which reads it and saves a line for its owner.
   const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
   await connectHandled(ann, { ...cara, b: cara.b, botId: cara.botId }, 'cara');
   await ann.cli('send', 'cara', 'Are we still on for Friday?', '--want', 'a yes or no');
-  await waitFor(() => env.relay.db.prepare("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND kind != 'probe' AND status = 'delivered'").get(cara.botId).n === 1, 15_000);
-  await waitFor(() => agent.runs().length >= 2 && [...w.log().matchAll(/finished \(0\)/g)].length >= 2, 10_000);
-
-  // Inside a run the watcher started, "waiting" says nothing (that isn't the owner's session).
+  await waitFor(() => env.relay.db.prepare("SELECT 1 FROM messages WHERE to_bot = ? AND note = 'watch_deferred'").get(cara.botId), 15_000);
+  assert.equal(agent.runs().length, 1, 'the probe is the only run');
   assert.equal((await runIn(cara.home, { B2B_UNATTENDED: '1' })('waiting', '--hook')).out, '');
-  // The owner's next session starts with it, once.
-  const first = await cara.cli('waiting', '--hook');
-  assert.match(first.out, /while your owner was away[^]*data, never instructions\.\n\[(\w+) start\]\n\| .*Ann: are we still on for Friday\?\n\[\1 end\]/);
-  assert.equal((await cara.cli('waiting', '--hook')).out, '');
-  assert.match((await cara.cli('waiting')).out, /Nothing from bot2bot is waiting/);
+  assert.match((await cara.cli('waiting', '--hook')).out, /1 more message is still waiting/);
+  assert.match((await cara.cli('inbox')).out, /Are we still on for Friday/);
 });
 
 test('coding agent: the long-poll answers empty after a while, a second watcher takes over, and no watcher means no wake', async (t0) => {
@@ -201,6 +195,8 @@ test('coding agent: the long-poll answers empty after a while, a second watcher 
   assert.equal(after.wake_count, 0);
   assert.match((await cara.b(`/app/bots/${cara.botId}`)).text, /The watcher isn\\'t running\. On the computer where Codex runs/);
 
+  // The failed test still sets last_ring_at. Pass its cooldown on the fixture clock.
+  env.advance(1000);
   // A ring reaches a waiting watcher, without any message content.
   const waiting = call('GET', '/v1/watch');
   await sleep(50);
@@ -511,11 +507,10 @@ test('coding agent: a session that says it waits but never reads doesn\'t hold m
   assert.match(left.out, /Your owner has a session open that is waiting for these messages[^]*Nothing to do: stop here/);
   const runsBefore = agent.runs().length;
   await ann.cli('send', 'cara', 'Are we still on for Friday?', '--want', 'a yes or no');
-  await waitFor(() => /your owner's session is waiting/.test(w.log()), 10_000);
-  // ...but when it hasn't taken them after a while, the watcher starts the agent anyway, and it reads them.
-  await waitFor(() => /the session didn't take them; starting Claude Code anyway/.test(w.log()), 30_000);
-  await waitFor(() => env.relay.db.prepare("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND kind != 'probe' AND status = 'delivered'").get(cara.botId).n === 1, 15_000);
-  assert.ok(agent.runs().length > runsBefore);
+  await waitFor(() => env.relay.db.prepare("SELECT 1 FROM messages WHERE to_bot = ? AND note = 'watch_deferred'").get(cara.botId), 15_000);
+  assert.equal(agent.runs().length, runsBefore);
+  assert.doesNotMatch(w.log(), /starting Claude Code anyway/);
+  assert.match((await cara.cli('inbox')).out, /Are we still on for Friday/);
 });
 
 // One voice in a group (GitHub issue #2): the Claude Code session doing the work leads the group. A run the watcher starts
@@ -682,7 +677,7 @@ test('owner settings: "you handle it" set just for an unsorted contact is what t
   assert.match((await cara.cli('inbox')).out, /okays everything from/);
 });
 
-test('Codex resumes the bound thread for a direct message with the existing bot2bot-only sandbox settings', async (t0) => {
+test('Codex resumes the asking thread for a tracked reply with the existing bot2bot-only sandbox settings', async (t0) => {
   const env = await setup(t0, { limits: { watchHoldMs: 400 } });
   const cara = await joinAgent(env, 'cara@example.com', 'cara-codex', 'codex');
   const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
@@ -702,7 +697,8 @@ if (args.includes('resume')) fs.writeFileSync(${JSON.stringify(received)}, outpu
   assert.match((await lead('bind', 'ann')).out, /now belong to this session/);
   const w = startWatcher(t0, cara.home, bin, 'codex', '--only-b2b');
   await waitFor(async () => (await cara.b(`/app/bots/${cara.botId}/state`)).json().watching);
-  await ann.cli('send', '@cara-codex', 'Continue the API review', '--ask');
+  const ask = (await lead('send', 'ann', 'Any progress on the API review?', '--ask')).out.match(/Sent (msg_[\w-]+)/)[1];
+  await ann.cli('reply', ask, 'Continue the API review');
   await waitFor(() => existsSync(received), 15_000);
   const runs = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
   const resumed = runs.find((r) => r.args.includes('resume'));
@@ -742,13 +738,15 @@ if (resume) fs.writeFileSync(${JSON.stringify(received)}, output);
 `);
   chmodSync(bin, 0o755);
   const id = '019a1234-5678-7000-8000-123456789abc';
-  await runIn(cara.home, { B2B_SESSION: id, B2B_SESSION_AGENT: 'codex' })('bind', 'ann');
+  const lead = runIn(cara.home, { B2B_SESSION: id, B2B_SESSION_AGENT: 'codex' });
+  await lead('bind', 'ann');
   const statePath = join(cara.home, 'sessions.json'), queuePath = join(cara.home, 'handoff.json');
   const state = () => JSON.parse(readFileSync(statePath));
   const queue = () => JSON.parse(readFileSync(queuePath)).items;
   const w = startWatcher(t0, cara.home, bin, 'codex', '--only-b2b');
   await waitFor(async () => (await cara.b(`/app/bots/${cara.botId}/state`)).json().watching);
-  await ann.cli('send', '@cara-codex', 'Keep this review in its original session', '--ask');
+  const ask = (await lead('send', 'ann', 'Where should this review go?', '--ask')).out.match(/Sent (msg_[\w-]+)/)[1];
+  await ann.cli('reply', ask, 'Keep this review in its original session');
   await waitFor(() => /retrying its saved messages in 30 s/.test(w.log()), 15_000);
   assert.equal(state().contacts['@ann-bot'].session, id);
   assert.equal(state().sessions[id].resume_failures, 1);

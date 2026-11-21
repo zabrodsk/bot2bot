@@ -47,6 +47,7 @@ export function migrateLinkedDevices(db) {
   });
   const cols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
   for (const col of ['claim_device', 'handled_device']) if (!cols.includes(col)) db.exec(`ALTER TABLE messages ADD COLUMN ${col} TEXT`);
+  if (!db.prepare('PRAGMA table_info(linked_devices)').all().some((c) => c.name === 'held_briefs')) db.exec('ALTER TABLE linked_devices ADD COLUMN held_briefs INTEGER');
   // Reconnecting or deleting the identity must never leave another machine authorized under it.
   db.exec(`CREATE TRIGGER IF NOT EXISTS devices_reset AFTER UPDATE OF sign_pub, box_pub, token_hash ON bots
     WHEN OLD.sign_pub IS NOT NEW.sign_pub OR OLD.box_pub IS NOT NEW.box_pub OR OLD.token_hash IS NOT NEW.token_hash BEGIN
@@ -112,7 +113,7 @@ export function createLinkedDevices({ q, tx, clock, HttpError, sha, L }) {
       if (!bot || bot.disconnected_at || bot.removed_at || !manifest?.roster.devices.some((d) => d.id === request.id)) fail(410, 'Device approval is no longer active.');
       return { status: 'approved', handle: bot.handle, manifest };
     },
-    'GET /v1/devices': ({ me }) => ({ handle: me.handle, current: deviceId(me), root: rootOf(me), manifest: roster(me.id), devices: active(me) }),
+    'GET /v1/devices': ({ me }) => ({ handle: me.handle, current: deviceId(me), root: rootOf(me), manifest: roster(me.id), devices: active(me), removed_by_owner: removedByOwner(me) }),
     'GET /v1/devices/link/:id': ({ me, params }) => { primary(me); const r = requestById(params.id); if (r.bot_id && r.bot_id !== me.id) fail(403, 'Already linked to another identity.'); return { request: JSON.parse(r.request), proof: r.proof }; },
     'POST /v1/devices/approve': ({ me, body }) => tx(() => {
       primary(me);
@@ -213,6 +214,30 @@ export function createLinkedDevices({ q, tx, clock, HttpError, sha, L }) {
       const base = all[key]; all[key] = (ctx) => { const value = base(ctx); return value?.then ? value.then(decorate) : decorate(value); };
     }
   }
+  // Devices the owner cut off on the dashboard that the signed list still names: the primary finishes with device revoke.
+  const removedByOwner = (b) => {
+    const ids = new Set(active(b).map((d) => d.id));
+    return q('SELECT id, name FROM linked_devices WHERE bot_id = ? AND revoked_at IS NOT NULL ORDER BY created_at').all(b.id).filter((d) => ids.has(d.id)).map((d) => d.name);
+  };
+  // The owner's dashboard: the bot's computers, each linked one with when it was linked and whether it's cut off.
+  function forOwner(b) {
+    if (!roster(b.id)) return [];
+    const rows = new Map(q('SELECT id, created_at, revoked_at FROM linked_devices WHERE bot_id = ?').all(b.id).map((r) => [r.id, r]));
+    return active(b).map((d) => (d.id === 'primary' ? { id: d.id, name: d.name, primary: true }
+      : { id: d.id, name: d.name, linked_at: rows.get(d.id)?.created_at ?? null, off: !rows.get(d.id) || !!rows.get(d.id).revoked_at }));
+  }
+  // Cutting a device off from the dashboard: its token stops working at once and what it was reading goes back to the
+  // other devices. The signed list changes only on the primary (device revoke), so Undo can let it back in until then.
+  function setOff(b, id, off) {
+    return tx(() => {
+      const d = q('SELECT * FROM linked_devices WHERE id = ? AND bot_id = ?').get(String(id), b.id);
+      if (!d || !active(b).some((x) => x.id === d.id && x.sign === d.sign_pub && x.box === d.box_pub)) fail(404, 'That computer is no longer linked.');
+      if (off === !!d.revoked_at) return { changed: false, name: d.name };
+      q('UPDATE linked_devices SET revoked_at = ? WHERE id = ?').run(off ? clock() : null, d.id);
+      if (off) q("UPDATE messages SET status = 'pending', lease_until = NULL, lease_token = NULL, claim_device = NULL WHERE to_bot = ? AND status = 'claimed' AND claim_device = ?").run(b.id, d.id);
+      return { changed: true, name: d.name };
+    });
+  }
   function ownCodex(me, to) {
     if (!/^my codex$/i.test(to)) return to;
     const matches = q(`SELECT b.handle FROM contacts c JOIN bots b ON b.id = c.peer_bot
@@ -222,5 +247,5 @@ export function createLinkedDevices({ q, tx, clock, HttpError, sha, L }) {
     if (matches.length !== 1) fail(409, matches.length ? `Which Codex identity? Ask your owner to choose: ${matches.map((m) => '@' + m.handle).join(', ')}.` : 'No active Codex identity of your owner is in contacts.');
     return '@' + matches[0].handle;
   }
-  return { routes, install, authenticate, validate, ownCodex };
+  return { routes, install, authenticate, validate, ownCodex, forOwner, setOff, active, roster };
 }

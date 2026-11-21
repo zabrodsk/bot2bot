@@ -6,8 +6,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setup, owner, connect, listen, waitFor } from './helpers.mjs';
+import { setup, owner, connect, waitFor } from './helpers.mjs';
 import { presign } from '../files.mjs';
+
+import { store } from './s3-store.mjs';
 
 const DAY = 86_400_000;
 
@@ -17,27 +19,6 @@ test('presigned links match AWS Signature Version 4 (the published example)', ()
   assert.match(url, /^https:\/\/examplebucket\.s3\.amazonaws\.com\/test\.txt\?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&/);
   assert.ok(url.endsWith('&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404'));
 });
-
-// An S3 stand-in on a local port: a Map for a bucket, and every request must carry a valid link for exactly it.
-async function store(t0) {
-  const bucket = new Map();
-  const box = {};
-  const { s, url } = await listen(async (req, res) => {
-    const u = new URL(req.url, url);
-    const at = Date.parse(u.searchParams.get('X-Amz-Date')?.replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/, '$1-$2-$3T$4:$5:$6Z'));
-    const sized = (u.searchParams.get('X-Amz-SignedHeaders') || '').split(';').includes('content-length');
-    const want = presign(box.s3, { method: req.method, key: decodeURIComponent(u.pathname.replace(`/${box.s3.bucket}/`, '')), expiresSec: Number(u.searchParams.get('X-Amz-Expires')), at, size: sized ? req.headers['content-length'] : null });
-    if (want !== `${url}${req.url}`) return res.writeHead(403).end('SignatureDoesNotMatch');
-    const key = u.pathname;
-    if (req.method === 'PUT') { const parts = []; for await (const c of req) parts.push(c); bucket.set(key, Buffer.concat(parts)); return res.writeHead(200).end(); }
-    if (req.method === 'GET') return bucket.has(key) ? res.writeHead(200, { 'content-length': bucket.get(key).length }).end(bucket.get(key)) : res.writeHead(404).end();
-    if (req.method === 'DELETE') { bucket.delete(key); return res.writeHead(204).end(); }
-    res.writeHead(405).end();
-  });
-  box.s3 = { endpoint: url, bucket: 'test-files', region: 'auto', keyId: 'test-key', secret: 'test-secret-0123456789', style: 'path' };
-  t0.after(() => s.close());
-  return { s3: box.s3, bucket };
-}
 
 async function pair(t0, { alpha = ['ben@example.com', 'anna@example.com'], limits = {}, hosted = false, promoUntil = 0, privacyPilot = false } = {}) {
   const st = await store(t0);

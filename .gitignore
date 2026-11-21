@@ -13,3 +13,17 @@ videos/*/audio/music.wav
 videos/*/snapshots/
 videos/*/audio/stems/
 .DS_Store
+
+# Local only: agent worktrees, attachments, personal documents and one-off outputs (kept on disk, never committed)
+.claude/worktrees/
+.t3-attachments/
+/artifacts/
+/pngout.png
+/*.pdf
+
+# Video renders and media files: each project keeps its sources here and re-renders these
+videos/*/renders/
+videos/**/*.mp4
+videos/**/*.mov
+videos/**/*.wav
+videos/*/globe/frames/

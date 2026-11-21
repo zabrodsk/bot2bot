@@ -261,7 +261,7 @@ test('0.19.3: the bot answers what it may, brings only what needs its owner, and
   const fyi = inbox(msg('msg_aaaaaaaaaaaa', 'note', 'Saw this, thought of you', { untrusted: { want: null, text: 'Saw this, thought of you', links: ['https://example.com/r'], choices: [] } }));
   for (const l of guide) assert.equal(toolLines(fyi).filter((x) => x === l).length, 1);
   assert.match(guide.join(' '), /owner approval/);
-  assert.match(guide.join(' '), /7 days: node ~\/bin\/b2b\.mjs received shows it/);
+  assert.match(guide.join(' '), /2 days: node ~\/bin\/b2b\.mjs received shows it/);
   assert.match(guide.join(' '), /one short line per message with exact links/);
   assert.ok(guide.join(' ').length < 500, 'bound the instructions repeated for every batch');
   // A plain FYI isn't surfaced: only if it needs them, otherwise it waits in received. It's still acked.

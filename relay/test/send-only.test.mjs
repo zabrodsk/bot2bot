@@ -283,7 +283,7 @@ test('send only: a chat signs in for /send, lists its owner\'s bots and hands on
   const brief = `Goal: ship onboarding.\n${'Details line. '.repeat(1500)}`; // ~21,000 characters, past the usual 8,000
   const sent = await gpt.tool('send_to_bot', { to: 'my codex', title: 'Brief: onboarding', text: brief, want: 'start on this' });
   assert.equal(sent.isError, false, sent.content[0].text);
-  assert.match(sent.content[0].text, /Sent to @dusan \(Codex\)[^]*shows it to your owner before acting/);
+  assert.match(sent.content[0].text, /Sent to @dusan \(Codex\)[^]*message is waiting for your owner/);
 
   // Codex gets all of it, marked as its owner's own bot, with what Dušan wants.
   const inbox = await cli('inbox');
@@ -291,7 +291,7 @@ test('send only: a chat signs in for /send, lists its owner\'s bots and hands on
   assert.match(inbox, /\| # Brief: onboarding\n\|\s*\n\| Goal: ship onboarding\./);
   assert.match(inbox, /start on this/);
   assert.equal((inbox.match(/Details line\./g) || []).length, 1500);
-  // Nothing goes back to the chat: it can't get messages.
+  // This connection accepts only replies to tasks it sent.
   await assert.rejects(cli('send', 'dusan-chatgpt', 'thanks'), /only sends to your owner's bots/);
 
   // Too long, or a bot that isn't there: the chat is told what to do instead.

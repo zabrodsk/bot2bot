@@ -46,7 +46,7 @@ export function browser(base, headers0 = {}) {
     const r = await fetch(base + path, { method, headers, body, redirect: 'manual' });
     for (const sc of r.headers.getSetCookie?.() ?? []) { const [kv] = sc.split(';'); const i = kv.indexOf('='); jar[kv.slice(0, i)] = kv.slice(i + 1); }
     const text = await r.text();
-    return { status: r.status, location: r.headers.get('location'), text, json: () => JSON.parse(text) };
+    return { status: r.status, location: r.headers.get('location'), headers: r.headers, text, json: () => JSON.parse(text) };
   };
 }
 

@@ -43,7 +43,7 @@ export function migrateGroups(db) {
       created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER
     );
     -- What was said, once per post (each recipient's copy is a row in messages). Text only when the group wasn't
-    -- end-to-end encrypted, so the dashboard can show it; erased with the copies after 7 days.
+    -- end-to-end encrypted, so the dashboard can show it; erased with the copies after 2 days.
     CREATE TABLE IF NOT EXISTS group_posts (
       id TEXT PRIMARY KEY, group_id INTEGER NOT NULL REFERENCES chat_groups(id), from_bot INTEGER NOT NULL REFERENCES bots(id),
       kind TEXT NOT NULL, text TEXT, choices TEXT, sealed INTEGER NOT NULL DEFAULT 0, mentions TEXT NOT NULL DEFAULT '[]',
@@ -584,7 +584,7 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
     });
   }
 
-  // Retention: post text goes with its copies after 7 days; links nobody can use any more go too.
+  // Retention: post text goes with its copies after 2 days; links nobody can use any more go too.
   function retention(t) {
     q('UPDATE group_posts SET text = NULL, choices = NULL, self_sealed = NULL, body_purged_at = ? WHERE body_purged_at IS NULL AND (text IS NOT NULL OR self_sealed IS NOT NULL) AND created_at < ?').run(t, t - L.bodyRetentionMs);
     q('DELETE FROM group_links WHERE expires_at < ? OR revoked_at < ?').run(t - 86_400_000, t - 86_400_000);

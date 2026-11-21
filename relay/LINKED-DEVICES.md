@@ -33,6 +33,8 @@ b2b device revoke server --owner-ok
 
 A revoked token stops working immediately. Its unfinished claim returns to the other devices. New sends omit its key. Revocation cannot erase messages or keys it has already downloaded. Device names are unique lowercase names, up to 32 characters. `primary` is reserved. Only the primary can approve and revoke; it cannot revoke itself. Losing it requires the existing reconnect flow and fresh links, not a recovery key copied from another machine.
 
+The owner can also remove a linked device from the dashboard (the bot's page, **Computers**), without the primary. That stops the device's token at once and returns its unfinished claim, but the signed list still names it: senders keep sealing a copy it can no longer fetch, and it still counts toward the four. `GET /v1/devices` reports it in `removed_by_owner`, and `device list` on the primary says to finish with `device revoke`. Until then the dashboard's Undo can let it back in. The relay can't sign a list, so this needs no new trust: a relay could already refuse any token.
+
 `link`, `approve` and `revoke` refuse `B2B_UNATTENDED=1`. `approveDeviceForOwner` in the CLI is the future phone approval seam. Today it requires `--owner-ok` after the owner's yes in this session. It does not call or depend on issue #10.
 
 ## Trust and encryption

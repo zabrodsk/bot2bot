@@ -6,11 +6,11 @@ import assert from 'node:assert/strict';
 import { webcrypto, createPublicKey, verify, randomBytes } from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
-import { setup, owner, waitFor, sleep, listen } from './helpers.mjs';
+import { setup, owner, waitFor, sleep, listen, connectHandled, msgId } from './helpers.mjs';
 import { PHONE_SCRIPT, PHONE_CSP } from '../phone-page.mjs';
 import { phoneCode } from '../phone.mjs';
 
@@ -456,4 +456,56 @@ test('live: the real Claude Code, blocked on a command, goes on after a tap, and
   const result = JSON.parse(out.trim().split('\n').pop());
   assert.match(result.result, /PINEAPPLE/);
   console.log(`live: tap to command ${took} ms, cost $${result.total_cost_usd}`);
+});
+
+test('contact tasks wait for the phone and only an approval starts Claude Code', async (t) => {
+  const { env, cara, cli, phone } = await linked(t, { limits: { watchHoldMs: 300 } });
+  const sender = await owner(env, t, 'anna@example.com', 'anna', { status: 503 });
+  await connectHandled(sender, cara, 'anna');
+  const project = join(cara.home, 'acme-leads');
+  mkdirSync(project);
+  const added = await cli('project', 'add', 'acme-leads', project, '--allow', 'anna');
+  assert.equal(added.code, 0, added.out);
+  const bin = join(cara.home, 'fake-claude'), runs = join(cara.home, 'task-runs.jsonl');
+  writeFileSync(bin, `#!${process.execPath}
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(runs)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }) + '\\n');
+console.log(JSON.stringify({ type: 'result', session_id: 'project-claude-session', result: 'The test task is done.' }));
+`, { mode: 0o755 });
+  const watcher = spawn(process.execPath, [CLI, 'watch', '--agent', 'claude-code', '--bin', bin], {
+    env: { ...process.env, HOME: cara.home, B2B_HOME: cara.home }, stdio: 'ignore',
+  });
+  t.after(() => watcher.kill());
+  await waitFor(async () => (await cara.b(`/app/bots/${cara.botId}/state`)).json().watching, 10_000);
+  const send = async (dest, text) => msgId(await sender.cli('send', dest, text, '--do'));
+  const row = (id) => JSON.parse(readFileSync(join(cara.home, 'briefs.json'))).items.find((b) => b.id === id);
+
+  const approved = await send('@cara/acme-leads', 'Check the scoring tests.');
+  await phone.waitFor(() => !!phone.button('Approve once') && /Check the scoring tests/.test(phone.text()));
+  assert.match(phone.text(), /anna wants Claude Code to run a task in acme-leads/);
+  assert.equal(existsSync(runs), false);
+  await phone.button('Approve once').click();
+  await phone.passUndo();
+  await waitFor(() => row(approved)?.state === 'done', 15_000);
+  const [{ args, cwd }] = readFileSync(runs, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(cwd, realpathSync(project));
+  assert.ok(args.includes('--continue'));
+  assert.match(args.at(-1), /Check the scoring tests/);
+  assert.match(await sender.cli('status', approved), /The test task is done/);
+
+  const declined = await send('@cara', 'Change the import settings.');
+  await phone.waitFor(() => !!phone.button('Deny') && /Change the import settings/.test(phone.text()));
+  await phone.button('Deny').click();
+  await phone.passUndo();
+  await waitFor(() => row(declined)?.state === 'waiting', 15_000);
+  assert.match(await sender.cli('status', declined), /left it waiting/);
+  assert.match((await cli('inbox')).out, /Change the import settings/);
+
+  const expired = await send('@cara/acme-leads', 'Rewrite the scoring tests.');
+  await phone.waitFor(() => !!phone.button('Deny') && /Rewrite the scoring tests/.test(phone.text()));
+  env.advance(31 * 60_000);
+  await waitFor(() => row(expired)?.state === 'waiting', 15_000);
+  assert.match(await sender.cli('status', expired), /left it waiting/);
+  assert.match((await cli('project', 'load', 'acme-leads')).out, /Rewrite the scoring tests/);
+  assert.equal(readFileSync(runs, 'utf8').trim().split('\n').length, 1);
 });

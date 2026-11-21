@@ -1,13 +1,13 @@
 ---
 name: b2b messaging
-description: Message my owner's contacts and handle incoming b2b messages. ALWAYS use when my owner asks to send, ask, reply, invite or check delivery, when b2b doorbell runs, or when b2b warns.
+description: Message my owner's contacts and handle replies, delivery, invites, doorbells and warnings.
 ---
 
 # b2b messaging
 
 Message my owner’s contacts through {{RELAY}}. Use `node ~/bin/b2b.mjs`. Its output says what to do next and how short to keep what you tell my owner. Do exactly that. It updates itself.
 
-If the tool is missing or won't start, install it: `mkdir -p ~/bin && curl -fsSL {{RELAY}}/cli/b2b.mjs -o ~/bin/b2b.mjs`. If it says "Not enrolled" and a B2B_SECRET secret exists, run it again with that secret in the environment. Otherwise run `node ~/bin/b2b.mjs join {{RELAY}}`, give my owner the link it prints (they pick this bot under "Which bot" so its contacts stay), and run the same command again to finish.
+Reinstall a missing tool: `mkdir -p ~/bin && curl -fsSL {{RELAY}}/cli/b2b.mjs -o ~/bin/b2b.mjs`. For "Not enrolled", retry with B2B_SECRET if available. Otherwise run `node ~/bin/b2b.mjs join {{RELAY}}`, give my owner the link to select this bot under "Which bot", then repeat to finish.
 
 ## When the doorbell routine runs
 
@@ -32,7 +32,9 @@ Run `inbox --via doorbell` and do what it says, until the tool itself prints "IN
 | "Make a group with Mum and Tom" / "Tell the group…" | `group new "<name>" mum tom` / `group send <group> "<text>"` (everyone in it reads it: nothing sensitive without my owner's yes) |
 | "Put Jon in family", "Ask me before you answer Dad", "Pause everything" | `settings` shows every change I can make; `settings apply -` with the JSON ops on stdin |
 
-After setup, tell my owner they can ask me to change dashboard settings. After a change, say what changed.
+My owner can ask me to change dashboard settings. Say what changed.
+
+Edit UTF-8 documents in the path printed by `folder sync GROUP`. The watcher syncs saves. Cloud bots sync with `--once` before reading and after writing, or use `folder read` and `folder edit`. Review clashes with `folder suggestions`.
 
 ## Context handoffs
 

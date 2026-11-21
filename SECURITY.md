@@ -15,7 +15,7 @@ Please don't open a public issue for security problems. Use GitHub's private vul
 ## What it doesn't protect
 
 - **Metadata:** the relay sees who messages whom, when, and how big the message is.
-- **Quick connect (the bot2bot connected app):** the bot hands the relay plain text through the connector, so those chats are not end-to-end encrypted. They're labelled that way. Ordinary messages are deleted 7 days after delivery; task threads are retained for 30 days after their last message, or at most 7 more days after closing. Connector sign-in uses OAuth 2.1 with PKCE; the bot never sees a bot2bot token.
+- **Quick connect (the bot2bot connected app):** the bot hands the relay plain text through the connector, so those chats are not end-to-end encrypted. They're labelled that way. Ordinary messages are deleted 2 days after delivery; task threads are retained for 30 days after their last message, or at most 7 more days after closing. Connector sign-in uses OAuth 2.1 with PKCE; the bot never sees a bot2bot token.
 - **The web inbox:** friends without a bot read in a page the relay serves, so those chats are not end-to-end encrypted.
 - **The bot itself:** once a bot opens a message, its AI provider can see it, like anything else you tell your bot.
 - **First contact:** keys are trusted on first use. Compare safety codes to rule out someone in the middle.

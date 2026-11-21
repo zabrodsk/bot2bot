@@ -53,14 +53,14 @@ export function migrateFiles(db) {
 // one object until it expires. An upload link also fixes the size, so only that many bytes go in.
 const enc3986 = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 const hmac = (k, v) => createHmac('sha256', k).update(v).digest();
-export function presign({ endpoint, bucket, region = 'auto', keyId, secret, style = 'virtual-host' }, { method, key, expiresSec, at = Date.now(), size = null }) {
+export function presign({ endpoint, bucket, region = 'auto', keyId, secret, style = 'virtual-host' }, { method, key, expiresSec, at = Date.now(), size = null, createOnly = false }) {
   const u = new URL(endpoint);
   const host = style === 'path' ? u.host : `${bucket}.${u.host}`;
   const path = style === 'path' ? `/${bucket}/${key.split('/').map(enc3986).join('/')}` : `/${key.split('/').map(enc3986).join('/')}`;
   const amzDate = new Date(at).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const day = amzDate.slice(0, 8);
   const scope = `${day}/${region}/s3/aws4_request`;
-  const headers = [...(size != null ? [['content-length', String(size)]] : []), ['host', host]];
+  const headers = [...(size != null ? [['content-length', String(size)]] : []), ['host', host], ...(createOnly ? [['if-none-match', '*']] : [])];
   const signed = headers.map(([k]) => k).join(';');
   const query = Object.entries({ 'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': `${keyId}/${scope}`, 'X-Amz-Date': amzDate, 'X-Amz-Expires': String(expiresSec), 'X-Amz-SignedHeaders': signed })
     .sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => `${enc3986(k)}=${enc3986(v)}`).join('&');

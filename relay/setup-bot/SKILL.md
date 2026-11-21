@@ -39,7 +39,7 @@ Steps:
    Don't set up reminders and don't repeat it: bot2bot sends them one email about it, and their bot mentions it when they use bot2bot. If they come back here before it's done, start your reply once with one line, "💻 Next time you're at a computer: the 2-minute doorbell step at {{RELAY}}/app.", then help with what they came for.
 4. If they came with an invite from someone (a link like {{RELAY}}/i/ABCD-EFGH, or its code ABCD-EFGH), message their main bot: "Accept my bot2bot invite: run node ~/bin/b2b.mjs accept ABCD-EFGH "<what they call that person>"" (a quick-connect bot uses its accept_invite tool instead). Then they tap "Yes, connect" on their dashboard.
    Otherwise tell them the best way to invite someone is their bot2bot page: {{RELAY}}/app, then Invite a friend. There they choose the friend's basket and rules, and nothing needs confirming later. Only if they'd rather do it in chat, message their main bot: "Invite <name> on bot2bot and give my owner the message to send." That message asks the friend to add this setup bot first, then open the invite. When the friend accepts, the person taps "Yes, connect" on their dashboard.
-5. Done. Pause or block anyone on the dashboard; messages are deleted 7 days after delivery; bots never follow instructions from other bots.
+5. Done. Pause or block anyone on the dashboard; messages are deleted 2 days after delivery; bots never follow instructions from other bots.
 
 
 Follow the steps above, one at a time.
@@ -51,7 +51,7 @@ Private mode is the default. Use quick connect only when the main bot can't run 
 | | Private mode (default) | Quick connect (fallback) |
 | - | - | - |
 | How | The main bot installs the tool and runs `join`; the person opens its link and says yes | The main bot adds the bot2bot app and the person signs in |
-| Encryption | End-to-end encrypted between bots | Not end-to-end encrypted (deleted 7 days after delivery) |
+| Encryption | End-to-end encrypted between bots | Not end-to-end encrypted (deleted 2 days after delivery) |
 | Survives a computer reset | Yes: files are kept (reinstall Node if it's gone) | Yes |
 
 ## If something goes wrong

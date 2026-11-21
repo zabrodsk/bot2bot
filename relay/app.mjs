@@ -12,6 +12,7 @@ import { setupPrompts } from './setup-prompts.mjs';
 import { messageState } from './message-state.mjs';
 import { pageRequest, isHeadPage } from './page-request.mjs';
 import { isBig, bigParts, filesArt } from './bigupdate.mjs';
+import { FOLDERS_JS, FOLDERS_JS_HASH } from './folders-web.mjs';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -61,6 +62,7 @@ export function migrateApp(db) {
   addColumn('messages', 'body_purged_at', 'INTEGER');
   // Web inbox (0.7): people without a bot get a "web" bot row, so contacts and delivery work the same.
   addColumn('bots', 'vendor', "TEXT NOT NULL DEFAULT 'grokbot'");
+  addColumn('bots', 'held_briefs', 'INTEGER'); // briefs waiting on its computer for a project, as its tool last said
   addColumn('messages', 'choices', 'TEXT');
   addColumn('messages', 'via', "TEXT NOT NULL DEFAULT 'bot'");
   addColumn('users', 'last_notified_at', 'INTEGER');
@@ -125,6 +127,8 @@ export function migrateApp(db) {
 }
 
 const validTz = (tz) => { try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; } };
+// A bot that only posts scheduled-job reports to its group (b2b job setup): no inbox, no doorbell.
+const isService = (b) => b?.vendor === 'service';
 const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 const parseHhmm = (s) => { const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(s || '')); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
 // Only same-site paths: no "//host", no "/\host", no control characters.
@@ -140,7 +144,7 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
-  const { originFor = () => publicUrl || '', analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, phone = null, groupBrowser = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { originFor = () => publicUrl || '', analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, groupRuns = null, linkedDevices = null, phone = null, groupBrowser = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -398,6 +402,7 @@ Don't print any keys or tokens in this chat.`;
     : b.paused_at ? { key: 'paused', label: tr('Paused') }
     : b.vendor === 'web' ? { key: 'ready', label: tr('Web inbox') }
     : isSender(b) ? { key: 'ready', label: tr('Connected') }
+    : isService(b) ? { key: 'ready', label: tr('Job reports') }
     : noDoorbell(b) ? { key: 'ready', label: tr('Connected') }
     : !b.webhook_url ? { key: 'needs_doorbell', label: AGENTS[b.platform] ? tr('Watcher off') : tr('Doorbell off') } : b.doorbell_verified_at ? { key: 'ready', label: tr('Ready') } : { key: 'needs_test', label: doorbellRefused(b) ? tr('Doorbell not working') : tr('Doorbell not tested') };
   const connectionMarker = (b, tr) => b && b.vendor !== 'web' && !b.disconnected_at && !b.paused_at && (botStatus(b, tr).key === 'ready' || doorbellless(b))
@@ -521,7 +526,7 @@ ${bar}</div>`;
 <h1>${tr('Let {app} send to your bots?', { app })}</h1>
 <p>${tr("When you ask, {app} sends briefs, notes and files to your own bots. It can't read your messages, see your account or reach your friends.", { app })}</p>
 ${name && name !== senderLabel(client.name) ? `<p>${tr('Your bots see it as {name}.', { name: esc(name) })}</p>` : ''}${none ? `<p>${tr('You have no bots yet. Connect one too, so it has somewhere to send.')}</p>` : ''}
-<p class="muted small">${tr('Not end-to-end encrypted: {app} hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.', { app })}</p>
+<p class="muted small">${tr('Not end-to-end encrypted: {app} hands us text and attachments. Text is deleted 2 days after delivery. Files are deleted once your bot saves them, or after 7 days.', { app })}</p>
 <form method="post" action="/oauth/authorize" class="stack">${hidden}
 ${decide(tr, tr('Connect'))}</form>
 ${signedInAs(user, tr, params, client)}</section>`, { user, width: 'narrow', bar: { title: tr('Send to your bots') } });
@@ -541,7 +546,7 @@ ${signedInAs(user, tr, params, client)}</section>`, { user, width: 'narrow', bar
     return layout(tr('Connect'), `<section class="card">
 ${error ? `<p class="error" role="alert">${esc(tr.msg(error))}</p>` : ''}
 <p>${tr('Your bot can message the people you connect with.')} ${tr("It can't see your account or anyone else's bots.")}</p>
-<p class="muted small">${tr('Not end-to-end encrypted: we can read these messages. Ordinary text is deleted 7 days after delivery; task threads stay for 30 days after their last message. For end-to-end encryption, use private mode.')}</p>
+<p class="muted small">${tr('Not end-to-end encrypted: we can read these messages. Ordinary text is deleted 2 days after delivery; task threads stay for 30 days after their last message. For end-to-end encryption, use private mode.')}</p>
 <form method="post" action="/oauth/authorize" class="stack">${hidden}
 <label>${tr('Which bot')}<select name="bot" id="pick"><option value="new"${back || send ? '' : ' selected'}>${tr('A new bot')}</option>${bots.map((b) => `<option value="${b.id}"${b === back && !send ? ' selected' : ''}>@${esc(b.handle)}${b.disconnected_at ? ` (${tr('reconnect')})` : wakeOnly(b) ? ` (${tr('wake-ups only, stays end-to-end encrypted')})` : ''}</option>`).join('')}<option value="send"${send ? ' selected' : ''}>${tr('Send only: it hands things to my bots')}</option></select></label>
 <label id="newname"${back || send ? ' hidden' : ''}>${tr('Name for the new bot')}<input name="handle" pattern="[a-z0-9][a-z0-9_-]{1,31}" value="${esc(suggested)}"></label>
@@ -648,6 +653,7 @@ ${codeBlock('xm', tr('Message for your assistant'), prompts.other(after, 'other'
     const golf = tier && user.tier_theme === 'golf';
     return layout(tr('Plan'), `<section class="card${golf ? ' card--golf' : ''}">${golf ? GOLF_SCENE : ''}<h2>${tr('Your plan')}${c.state === 'infinite' ? ' <span class="umenu__plan umenu__plan--infinite"><span class="inf" aria-hidden="true">∞</span>Infinite</span>' : tier ? ` <span class="umenu__plan${golf ? ' umenu__plan--golf' : ''}">${esc(user.tier_name)}</span>` : ''}</h2>${tier && user.tier_note ? `<p class="tiernote">${esc(user.tier_note)}</p>` : ''}${paid ? `<p class="okmsg" role="status">${tr('Thanks! Payment received.')}</p>` : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
 ${c.limited ? `<div class="card__block">${usageMeter(c, { tr })}</div>` : ''}<p>${status}</p>
+${c.state === 'infinite' ? `<p>${badge(tr('Alpha'), 'info')} ${tr('Shared folders are yours to try: your group’s bots keep files in one place, end-to-end encrypted. Ask your bot to turn one on for a group.')}</p>` : ''}
 ${c.state === 'covered' || c.state === 'infinite' ? '' : canPay ? `<form method="post" action="/app/billing/checkout"><button class="btn">${c.state === 'paid' ? tr('Add another year') : tr('Pay {price}', { price })}</button></form><p class="muted small">${c.state === 'paid' ? '' : `${tr('No monthly limit for you and your household.')} `}${tr('One payment a year. No subscription, nothing renews by itself.')}</p>`
   : `<p class="muted small">${tr('The paid plan is coming soon.')}</p>`}</section>
 ${promo && c.state === 'free' ? promo.planLine(user, tr) : ''}
@@ -765,7 +771,7 @@ ${shot ? `<figure class="shot"><img src="${shot.src}" alt="${esc(s.text)}"${shot
 <ol class="walk">${how.steps.map(step).join('')}</ol>
 ${user ? `<p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for you to connect…')}</p>
 <script>(function poll(){fetch('/app/status').then(r=>r.json()).then(d=>{if((d.senders||0)>${senders.length})location.href='/connect/send/${app.key}/done';else setTimeout(poll,2500);}).catch(()=>setTimeout(poll,4000));})();</script>` : ''}
-<p class="muted small">${tr("It only sends, and only to your own bots. It can't read your messages. Not end-to-end encrypted: the chat hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.")}</p></section>`, { user, tr, width: 'read', outWidth: 'read', bar: { back: `/connect/send/${app.key}`, title: app.label, sub: name !== app.label ? esc(name) : '' } });
+<p class="muted small">${tr("It only sends, and only to your own bots. It can't read your messages. Not end-to-end encrypted: the chat hands us text and attachments. Text is deleted 2 days after delivery. Files are deleted once your bot saves them, or after 7 days.")}</p></section>`, { user, tr, width: 'read', outWidth: 'read', bar: { back: `/connect/send/${app.key}`, title: app.label, sub: name !== app.label ? esc(name) : '' } });
   }
 
   // Done: it's connected, and the first thing to say in it.
@@ -788,7 +794,7 @@ ${codeBlock('send-try', tr('Say this in your chat'), tryText, tr, MARK[app.key])
     return layout(tr('Connect dots'), `<section class="card"><h1>${tr('Connect dots')}</h1>
 <p>${tr('Connect bot2bot in the same ChatGPT account as your dot, then return to the dots app to check the connection.')}</p>
 <p class="muted small">${tr('On your phone? Open ChatGPT in your browser. If you cannot find Plugins or add a custom server there, use a computer with the same ChatGPT account. Your account or workspace must allow custom servers.')}</p>
-<p class="muted small">${tr('Quick connect is not end-to-end encrypted. bot2bot can read these messages. Ordinary messages are deleted 7 days after delivery; task threads stay for 30 days after their last message. Ask your dot to turn on private mode when you are ready.')}</p></section>
+<p class="muted small">${tr('Quick connect is not end-to-end encrypted. bot2bot can read these messages. Ordinary messages are deleted 2 days after delivery; task threads stay for 30 days after their last message. Ask your dot to turn on private mode when you are ready.')}</p></section>
 <section class="card" aria-labelledby="chatgpt-open"><h2 id="chatgpt-open">1. ${tr('Open ChatGPT Plugins')}</h2>
 <p>${tr('Use the same email address as in your dots app. Under Personal, open your existing remote bot2bot plugin and choose Install plugin or Connect. You do not need to create it again.')}</p>
 <a class="btn wide" href="https://chatgpt.com/plugins" target="_blank" rel="noopener noreferrer">${tr('Open ChatGPT Plugins')}${ICON.out}</a></section>
@@ -954,6 +960,7 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: tr('Remove'
       paused ? alertBox('info', tr('Everything is paused'), tr("Your bot won't be woken and can't send. Messages from friends wait here for up to 7 days."), `<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">${tr('Resume')}</button></form>`) : '',
       plan.alert,
       ...aiBots.filter((b) => toolOf(b)?.old).map((b) => alertBox('warning', tr('@{handle} runs an old bot2bot tool', { handle: esc(b.handle) }), tr('One message to your bot fixes it. After that, it updates itself.'), `<a class="btn small" href="/app/bots/${b.id}#update">${tr('Show the message')}</a>`)),
+      ...aiBots.filter((b) => !b.paused_at && heldOf(b)).map((b) => alertBox('info', tr.n(heldOf(b), '{n} brief for @{handle} is waiting for a project|{n} briefs for @{handle} are waiting for a project', { handle: esc(b.handle) }), '', `<a class="btn small" href="/app/bots/${b.id}#held">${tr('Show the message')}</a>`)),
       // Okays happen in the bot's chat now, so nothing waits for you here.
       pending ? alertBox('info', tr('Connect @{handle}', { handle: esc(pending.handle) }), tr('Your Grok Bot setup is waiting.'), `<a class="btn small" href="/app/bots/add/grok/steps">${tr('Continue')}</a>`) : '',
       ...requests.map((c) => alertBox('warning', tr('Did you mean to connect with {name}?', { name: person(c) }),
@@ -1263,6 +1270,25 @@ ${how.cancel ? `<form method="post" action="/app/bots/cancel"><button class="lin
 <script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>${had}) location.href='/app/bots/add/done'; else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script></section>`, { user, tab: 'home', width: 'read', bar: { back: `/app/bots/add/${plat.key}`, backLabel: tr('Name'), title: plat.label, sub: `@${esc(handle)}` } });
   }
 
+  // The computers a bot runs on (linked devices): the main one, and each linked one with Remove. Remove cuts it off
+  // right away; Undo lets it back in until the main computer takes it off the signed list.
+  const devicesCard = (b, tr) => {
+    const ds = linkedDevices?.forOwner(b) ?? [];
+    if (ds.length < 2) return '';
+    const row = (d) => `<div class="setrow"><div><p class="setrow__label">${d.primary ? tr('Main computer') : esc(d.name)}${d.off ? ` ${badge(tr('Removed'))}` : ''}</p><p class="setrow__desc">${d.primary ? tr('Wakes your bot and adds new computers') : d.off ? tr("It can't read or send anymore.") : d.linked_at ? tr('Linked {ago}', { ago: esc(tr.ago(d.linked_at, clock())) }) : ''}</p></div>
+${d.primary || d.off ? '' : `<form method="post" action="/app/bots/${b.id}/devices"><input type="hidden" name="device" value="${esc(d.id)}"><input type="hidden" name="off" value="1"><button class="btn small ghost">${tr('Remove')}</button></form>`}</div>`;
+    return `<section class="card card--rows" id="devices"><div class="card__head"><h2>${tr('Computers')} <span class="count">${ds.length}</span></h2></div>${ds.map(row).join('')}</section>`;
+  };
+  // Briefs sent to a project that isn't set up for that sender on the bot's computer: nothing started, and only a
+  // session there can send them on. The tool says how many (never what or from whom).
+  const heldOf = (b) => (b.held_briefs || 0) + (q('SELECT coalesce(sum(held_briefs), 0) AS n FROM linked_devices WHERE bot_id = ? AND revoked_at IS NULL').get(b.id)?.n || 0);
+  const HELD_MESSAGE = "Show me the briefs held for my projects: run node ~/bin/b2b.mjs project list. For each one, tell me in one line who sent it and why it's held. Then wait for my answer before you send any of them on or drop them.";
+  const heldCard = (b, tr) => {
+    const n = heldOf(b);
+    if (!n) return '';
+    return `<section class="card" id="held"><h2>${tr.n(n, '{n} brief is waiting for a project|{n} briefs are waiting for a project')}</h2>
+<p>${tr("Someone sent work to a project that isn't set up for them on your computer, so nothing started.")} ${AGENTS[b.platform] ? tr('Paste this into {agent} there:', { agent: esc(AGENTS[b.platform]) }) : tr("Paste this into your bot's chat:")}</p>${codeBlock('hmsg', tr('Message for your bot'), HELD_MESSAGE, tr)}</section>`;
+  };
   function botPage(user, b, { error = '' } = {}) {
     const tr = T(user);
     const st = botStatus(b, tr);
@@ -1288,9 +1314,18 @@ ${code ? `<p>${tr("Paste this into your bot's chat. When it joins, it takes over
     // A send-only chat: what it can do, and the way out.
     if (isSender(b)) return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Sends to your bots')}</h2>${b.disconnected_at ? badge(tr('Disconnected')) : badge(tr('Send only'), 'success')}</div>
 <p>${tr("When you ask, {app} sends briefs, notes and files to your own bots. It can't read your messages, see your account or reach your friends.", { app: esc(b.display_name) })}</p>
-<p class="muted small">${tr('Not end-to-end encrypted: {app} hands us text and attachments. Text is deleted 7 days after delivery. Files are deleted once your bot saves them, or after 7 days.', { app: esc(b.display_name) })}</p>
+<p class="muted small">${tr('Not end-to-end encrypted: {app} hands us text and attachments. Text is deleted 2 days after delivery. Files are deleted once your bot saves them, or after 7 days.', { app: esc(b.display_name) })}</p>
 ${b.disconnected_at ? `<a class="btn wide" href="/connect/send/${CHAT_APPS.find((a) => a.label === b.chat_app)?.key || ''}">${tr('Connect again')}</a>` : ''}</section>
 ${b.disconnected_at ? '' : disconnectCard(b, tr)}<section class="card">${removeRow(b, tr)}</section>`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: esc(b.display_name), sub: `${tr('Chat app')} · @${esc(b.handle)}` } });
+    // A job sender: what it does, where it posts, and the way out. Nothing to set up, nothing wakes it.
+    if (isService(b)) {
+      let posts = [];
+      try { posts = q('SELECT g.id, g.name FROM job_senders j JOIN chat_groups g ON g.id = j.group_id WHERE j.bot_id = ? AND g.ended_at IS NULL').all(b.id); } catch { /* no scheduled jobs here */ }
+      return layout(`@${b.handle}`, `${error ? alertBox('danger', esc(error), '') : ''}${updateCard(b, tr)}<section class="card"><div class="card__head"><h2>${tr('Posts job reports')}</h2>${b.disconnected_at ? badge(tr('Disconnected')) : badge(tr('Job reports'), 'success')}</div>
+<p>${posts.length === 1 ? tr('Your scheduled jobs report failures and daily digests to {group}, end-to-end encrypted. It has no inbox, so nothing wakes it.', { group: `<b>${esc(posts[0].name)}</b>` }) : tr('Your scheduled jobs report failures and daily digests through it, end-to-end encrypted. It has no inbox, so nothing wakes it.')}</p>
+${posts.map((g) => `<a class="btn ghost" href="/app/groups/${g.id}">${tr('Open {name}', { name: esc(g.name) })}</a>`).join(' ')}</section>
+${b.disconnected_at ? `<section class="card">${removeRow(b, tr)}</section>` : disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar: { back: '/app', bot: b.id, title: `@${b.handle}`, sub: b.disconnected_at ? tr('Disconnected') : tr('Job reports') } });
+    }
     // A dot comes back through ChatGPT: the app first, then the switch to private mode, whichever it was in.
     if (b.disconnected_at && dot) return layout(`@${b.handle}`, `<section class="card"><div class="card__head"><h2>${tr('Reconnect this bot')}</h2>${badge(tr('Disconnected'))}</div>
 <p>${tr('Connect bot2bot in ChatGPT again and pick @{handle}. Then paste this into your dot:', { handle: esc(b.handle) })}</p>${codeBlock('emsg', msgFor, ENCRYPTION_MESSAGE, tr, MARK.dots)}
@@ -1305,7 +1340,7 @@ ${code ? `<p>${tr("Paste this into your bot's chat to reconnect it.")}</p>${code
     }
     const bar = { back: '/app', bot: b.id, title: `@${b.handle}`, sub: `${mode} · ${app && st.key === 'needs_doorbell' ? tr('Connected') : st.label}`, rename: { action: `/app/bots/${b.id}/rename`, value: b.handle, error: b.nameError || '' } };
     // The error, then any messages it hasn't picked up: on every version of this page, setup steps included.
-    const err = `${error ? alertBox('danger', esc(error), '') : ''}${waitingCard(b, tr)}`;
+    const err = `${error ? alertBox('danger', esc(error), '') : ''}${waitingCard(b, tr)}${heldCard(b, tr)}`;
     if (step === 2 && (dot || (b.vendor === 'connector' && b.platform === 'openclaw'))) return layout(`@${b.handle}`, `${err}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<h2>${tr('Turn on the doorbell')}</h2>
 ${dot ? `<p>${tr('Your dot wakes up when bot2bot tells it a message is waiting. Say this to your dot:')}</p>
 ${codeBlock('wmsg', tr('Say this to your dot'), wakeOnly(b) ? DOT_WATCH_MESSAGE : WATCH_MESSAGE, tr)}
@@ -1314,21 +1349,21 @@ ${codeBlock('wmsg', tr('Say this to your dot'), wakeOnly(b) ? DOT_WATCH_MESSAGE 
 ${codeBlock('wmsg', tr('Say this to OpenClaw'), WATCH_MESSAGE, tr)}`}
 <p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for {platform} to start watching…', { platform: esc(platformName(b, tr)) })}</p>
 <script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
-${stuckCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+${stuckCard(b, tr)}${devicesCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     if (step === 2 && claw) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<h2>${tr('Turn on the doorbell')}</h2>
 <p>${tr('OpenClaw wakes up through its webhook, or a watcher on its computer. Paste this into OpenClaw:')}</p>
 ${codeBlock('wmsg', tr('Message for OpenClaw'), prompts.openclawDoorbell, tr)}
 <p class="muted small">${tr('The webhook needs a public https address for its gateway. Without one, the watcher works if that computer stays on.')} <a class="link" href="/docs/openclaw/">${tr('How to')}</a></p>
 <p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for OpenClaw…')}</p>
 <script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified||d.configured) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
-${stuckCard(b, tr)}${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+${stuckCard(b, tr)}${changeDoorbell(b, tr)}${devicesCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     if (step === 2 && agent) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Start the watcher')], 1, 'h', tr)}<h2>${tr('Start the watcher')}</h2>
 <p>${tr('A small watcher on the computer where {agent} runs wakes it when a message comes in. Paste this into {agent} there:', { agent: esc(agent) })}</p>
 ${codeBlock('wmsg', tr('Message for {agent}', { agent }), WATCH_INSTALL, tr)}
 <p class="muted small">${tr('That computer needs to stay on. Each wake-up is one {agent} run.', { agent: esc(agent) })}</p>
 <p class="wait" id="wait"><span class="dot dot--live"></span> ${tr('Waiting for the watcher…')}</p>
 <script>(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified||d.watching) location.replace('/app/bots/${b.id}'); else setTimeout(poll,3000); }).catch(()=>setTimeout(poll,5000)); })();</script></section>
-${stuckCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+${stuckCard(b, tr)}${devicesCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     // Grok Bot: its bot already made the routine while joining, so the page leads with the one thing only its owner
     // can do, on a computer: copy two values across. Saving rings it, so testing isn't a step of its own.
     if (step === 2) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), tr('Turn on the doorbell')], 1, 'h', tr)}<div class="card__head"><h2>${broken ? tr('Fix the doorbell') : tr('Turn on the doorbell')}</h2>${badge(tr('Computer only'), 'info')}</div>
@@ -1344,7 +1379,7 @@ ${broken ? `<p>${tr("Its b2b doorbell routine stopped taking rings, so friends' 
 <details class="diy"><summary>${tr('No b2b doorbell routine?')}</summary>
 <p class="muted" style="margin-top:10px">${tr("Paste this into your bot's chat. It makes the routine.")}</p>
 ${codeBlock('dmsg', msgFor, b.vendor === 'connector' ? CONNECTOR_DOORBELL : `Make a routine called "b2b doorbell" with a webhook trigger and this exact instruction: "${privateDoorbell()}" Don't print any keys in this chat.`, tr)}</details></section>
-${stuckCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+${stuckCard(b, tr)}${devicesCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     if (step === 3) return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}<section class="card">${stepper([tr('Connect your bot'), agent ? tr('Start the watcher') : tr('Turn on the doorbell')], 1, 'h', tr)}<h2>${tr('Test the doorbell')}</h2><p>${tr("We ring your bot once. It should wake up on its own and check in. Don't type anything to your bot while this runs.")}</p>
 <button class="btn" id="test">${tr('Ring my bot')}</button><p class="wait hidden" id="wait"><span class="dot dot--live"></span> <span id="waittext">${tr('Ringing…')}</span></p>
 <script>
@@ -1361,14 +1396,14 @@ btn.addEventListener('click',async()=>{btn.disabled=true;w.classList.remove('hid
  let n=0;(function poll(){fetch('/app/bots/${b.id}/state').then(r=>r.json()).then(d=>{ if(d.verified){t.textContent=${jsq(tr('It works. Your bot woke up on its own.'))};setTimeout(()=>location.replace('/app/bots/${b.id}'),1200);} else if(++n<60) setTimeout(poll,2000); else fail(noAnswer); }).catch(()=>{ if(++n<60) setTimeout(poll,2000); else fail(noAnswer); });})();});
 if(new URLSearchParams(location.search).get('ring')==='1') btn.click();
 </script></section>
-${stuckCard(b, tr)}${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+${stuckCard(b, tr)}${changeDoorbell(b, tr)}${devicesCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     if (st.key === 'paused') return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}${alertBox('info', tr('This bot is paused'), tr("It isn't woken and can't send. Resume from the overview."), `<a class="btn small" href="/app">${tr('Go to overview')}</a>`)}
-${changeDoorbell(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
+${changeDoorbell(b, tr)}${devicesCard(b, tr)}${disconnectCard(b, tr)}`, { user, tab: 'home', width: 'read', bar });
     const invite = `<form method="post" action="/app/invites"><input type="hidden" name="bot" value="${b.id}"><button class="btn">${ICON.invite}${tr('Invite a friend')}</button></form>`;
     return layout(`@${b.handle}`, `${err}${updateCard(b, tr)}${botTiles(user, b, tr)}
 <p class="muted small">${tr("Your bot's own chats stay yours. Friends' bots only get what you send them.")}</p>
 ${liveBots(user).some(isSender) ? '' : `<section class="card" id="send"><h2>${tr('Briefs from chat apps')}</h2><p>${tr('Ask ChatGPT, Claude, Gemini, Grok or Perplexity to send a plan or research straight to @{handle}. No copying.', { handle: esc(b.handle) })}</p><div><a class="btn ghost" href="/connect/send">${tr('Connect a chat app')}</a></div></section>`}
-${b.vendor === 'connector' ? `<section class="card" id="encryption"><div class="card__head"><h2>${tr('Turn on end-to-end encryption')}</h2>${badge(tr('Recommended'), 'info')}</div><p>${tr("With quick connect, bot2bot can read your messages. Ordinary messages are deleted 7 days after delivery; task threads stay for 30 days after their last message. Private mode keeps messages end-to-end encrypted between bots. Your bot switches by itself and keeps its name, doorbell and contacts.")}</p>
+${b.vendor === 'connector' ? `<section class="card" id="encryption"><div class="card__head"><h2>${tr('Turn on end-to-end encryption')}</h2>${badge(tr('Recommended'), 'info')}</div><p>${tr("With quick connect, bot2bot can read your messages. Ordinary messages are deleted 2 days after delivery; task threads stay for 30 days after their last message. Private mode keeps messages end-to-end encrypted between bots. Your bot switches by itself and keeps its name, doorbell and contacts.")}</p>
 <p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('emsg', msgFor, ENCRYPTION_MESSAGE, tr)}</section>` : ''}
 ${toolOf(b) ? updatesCard(b, tr) : ''}
 ${noDoorbell(b) && b.vendor === 'connector' ? `<section class="card" id="wake"><h2>${tr('Let it wake up on its own')}</h2><p>${tr("If your bot has its own API, or can run a task every few minutes, friends' bots can reach it without you. Paste this into your bot:")}</p>
@@ -1380,7 +1415,7 @@ ${codeBlock('wkmsg', msgFor, prompts.otherDoorbell, tr)}</section>` : ''}
 ${agent || claw || other || app || dot ? '' : `<section class="card" id="backup"><h2>${tr('Backup check')}</h2><p class="muted">${tr("The doorbell wakes your bot when a message comes in. A backup check also lets it look on a schedule, in case the doorbell ever breaks. Each check uses a little of your Grok Bot usage, so it's off unless you want it.")}</p>
 <form method="post" action="/app/bots/${b.id}/backup" class="pick"><label>${tr('Check every')}<select name="every">${[0, 2, 4, 8, 12, 24].map((h) => `<option value="${h}"${(b.backup_every_h || 0) === h ? ' selected' : ''}>${h ? tr.n(h, '{n} hour|{n} hours') : tr('Off')}</option>`).join('')}</select></label><button class="btn ghost">${tr('Save')}</button></form>
 ${b.backup_every_h ? `<p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('bmsg', msgFor, backupMessage(b.backup_every_h), tr)}` : ''}</section>`}
-${changeDoorbell(b, tr)}${disconnectCard(b, tr)}
+${changeDoorbell(b, tr)}${devicesCard(b, tr)}${disconnectCard(b, tr)}
 `, { user, tab: 'home', width: 'read', bar, actions: invite });
   }
   const ASSISTANT_DOORBELL = "Turn on your bot2bot doorbell, so friends' bots can reach you without me: call the bot2bot app's set_doorbell tool with the best way you have (your inbound API, or a recurring task), then test_doorbell. Don't print any keys in this chat.";
@@ -1397,6 +1432,7 @@ ${changeDoorbell(b, tr)}${disconnectCard(b, tr)}
     if (b.vendor === 'web') return { key: 'web', name: tr('Web inbox'), mark: MARK.web };
     // A send-only chat wears its app's mark (ChatGPT, Claude, Gemini), else the plug.
     if (isSender(b)) return { key: 'sender', name: b.display_name, mark: MARK[CHAT_APPS.find((a) => a.label === b.chat_app)?.key] ?? MARK.app };
+    if (isService(b)) return { key: 'jobs', name: tr('Job reports'), mark: MARK.terminal };
     if (AGENTS[b.platform]) return { key: b.platform, beta: b.platform === 'hermes' || b.platform === 'cursor', name: AGENTS[b.platform], mark: { claude_code: MARK.claude, codex: MARK.codex, cursor: MARK.cursor, hermes: MARK.hermes }[b.platform] ?? MARK.terminal };
     if (b.platform === 'openclaw') return { name: 'OpenClaw', key: 'openclaw', mark: MARK.openclaw };
     if (b.platform === 't3code') return { name: 'T3 Code', key: 't3code', mark: MARK.t3code };
@@ -1413,6 +1449,7 @@ ${changeDoorbell(b, tr)}${disconnectCard(b, tr)}
   function bellOf(b, o, tr) {
     if (b.vendor === 'web') return { state: 'none', icon: ICON.bellOff, tip: tr('No doorbell needed. You get an email and read messages here, in your browser.') };
     if (o.key === 'sender') return { state: 'none', icon: ICON.bellOff, tip: tr('No doorbell needed. It only sends things to your bots.') };
+    if (o.key === 'jobs') return { state: 'none', icon: ICON.bellOff, tip: tr('No doorbell needed. It only posts job reports to its group.') };
     if (o.key === 'app') return { state: 'none', icon: ICON.bellOff, tip: tr("{app} can't be woken up from outside, so there's no doorbell. It sees messages when you talk to it.", { app: esc(o.name) }) };
     if (b.disconnected_at) return { state: 'off', icon: ICON.bellOff, tip: tr('Disconnected, so nothing can wake it.') };
     if (b.paused_at) return { state: 'off', icon: ICON.bell, tip: tr('Paused. Nothing wakes it until you resume.') };
@@ -1567,12 +1604,14 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
   // A few people's bots in one chat (groups.mjs). Owners see who's in it and what was said (the text only when it
   // isn't end-to-end encrypted), say yes to invites, and choose how often it wakes their bot. Bots do the talking;
   // owners can type here only in groups that aren't end-to-end encrypted.
-  const groupBots = (u) => liveBots(u).filter((b) => b.vendor !== 'web' && !isSender(b));
+  const groupBots = (u) => liveBots(u).filter((b) => b.vendor !== 'web' && !isSender(b) && !isService(b));
   // A group once, however many of my bots are in it: the seat that joined speaks for it (else the invited one),
   // it's hidden only when every seat is, and it names all my bots in it.
   const myGroups = (u) => {
     const by = new Map();
-    for (const r of groups ? groups.forUser(u.id, { all: true }) : []) {
+    const svc = new Set(myBots(u).filter(isService).map((b) => b.id));
+    const seats = groups ? groups.forUser(u.id, { all: true }) : [];
+    for (const r of seats.filter((x) => !svc.has(x.bot_id) || !seats.some((y) => y.id === x.id && !svc.has(y.bot_id)))) {
       const g = by.get(r.id);
       if (!g) { by.set(r.id, { ...r, handles: [r.my_handle], allHidden: !!r.hidden }); continue; }
       g.handles.push(r.my_handle);
@@ -1585,7 +1624,8 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
   // Which of my bots sits in this group: the one asked for, else the one that joined, else the invited one.
   const groupSeat = (u, gid, botId = null) => {
     const rows = groups ? groups.forUser(u.id, { all: true }).filter((r) => r.id === Number(gid)) : [];
-    const r = botId != null && botId !== '' ? rows.find((x) => x.bot_id === Number(botId)) : rows.find((x) => x.state === 'joined') ?? rows[0];
+    const svc = (x) => isService(q('SELECT vendor FROM bots WHERE id = ?').get(x.bot_id));
+    const r = botId != null && botId !== '' ? rows.find((x) => x.bot_id === Number(botId)) : rows.find((x) => x.state === 'joined' && !svc(x)) ?? rows.find((x) => x.state === 'joined') ?? rows[0];
     if (!r) throw new HttpError(404, 'This group was ended, or you are not in it.');
     return { b: ownBot(u, r.bot_id), row: r };
   };
@@ -1673,6 +1713,8 @@ ${people.length ? peoplePick(people, picked, tr('Who to invite'), tr) : `<p clas
     { user, tab: 'home', width: 'read', bar: { back: '/app', title: tr('New group') } });
   }
 
+  // A time in the owner's own timezone (else UTC), short: "Sat 21 Nov, 14:30".
+  const whenAt = (ms, user, tr) => new Date(ms).toLocaleString(tr.locale, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: user.tz && validTz(user.tz) ? user.tz : 'UTC' });
   // One group: its name, who's in it, what was said, and what you can change.
   function groupPage(user, b, gid, { error = '', nameError = '' } = {}) {
     const tr = T(user);
@@ -1711,7 +1753,7 @@ ${ready ? `<div class="actions"><form method="post" action="${act('join')}">${id
       const who = p.from_bot !== b.id && mine.has(p.from_bot) ? `@${p.handle}` : nameFor(p.from_bot, p.person, p.handle);
       if (p.kind === 'event') return `<li class="gsys">${esc(groupEvent(p.text, who, tr))} · ${esc(tr.ago(p.created_at, now))}</li>`;
       const out = p.from_bot === b.id;
-      const text = p.body_purged_at ? `<i>${tr('Text deleted after 7 days')}</i>` : p.sealed ? `<i>${tr('End-to-end encrypted')}</i>` : p.text ? esc(p.text) : '';
+      const text = p.body_purged_at ? `<i>${tr('Text deleted after 2 days')}</i>` : p.sealed ? `<i>${tr('End-to-end encrypted')}</i>` : p.text ? esc(p.text) : '';
       const choices = !p.sealed && !p.body_purged_at && p.choices ? JSON.parse(p.choices) : [];
       return `<li class="bubble ${out ? 'out' : 'in'}"><div class="meta">${out ? tr('You') : esc(who)} · ${esc(tr.ago(p.created_at, now))}${p.via === 'web' ? ` · ${tr('typed on the web')}` : ''}${p.kind === 'ask' ? ` · <b>${tr('question')}</b>` : ''}</div>${text ? `<div class="text">${text}</div>` : ''}${choices.length ? `<div class="choices--show">${choices.map((c) => `<span class="chip">${esc(c)}</span>`).join('')}</div>` : ''}</li>`;
     };
@@ -1763,8 +1805,61 @@ ${admin ? `<div class="setrow"><div><p class="setrow__label">${tr('Turn off invi
 ${joined ? `<div class="setrow"><div><p class="setrow__label">${tr('Leave the group')}</p></div>${confirmMorph({ action: act('leave'), fields: ids, label: tr('Leave'), prompt: tr('Leave {name}?', { name: g.name }), confirm: tr('Leave'), pending: tr('Leaving'), tr })}</div>` : ''}
 ${admin ? `<div class="setrow"><div><p class="setrow__label">${tr('End the group')}</p><p class="setrow__desc">${tr('Everyone is out and it closes for good.')}</p></div>${confirmMorph({ action: act('end'), fields: ids, label: tr('End group'), prompt: tr('End {name} for everyone?', { name: g.name }), confirm: tr('End group'), pending: tr('Ending'), tr })}</div>` : ''}
 </div></section>`;
-    return layout(g.name, `${head}${error ? alertBox('danger', esc(error), '') : ''}${joinCard}${talk}${people}${joined ? settings : ''}<script>${REFRESH_JS}</script>`, { user, tab: 'home', bar: { back: '/app', backLabel: tr('Overview'), bot: b.id } });
+    // A run from a template, set or under way: who holds which role, when, and Stop for whoever started it or an admin.
+    let run = null;
+    try { run = joined && groupRuns ? groupRuns.list(b, String(g.id)).runs.find((r) => r.state === 'waiting' || r.state === 'running') : null; } catch { run = null; }
+    const byHandle = new Map(members.map((m) => [`@${m.handle}`, m]));
+    const holder = (h) => { const m = byHandle.get(h); return m ? (m.bot_id === b.id ? tr('You') : nameFor(m.bot_id, m.name, m.handle)) : h; };
+    const roleWord = (r) => capFirst(r.replace(/_/g, ' '));
+    const runCard = run ? `<section class="group" aria-labelledby="run-h"><div class="group__head"><h2 id="run-h">${tr('Group run')}</h2></div><div class="card card--rows">
+<div class="setrow"><div><p class="setrow__label">${run.state === 'running' ? tr('Under way until {when}', { when: esc(whenAt(Date.parse(run.ends_at), user, tr)) }) : tr('Starts {when}', { when: esc(whenAt(Date.parse(run.starts_at), user, tr)) })} ${run.state === 'running' ? badge(tr('Running'), 'success') : badge(tr('Scheduled'), 'info')}</p>
+<p class="setrow__desc">${Object.entries(run.roles).map(([r, h]) => `${esc(roleWord(r))}: ${esc(holder(h))}`).join(' · ')}</p></div>
+${admin || run.by === `@${b.handle}` ? confirmMorph({ action: act('run-stop'), fields: `${ids}<input type="hidden" name="run" value="${esc(run.id)}">`, label: tr('Stop'), prompt: tr('Stop this run for everyone?'), confirm: tr('Stop'), pending: tr('Stopping'), tr }) : ''}</div></div></section>` : '';
+
+    // Shared folder (alpha): files the group's bots keep together, end-to-end encrypted. This browser opens them as one
+    // of the bot's linked devices (folders-web.mjs); the server only says who may, and serves ciphertext.
+    const folder = (() => {
+      if (!joined || !folderAlpha(user)) return '';
+      const on = folderOn(g.id), grants = folderGrants(g.id), myRole = grants.get(b.id);
+      const top = `<div class="group__head"><h2 id="folder-h">${tr('Shared folder')} ${badge(tr('Alpha'), 'info')}</h2>${on && myRole && b.box_pub ? '<div class="group__act" id="folder-actions"></div>' : ''}</div>`;
+      const line = (text) => `<div class="card"><p class="fnote">${text}</p></div>`;
+      const access = (m) => {
+        const role = grants.get(m.bot_id) ?? 'remove', id = `fperm-${m.bot_id}`;
+        const who = m.bot_id === b.id ? tr('You') : nameFor(m.bot_id, m.name, m.handle);
+        const pick = m.box_pub ? `<div class="seg" role="group" aria-labelledby="${id}"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span>${[['remove', tr('No access')], ['read', tr('Read')], ['write', tr('Write')]].map(([v, l]) => `<button name="role" value="${v}" aria-pressed="${role === v}">${l}</button>`).join('')}</div></div>`
+          : `<span class="fperm__none">${tr('Needs end-to-end encryption')}</span>`;
+        return `<form method="post" action="${act('folder-access')}" class="setrow fperm">${ids}<input type="hidden" name="member" value="${m.bot_id}">${avatar(who, 'md', picFor(m.bot_id, m.photo?.id, m.photo?.photo_at, m.photo?.avatar))}<div class="fperm__who"><p class="setrow__label" id="${id}">${esc(who)}</p><p class="setrow__desc">@${esc(m.handle)}</p></div>${pick}</form>`;
+      };
+      const manage = admin ? `<div class="card card--rows">${sw(act('folder'), 'gfold-l', on ? tr('Shared folder') : tr('Turn on the shared folder'), '', on)}
+${on ? `<p class="fperm__h">${tr('Who can open it')}</p>${members.filter((m) => m.state === 'joined').map(access).join('')}` : ''}</div>` : '';
+      let body = '';
+      if (!on) body = admin ? '' : line(tr('The shared folder is off. A group admin can turn it on.'));
+      else if (!b.box_pub) body = line(tr('Your bot needs end-to-end encryption to use the shared folder.'));
+      else if (!myRole) body = admin ? '' : line(tr('Your bot doesn’t have access yet. A group admin can give it.'));
+      else {
+        const names = Object.fromEntries(members.map((m) => [m.handle, nameFor(m.bot_id, m.name, m.handle)]));
+        body = `<div class="card card--folder" id="folder-app" data-group="${g.id}" data-handle="${esc(b.handle)}" data-sign="${esc(b.sign_pub)}" data-box="${esc(b.box_pub)}" data-lang="${tr.lang}" data-devices="${esc(JSON.stringify(deviceNames(b.id)))}" data-people="${esc(JSON.stringify(names))}"><p class="fnote">${tr('Opening the folder…')}</p></div>`;
+      }
+      const script = on && myRole && b.box_pub ? `<script type="application/json" id="folder-words">${JSON.stringify(folderWords(tr)).replace(/</g, '\\u003c')}</script><script src="/app/folders.js?v=${FOLDERS_JS_HASH}" defer></script>` : '';
+      return `<section class="group" aria-labelledby="folder-h" id="folder">${top}${body}${manage}</section>${script}`;
+    })();
+    return layout(g.name, `${head}${error ? alertBox('danger', esc(error), '') : ''}${joinCard}${runCard}${talk}${folder}${people}${joined ? settings : ''}<script>${REFRESH_JS}</script>`, { user, tab: 'home', bar: { back: '/app', backLabel: tr('Overview'), bot: b.id } });
   }
+  // The folder's alpha gate, as the relay's: Infinite owners on the hosted relay, anyone on a self-hosted one.
+  const folderAlpha = (user) => !hosted || !!user.infinite_at;
+  // Read-only looks at the folder tables the relay keeps (team-folders.mjs); a relay without them has no folder.
+  const folderOn = (gid) => { try { return !!q('SELECT 1 FROM team_folder_groups WHERE group_id = ?').get(gid); } catch { return false; } };
+  const folderGrants = (gid) => { try { return new Map(q('SELECT bot_id, role FROM team_folder_members WHERE group_id = ?').all(gid).map((r) => [r.bot_id, r.role])); } catch { return new Map(); } };
+  const deviceNames = (botId) => { try { const r = q('SELECT manifest FROM device_rosters WHERE bot_id = ?').get(botId); return r ? JSON.parse(r.manifest).roster.devices.map((d) => d.name) : ['primary']; } catch { return ['primary']; } };
+  // A group page carries the folder's code: its own CSP, with a nonce for the page's inline scripts.
+  const groupHtml = (res, status, html) => {
+    const nonce = randomBytes(16).toString('base64');
+    const bucket = files?.host ? ` https://${files.host}` : '';
+    page(res, status, html.replace(/<script(?=[\s>])/g, `<script nonce="${nonce}"`), {
+      'content-security-policy': `default-src 'none'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'${bucket}; manifest-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`,
+      'x-content-type-options': 'nosniff',
+    });
+  };
 
   // Someone opened a member's group link. Signed out or without a bot, connecting comes first.
   function groupJoinPage(link, user, bots, { tr, code, error = '', inIt = null, old = null }) {
@@ -1849,7 +1944,7 @@ ${c.blocked || paused ? '' : `<form method="post" action="/app/inbox/send" class
     }).join('');
     return layout(tr('Inbox'), `${paused ? alertBox('info', tr('Everything is paused'), tr("No emails, and you can't send. Messages still show up here."), `<form method="post" action="/app/pause"><input type="hidden" name="on" value="0"><button class="btn small">${tr('Resume')}</button></form>`) : ''}
 ${error ? alertBox('danger', esc(error), '') : ''}
-${cards ? `<div class="convos">${cards}</div><p class="muted small">${tr('Not end-to-end encrypted. We can read these messages. Ordinary messages are deleted 7 days after you see them; task threads stay for 30 days after their last message.')}</p>` : `<section class="card">${emptyState('inbox', tr('Your inbox is empty'), tr('When friends connect with you, their messages and questions show up here.'))}</section>`}`,
+${cards ? `<div class="convos">${cards}</div><p class="muted small">${tr('Not end-to-end encrypted. We can read these messages. Ordinary messages are deleted 2 days after you see them; task threads stay for 30 days after their last message.')}</p>` : `<section class="card">${emptyState('inbox', tr('Your inbox is empty'), tr('When friends connect with you, their messages and questions show up here.'))}</section>`}`,
       { user, tab: 'inbox', bar: { title: tr('Inbox') },
         actions: wbs.length ? `<a class="btn ghost" href="/app/bots/${wbs[0].id}">${tr('Let Grok Bot handle this')}</a>` : '' });
   }
@@ -1934,7 +2029,7 @@ ${quietError ? `<p class="error" role="alert">${esc(quietError)}</p>` : ''}${!us
 ${quietNow ? `<p class="muted small">${tr("It's quiet time now. Messages wait until {time}.", { time: hhmm(user.quiet_end) })}</p>` : ''}</div></section>
 ${filesCard(user, tr)}
 <section class="group" aria-labelledby="data-h"><h2 id="data-h">${tr('Your data')}</h2><div class="card card--rows">
-<div class="setrow"><div><p class="setrow__label">${tr('Download my data')}</p><p class="setrow__desc">${tr("Ordinary message text is deleted 7 days after delivery; undelivered messages expire after 7 days. Task threads stay for 30 days after their last message, or at most 7 more days after closing. Activity logs stay for 90 days.")}</p></div><a class="btn small ghost" href="/app/account/export">${tr('Download')}</a></div>
+<div class="setrow"><div><p class="setrow__label">${tr('Download my data')}</p><p class="setrow__desc">${tr("Ordinary message text is deleted 2 days after delivery; undelivered messages expire after 7 days. Task threads stay for 30 days after their last message, or at most 2 more days after closing. Activity logs stay for 90 days.")}</p></div><a class="btn small ghost" href="/app/account/export">${tr('Download')}</a></div>
 </div></section>
 <section class="group"><div class="card danger-zone"><details class="fold"${error ? ' open' : ''}><summary><span><span class="fold__title">${tr('Delete my account')}</span><span class="fold__sub">${tr('Disconnects your bots and erases message text')}</span></span></summary>
 ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
@@ -2737,6 +2832,16 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           tell(user, { what: every ? tr.n(every, 'Backs up every {n} hour|Backs up every {n} hours') : tr('Backups off'), undo: f.undo === '1' || every === b.backup_every_h ? null : undoForm(`/app/bots/${b.id}/backup`, { every: b.backup_every_h ?? 0 }) });
           return redirect(res, `/app/bots/${b.id}#backup`), true;
         }
+        if (sub === '/devices' && req.method === 'POST' && linkedDevices) {
+          const f = await form(req);
+          const off = f.off === '1';
+          const r = linkedDevices.setOff(b, String(f.device || ''), off);
+          if (r.changed) {
+            log(b.id, off ? 'device_removed_by_owner' : 'device_restored_by_owner', { device: String(f.device) });
+            tell(user, { what: off ? tr('Removed {name}', { name: r.name }) : tr('{name} is back', { name: r.name }), undo: f.undo === '1' || !off ? null : undoForm(`/app/bots/${b.id}/devices`, { device: f.device }) });
+          }
+          return redirect(res, `/app/bots/${b.id}#devices`), true;
+        }
         if (sub === '/updates' && req.method === 'POST') {
           const f = await form(req);
           const was = (b.wanted_channel || b.tool_channel) === 'nightly';
@@ -2816,6 +2921,11 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
       const phoneAnswer = phone && req.method === 'POST' && p.match(/^\/app\/phone\/cards\/(apr_[A-Za-z0-9_-]{22})\/answer$/);
       if (phoneAnswer) return json(res, 200, phone.answer(user, phoneAnswer[1], await form(req, 12_000))), true;
 
+      // The shared folder's code (folders-web.mjs): versioned by its hash, so it caches for good.
+      if (p === '/app/folders.js' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': url.searchParams.get('v') === FOLDERS_JS_HASH ? 'private, max-age=31536000, immutable' : 'no-cache', 'x-content-type-options': 'nosniff' });
+        res.end(FOLDERS_JS); return true;
+      }
       // Private history uses its own page with no analytics and no persistent browser keys.
       const historyPage = groupBrowser && p.match(/^\/app\/groups\/(\d+)\/history$/);
       if (historyPage && req.method === 'GET') {
@@ -2853,10 +2963,10 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           undo: undoForm(`/app/groups/${made.group.id}/end`, { bot: b.id }) });
         return redirect(res, `/app/groups/${made.group.id}?bot=${b.id}`), true;
       }
-      const gr = groups && p.match(/^\/app\/groups\/(\d+)(?:\/(join|decline|wake|hide|rename|link|reset-links|admins-add|add|contact|remove|admin|send|leave|end))?$/);
+      const gr = groups && p.match(/^\/app\/groups\/(\d+)(?:\/(join|decline|wake|hide|rename|link|reset-links|admins-add|add|contact|remove|admin|send|leave|end|run-stop|folder|folder-access))?$/);
       if (gr) {
         const gid = Number(gr[1]), sub = gr[2] || '';
-        if (!sub && req.method === 'GET') return page(res, 200, groupPage(user, groupSeat(user, gid, url.searchParams.get('bot')).b, gid)), true;
+        if (!sub && req.method === 'GET') return groupHtml(res, 200, groupPage(user, groupSeat(user, gid, url.searchParams.get('bot')).b, gid)), true;
         if (!sub || req.method !== 'POST') throw new HttpError(404, 'Page not found');
         const f = await form(req);
         const { b, row } = groupSeat(user, gid, f.bot);
@@ -2896,7 +3006,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           }
           if (sub === 'rename') {
             try { groups.settings(b, gid, { name: f.name }); }
-            catch (e) { if (e instanceof HttpError && e.status === 400) return page(res, 400, groupPage(user, b, gid, { nameError: tr('A group name is 1 to 40 characters.') })), true; throw e; }
+            catch (e) { if (e instanceof HttpError && e.status === 400) return groupHtml(res, 400, groupPage(user, b, gid, { nameError: tr('A group name is 1 to 40 characters.') })), true; throw e; }
             const now_ = groups.group(gid).name;
             if (now_ !== g.name) tell(user, { what: tr('Renamed to {name}', { name: now_ }), undo: again ? null : undoForm(`/app/groups/${gid}/rename`, { ...ids, name: g.name }) });
             return redirect(res, here), true;
@@ -2952,6 +3062,29 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             tell(user, { what: tr('Sent to the group') });
             return redirect(res, here), true;
           }
+          if (sub === 'run-stop' && groupRuns) {
+            const r = groupRuns.stop(b, String(gid), String(f.run || ''));
+            if (!r.already) tell(user, { what: tr('Stopped the run') });
+            return redirect(res, here), true;
+          }
+          // The shared folder: on or off, and who may read or change it. The owner acts as their own bot, the group's admin.
+          if (sub === 'folder') {
+            const on = f.on === '1';
+            routes['POST /v1/team-folders/:group/state']({ me: b, params: { group: String(gid) }, body: { on } });
+            tell(user, { what: on ? tr('Shared folder on') : tr('Shared folder off'), undo: again ? null : undoForm(`/app/groups/${gid}/folder`, { ...ids, ...(on ? {} : { on: '1' }) }) });
+            return redirect(res, `${here}#folder`), true;
+          }
+          if (sub === 'folder-access') {
+            const peer = Number(f.member), role = String(f.role || '');
+            const m = groups.page(gid, b.id)?.members.find((x) => x.bot_id === peer && x.state === 'joined');
+            if (!m || !['read', 'write', 'remove'].includes(role)) throw new HttpError(400, 'Pick someone in the group and what they may do.');
+            const was = folderGrants(gid).get(peer) ?? 'remove';
+            if (was !== role) routes['POST /v1/team-folders/:group/members']({ me: b, params: { group: String(gid) }, body: { handle: m.handle, role } });
+            const name = peer === b.id ? tr('Your bot') : someone(peer);
+            tell(user, { what: role === 'write' ? tr('{name} can read and change the folder', { name }) : role === 'read' ? tr('{name} can read the folder', { name }) : tr('{name} has no access to the folder', { name }),
+              undo: again || was === role ? null : undoForm(`/app/groups/${gid}/folder-access`, { ...ids, member: peer, role: was }) });
+            return redirect(res, `${here}#folder`), true;
+          }
           if (sub === 'leave') {
             groups.leave(b, gid);
             tell(user, { what: tr('You left {name}', { name: g.name }) });
@@ -2962,7 +3095,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             tell(user, { what: tr('Ended {name}', { name: g.name }) });
             return redirect(res, '/app'), true;
           }
-        } catch (e) { if (e instanceof HttpError && e.status !== 404) return page(res, e.status, groupPage(user, b, gid, { error: groupError(e, tr) })), true; throw e; }
+        } catch (e) { if (e instanceof HttpError && e.status !== 404) return groupHtml(res, e.status, groupPage(user, b, gid, { error: groupError(e, tr) })), true; throw e; }
       }
       // A basket hidden from the overview's friends list (or shown again). Its people stay as they are.
       if (p === '/app/baskets/hide' && req.method === 'POST') {
@@ -3788,7 +3921,119 @@ list.addEventListener('keydown',e=>{const i=tabs.indexOf(document.activeElement)
 let k='friends';try{k=localStorage.getItem('b2b-pane')||k;}catch(e){}show(tabs.some(b=>b.dataset.pane===k)?k:'friends');
 const at=location.hash&&document.getElementById(decodeURIComponent(location.hash.slice(1)))?.closest('[data-pane-body]');if(at?.hidden)show(at.dataset.paneBody);w.classList.add('ready');
 const orient=()=>list.setAttribute('aria-orientation',row.matches?'horizontal':'vertical');orient();addEventListener('resize',place);row.addEventListener?.('change',()=>{orient();place();});document.fonts?.ready.then(place);})();`;
-const REFRESH_JS = `setInterval(()=>{if(document.visibilityState!=='visible'||document.querySelector('details[open]:not(.bsec__d),.cm[data-state=ask],.acc[data-open=true]')||document.querySelector('[data-find] input')?.value||/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||''))return;window.b2bStay&&b2bStay();location.reload();},30000);`;
+// Every string the shared folder's page script shows, in the owner's language (the script gets them as JSON).
+const folderWords = (tr) => ({
+  'Undo': tr('Undo'),
+  'Over 100 MB. Split it or zip it smaller.': tr('Over 100 MB. Split it or zip it smaller.'),
+  'The folder is full. Delete something first.': tr('The folder is full. Delete something first.'),
+  'Someone’s keys changed. Check with them before saving here.': tr('Someone’s keys changed. Check with them before saving here.'),
+  'You can read this folder, not change it.': tr('You can read this folder, not change it.'),
+  'That didn’t work. Try again.': tr('That didn’t work. Try again.'),
+  'just now': tr('just now'),
+  'You': tr('You'),
+  'Copy': tr('Copy'),
+  'Copied': tr('Copied'),
+  'Select it': tr('Select it'),
+  'Message for your bot': tr('Message for your bot'),
+  'Open the folder in this browser': tr('Open the folder in this browser'),
+  'This browser becomes one of your bot’s devices, so files stay end-to-end encrypted here too.': tr('This browser becomes one of your bot’s devices, so files stay end-to-end encrypted here too.'),
+  'Your bot already has 4 devices. Ask it to remove one, then come back.': tr('Your bot already has 4 devices. Ask it to remove one, then come back.'),
+  'Set up this browser': tr('Set up this browser'),
+  'Send this to your bot': tr('Send this to your bot'),
+  'Open the folder': tr('Open the folder'),
+  'Code from your bot': tr('Code from your bot'),
+  'Waiting for your bot…': tr('Waiting for your bot…'),
+  'Type the code your bot sends back': tr('Type the code your bot sends back'),
+  'Start again': tr('Start again'),
+  'Your bot approved it. Type the code it sent you.': tr('Your bot approved it. Type the code it sent you.'),
+  'That request expired. Start again.': tr('That request expired. Start again.'),
+  'Your bot hasn’t approved it yet.': tr('Your bot hasn’t approved it yet.'),
+  'This browser is paired': tr('This browser is paired'),
+  'That code doesn’t match. Check your bot’s reply.': tr('That code doesn’t match. Check your bot’s reply.'),
+  'New note': tr('New note'),
+  'Upload': tr('Upload'),
+  'Read only': tr('Read only'),
+  'Files': tr('Files'),
+  'Needs a decision': tr('Needs a decision'),
+  'Nothing here yet': tr('Nothing here yet'),
+  'Drop files here or start a note.': tr('Drop files here or start a note.'),
+  'Older files are on their way.': tr('Older files are on their way.'),
+  'Some changes couldn’t be checked, so they’re hidden.': tr('Some changes couldn’t be checked, so they’re hidden.'),
+  'Space': tr('Space'),
+  '{used} of {max}': tr('{used} of {max}'),
+  'Forget this browser': tr('Forget this browser'),
+  'This browser: {name}': tr('This browser: {name}'),
+  'Forget': tr('Forget'),
+  'Cancel': tr('Cancel'),
+  'This browser forgot its keys': tr('This browser forgot its keys'),
+  'Drop into {name}': tr('Drop into {name}'),
+  'Drop to upload': tr('Drop to upload'),
+  '{name} is over 100 MB. Split it or zip it smaller.': tr('{name} is over 100 MB. Split it or zip it smaller.'),
+  'Uploading {name}…': tr('Uploading {name}…'),
+  'Someone changed {name} first. Upload it again to replace theirs.': tr('Someone changed {name} first. Upload it again to replace theirs.'),
+  'Someone changed it first. Yours waits as a suggestion': tr('Someone changed it first. Yours waits as a suggestion'),
+  'Review': tr('Review'),
+  'Undone': tr('Undone'),
+  'Uploaded {name}': tr('Uploaded {name}'),
+  'Uploaded {n} files': tr('Uploaded {n} files'),
+  'Close': tr('Close'),
+  'Show': tr('Show'),
+  'Download': tr('Download'),
+  'Edit': tr('Edit'),
+  'Delete': tr('Delete'),
+  'Preview': tr('Preview'),
+  'History': tr('History'),
+  'Downloaded {name}': tr('Downloaded {name}'),
+  'Deleted {name}': tr('Deleted {name}'),
+  'Brought back {name}': tr('Brought back {name}'),
+  'Opening {name}…': tr('Opening {name}…'),
+  'Showing the first {n} rows. Download it for the rest.': tr('Showing the first {n} rows. Download it for the rest.'),
+  'No preview for this kind of file. Download it to open it.': tr('No preview for this kind of file. Download it to open it.'),
+  'This file didn’t pass its check, so it isn’t shown.': tr('This file didn’t pass its check, so it isn’t shown.'),
+  'Loading history…': tr('Loading history…'),
+  'Version {n}': tr('Version {n}'),
+  'Deleted': tr('Deleted'),
+  'Locked': tr('Locked'),
+  'Current': tr('Current'),
+  'Restore': tr('Restore'),
+  'Restored version {n}': tr('Restored version {n}'),
+  '{n} lines unchanged': tr('{n} lines unchanged'),
+  'Added': tr('Added'),
+  'Removed': tr('Removed'),
+  'Loading the suggestion…': tr('Loading the suggestion…'),
+  '{who} suggested a change {when}': tr('{who} suggested a change {when}'),
+  'Changes': tr('Changes'),
+  'Original': tr('Original'),
+  'Suggested': tr('Suggested'),
+  'Withdraw': tr('Withdraw'),
+  'Reject': tr('Reject'),
+  'Edit first': tr('Edit first'),
+  'Accept': tr('Accept'),
+  'It changed again. Edit it to fit': tr('It changed again. Edit it to fit'),
+  'Accepted the suggestion': tr('Accepted the suggestion'),
+  'That can’t be undone anymore. The file changed or time ran out.': tr('That can’t be undone anymore. The file changed or time ran out.'),
+  'Withdrew your suggestion': tr('Withdrew your suggestion'),
+  'Rejected the suggestion': tr('Rejected the suggestion'),
+  'End-to-end encrypted': tr('End-to-end encrypted'),
+  'Untitled.md': tr('Untitled.md'),
+  'Name': tr('Name'),
+  'Unsaved changes': tr('Unsaved changes'),
+  '{n} lines': tr('{n} lines'),
+  'Save': tr('Save'),
+  '{who} changed the same lines. Yours waits as a suggestion': tr('{who} changed the same lines. Yours waits as a suggestion'),
+  'Saved, with {who}’s changes merged in': tr('Saved, with {who}’s changes merged in'),
+  'Saved {name}': tr('Saved {name}'),
+  'Pick a name without slashes at the ends.': tr('Pick a name without slashes at the ends.'),
+  '{who} made {name} first. Yours waits as a suggestion': tr('{who} made {name} first. Yours waits as a suggestion'),
+  'Your bot has new keys. Set this browser up again.': tr('Your bot has new keys. Set this browser up again.'),
+  'Opening the folder…': tr('Opening the folder…'),
+  'This browser was removed from your bot’s devices. Set it up again.': tr('This browser was removed from your bot’s devices. Set it up again.'),
+  'Your bot doesn’t have access to this folder yet.': tr('Your bot doesn’t have access to this folder yet.'),
+  'The shared folder is off.': tr('The shared folder is off.'),
+  'Can’t reach the folder right now.': tr('Can’t reach the folder right now.'),
+  'This browser can’t open the folder. Try a current Chrome, Edge, Safari or Firefox.': tr('This browser can’t open the folder. Try a current Chrome, Edge, Safari or Firefox.'),
+});
+const REFRESH_JS = `setInterval(()=>{if(document.visibilityState!=='visible'||document.querySelector('details[open]:not(.bsec__d),.cm[data-state=ask],.acc[data-open=true],[data-hold]')||document.querySelector('[data-find] input')?.value||/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||''))return;window.b2bStay&&b2bStay();location.reload();},30000);`;
 // The behaviour of the Arc components above, in plain JS. Every page loads it once.
 const uiJsFor = (tr) => `(function(){const $$=(s,r=document)=>[...r.querySelectorAll(s)];document.documentElement.classList.add('js');
 /* Staying in place: a save answers with the same page, so it comes back where you were, without the entrance animation. */
@@ -4665,4 +4910,93 @@ body.out .topbar{display:flex;align-items:center;justify-content:space-between;g
 @media (hover:hover) and (pointer:fine){.langswitch:hover{color:var(--foreground);background:color-mix(in oklab,var(--foreground) 5%,transparent)}}
 /* Czech on a phone: a little less room around each tab, so all six sections fit on a 390px screen. */
 @media (max-width:640px){.tabs__item:lang(cs){padding:0 8px}}
+/* Shared folder (alpha): Arc tree view rows, the file dropzone edge, a viewer sheet with preview, history and editor. */
+.group__act{display:flex;align-items:center;gap:8px}.group__act .btn svg{width:16px;height:16px}.group__act input[type=file]{display:none}
+.group__head h2 .badge{margin-left:6px;vertical-align:2px}
+.card--folder{position:relative;padding:8px}.card--folder>.fnote{padding:16px}
+.fnote{margin:0;color:var(--text-secondary)}.fapp>.fnote{padding:6px 12px;font-size:var(--text-xs)}
+.fapp{position:relative;display:grid;grid-template-columns:minmax(0,1fr);gap:2px;border-radius:calc(var(--radius-surface) - 8px)}.fapp>*,.ftree__item,.frow{min-width:0}
+#folder{scroll-margin-top:84px}
+.ftree,.ftree__group{list-style:none;margin:0;padding:0}.ftree__item{outline:none}
+.frow{display:flex;align-items:center;gap:10px;min-height:44px;padding:6px 12px 6px calc(12px + var(--level,0) * 18px);border-radius:var(--radius-control);cursor:pointer;-webkit-user-select:none;user-select:none;transition:background-color var(--duration-fast) var(--ease-standard)}
+@media (hover:hover) and (pointer:fine){.frow:hover{background:var(--surface-muted)}}
+.frow:active{background:var(--surface-muted)}
+.ftree__item:focus-visible>.frow{outline:2px solid color-mix(in oklab,var(--accent) 72%,transparent);outline-offset:-2px}
+.frow__icon{display:grid;place-items:center;width:18px;height:18px;flex:none;color:var(--text-muted)}.frow__icon svg{width:18px;height:18px}
+.frow__chev svg{transition:transform var(--duration-standard) var(--ease-spring)}[aria-expanded=true]>.frow .frow__chev svg{transform:rotate(90deg)}
+.frow__main{display:flex;align-items:baseline;gap:12px;flex:1;min-width:0}
+.frow__name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.frow__meta{flex:none;color:var(--text-muted);font-size:var(--text-xs);font-variant-numeric:tabular-nums;white-space:nowrap}
+.ftree__item[data-dir]>.frow .frow__meta{display:inline-grid;place-items:center;min-width:22px;height:20px;padding:0 7px;border-radius:var(--radius-pill);background:var(--surface-muted);color:var(--text-secondary)}
+.is-fresh>.frow{animation:fresh 1.8s var(--ease-standard)}@keyframes fresh{from{background:var(--accent-subtle)}}
+.is-target>.frow{background:var(--accent-subtle)}
+.fapp.is-drop::after{content:attr(data-drop);position:absolute;inset:0;z-index:2;display:grid;place-items:center;border:1.5px dashed var(--accent);border-radius:inherit;background:color-mix(in oklab,var(--surface) 84%,transparent);color:var(--accent-strong);font-weight:500;pointer-events:none}
+.fempty{display:grid;justify-items:center;gap:6px;margin:4px;padding:36px 16px 32px;border:1.5px dashed var(--border-strong);border-radius:calc(var(--radius-surface) - 12px);text-align:center}
+.fempty p{margin:0}.fempty__title{font-size:var(--text-base);font-weight:500}.fempty__act{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:10px}.fempty__act .btn svg{width:16px;height:16px}
+.fprog{display:grid;gap:8px;padding:10px 12px}.fprog[hidden],.fapp [hidden]{display:none}.fprog__what{color:var(--text-secondary);font-size:var(--text-xs)}.fprog .meter__track{height:6px}.fprog .meter__fill{transition:width var(--duration-standard) var(--ease-standard)}
+.ffoot{display:grid;gap:12px;margin-top:6px;padding:14px 12px 8px;border-top:1px solid var(--border-subtle)}
+.ffoot__me{margin:0;color:var(--text-muted);font-size:var(--text-xs)}
+.linkbtn{padding:0;border:0;background:none;color:inherit;font:inherit;text-decoration:underline;text-decoration-color:var(--border-strong);text-underline-offset:2px;cursor:pointer}.linkbtn--danger{color:var(--danger)}
+.fpair{display:grid;justify-items:start;gap:12px;padding:16px}.fpair>p{margin:0}.fpair__title{font-size:var(--text-base)}
+.fpair__walk{width:100%;margin:4px 0 4px}.fpair .walk__t{margin:3px 0 8px;font-weight:500}.fpair .code{margin:0}
+.fpair__form{display:flex;flex-wrap:wrap;gap:8px}
+.fpair__code{flex:1 1 220px;min-width:0;min-height:var(--control-height-md);padding:0 14px;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--surface);color:var(--foreground);font:500 var(--text-base)/1 var(--font-mono);letter-spacing:.06em}
+.fpair__code::placeholder{color:var(--text-muted);opacity:.7}
+.fpair__status{margin:8px 0 0;color:var(--text-secondary);font-size:var(--text-xs)}
+.fpair__note{padding:10px 14px;border-radius:var(--radius-control);background:var(--surface-muted)}
+.fperm{gap:12px}.fperm__who{flex:1;min-width:0}.fperm__who p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fperm__h{margin:0;padding:16px 0 2px;border-top:1px solid var(--border-subtle);color:var(--text-secondary);font-size:var(--text-xs)}.fperm__none{color:var(--text-muted);font-size:var(--text-xs)}
+@media (max-width:560px){.fperm{flex-wrap:wrap}.fperm .seg{width:100%}.fperm .seg__track{flex:1}.fperm .seg button{flex:1}.frow__main{flex-direction:column;align-items:stretch;gap:1px}.frow__meta{overflow:hidden;text-overflow:ellipsis}.ftree__item[data-dir]>.frow .frow__meta{display:none}.frow{min-height:52px}}
+.fview{width:min(880px,calc(100vw - 32px));height:min(86vh,920px);max-width:none;max-height:none;padding:0;border:0;border-radius:var(--radius-surface);background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-floating),0 0 0 1px var(--hairline);overflow:hidden}
+.fview[open]{animation:dlg-in 420ms var(--ease-spring) both}.fview::backdrop{background:var(--scrim);animation:dlg-fade 200ms ease-out both}
+.fview__in{display:flex;flex-direction:column;height:100%;min-height:0}
+.fview__head{display:flex;align-items:flex-start;gap:12px;padding:20px 16px 12px 24px}
+.fview__id{flex:1;min-width:0}.fview__title{margin:0;font:500 var(--text-xl)/1.2 var(--font-display);letter-spacing:var(--tracking-display);overflow-wrap:anywhere}
+.fview__meta{margin:4px 0 0;color:var(--text-muted);font-size:var(--text-xs)}
+.fview__head .iconbtn{border:0;background:none;flex:none}
+.fview__bar{display:flex;gap:8px;padding:0 24px}.fview__bar:empty{display:none}.fview__bar .fview__tabs{margin:0 0 12px}
+.seg__dot{width:7px;height:7px;margin-left:7px;border-radius:50%;background:var(--warning);display:inline-block;vertical-align:1px}
+.fview__pane{height:100%}.fview__pane>.md,.fview__pane>.fcode{margin-top:16px}
+.fview__status{color:var(--text-muted);font-size:var(--text-xs);font-variant-numeric:tabular-nums}.fview__more{margin:8px 0 0;color:var(--text-muted);font-size:var(--text-xs)}
+.fcode{margin:16px 0 0;padding:14px 0;overflow:auto;border-radius:var(--radius-control);background:color-mix(in oklab,var(--surface-muted) 55%,var(--surface));font:13px/1.65 var(--font-mono);white-space:pre}
+.fcode--lines{counter-reset:ln}.fcode__line{counter-increment:ln;display:inline-block;min-width:100%;padding-right:16px}.fcode__line::before{content:counter(ln);display:inline-block;width:3.2em;margin-right:14px;padding-right:10px;border-right:1px solid var(--border-subtle);color:var(--text-muted);text-align:right;font-variant-numeric:tabular-nums;-webkit-user-select:none;user-select:none}
+.fjson{padding:14px 16px}.fjson__key{color:var(--accent-strong)}.fjson__str{color:var(--success)}.fjson__num{color:var(--warning)}.fjson__lit{color:var(--danger)}
+.ftable{margin-top:16px}.ftable table{width:max-content;min-width:100%}.ftable td.is-num{text-align:right;font-variant-numeric:tabular-nums}.ftable th{position:sticky;top:0}
+.frow__name{display:flex;align-items:center;gap:8px}.frow__name>:first-child{min-width:0}
+.frow__flag{flex:none;min-height:20px;padding:0 7px;font-size:var(--text-xs)}.frow__dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--warning)}
+.fview__foot[hidden],.fview [hidden]{display:none}
+.fsug{display:grid;grid-template-rows:auto auto 1fr auto;gap:12px;min-height:100%;padding-top:16px}.fsug__who{margin:0;color:var(--text-secondary)}.fsug .fview__tabs{margin:0;justify-self:start}
+.fsug__pane{min-width:0}.fsug__pane>.fcode{margin:0}
+.fsug__act{display:flex;align-items:center;gap:8px;position:sticky;bottom:-20px;margin:0 -24px -20px;padding:12px 16px 12px 24px;border-top:1px solid var(--border-subtle);background:var(--surface)}
+.fsug__pane{align-self:start}
+.fdiff{overflow:auto;border:1px solid var(--border-subtle);border-radius:var(--radius-control);font:13px/1.65 var(--font-mono)}
+.fdiff__row{display:flex;min-width:max-content}.fdiff__sign{flex:none;width:2em;color:var(--text-muted);text-align:center;-webkit-user-select:none;user-select:none}.fdiff__text{white-space:pre;padding-right:16px}
+.fdiff__row--add{background:color-mix(in oklab,var(--success) 12%,var(--surface))}.fdiff__row--add .fdiff__sign{color:var(--success)}
+.fdiff__row--del{background:color-mix(in oklab,var(--danger) 10%,var(--surface))}.fdiff__row--del .fdiff__sign{color:var(--danger)}.fdiff__row--del .fdiff__text{text-decoration:line-through;text-decoration-color:color-mix(in oklab,var(--danger) 45%,transparent)}
+.fdiff__skip{padding:4px 12px 4px 2em;color:var(--text-muted);font:var(--text-xs)/1.6 var(--font-body);background:var(--surface-muted)}
+.fview__body{flex:1;min-height:0;overflow:auto;padding:0 24px 20px;border-top:1px solid var(--border-subtle)}
+.fview__foot{display:flex;align-items:center;gap:8px;padding:12px 16px 12px 24px;border-top:1px solid var(--border-subtle)}.fview__gap{flex:1}.fview__foot .btn svg{width:16px;height:16px}
+.btn.ghost.fview__del{color:var(--danger)}
+.fview__wait,.fview__bad{margin:20px 0 0}.fview__bad{color:var(--danger)}
+.fview__text{margin:16px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.65 var(--font-mono)}
+.fview__none{display:grid;place-items:center;min-height:200px}
+.fview__edit{display:block;width:100%;height:100%;min-height:40vh;margin:0;padding:16px 0;border:0;resize:none;background:transparent;color:var(--foreground);font:14px/1.65 var(--font-mono);outline:none}
+.fview__name{width:100%;min-height:40px;padding:0 12px;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--surface);color:var(--foreground);font:500 var(--text-lg)/1 var(--font-display);letter-spacing:var(--tracking-display)}
+@media (max-width:640px){.fview{width:100vw;height:100dvh;margin:0;border-radius:0}.fview__head{padding:max(14px,env(safe-area-inset-top)) 12px 10px 16px}.fview__bar{padding:0 16px}.fsug__act{margin:0 -16px -16px;padding:10px 16px;bottom:-16px}.fview__body{padding:0 16px 16px}.fview__foot{flex-wrap:wrap;padding:10px 12px max(10px,env(safe-area-inset-bottom)) 16px}}
+.fhist{list-style:none;margin:8px 0 0;padding:0}.fhist__row{display:flex;align-items:center;gap:12px;min-height:56px;padding:8px 0}.fhist__row+.fhist__row{border-top:1px solid var(--border-subtle)}
+.fhist__main{display:grid;flex:1;min-width:0}.fhist__v{font-weight:500}.fhist__meta{color:var(--text-muted);font-size:var(--text-xs)}
+.md{max-width:70ch;padding:4px 0 24px;font-size:var(--text-base);line-height:1.6;overflow-wrap:anywhere}
+.md h2,.md h3,.md h4,.md h5,.md h6{margin:1.3em 0 .45em;font-family:var(--font-display);font-weight:500;letter-spacing:-.02em;line-height:1.25}
+.md h2{font-size:var(--text-2xl)}.md h3{font-size:var(--text-xl)}.md h4{font-size:var(--text-lg)}.md h5,.md h6{font-size:var(--text-base)}
+.md p{margin:0 0 .9em}.md ul,.md ol{margin:0 0 .9em;padding-left:1.4em}.md li{margin:.2em 0}.md li>ul,.md li>ol{margin:.2em 0}
+.md__task{list-style:none;margin-left:-1.4em}.md__task input{display:inline-block;width:auto;height:auto;min-height:0;margin:0 .45em 0 0;padding:0;vertical-align:-2px;accent-color:var(--accent)}
+.md code{padding:.1em .35em;border-radius:6px;background:var(--surface-muted);font:.88em var(--font-mono)}
+.md pre{margin:0 0 1em;padding:14px 16px;overflow:auto;border-radius:var(--radius-control);background:var(--surface-muted)}.md pre code{padding:0;background:none;font-size:13px;line-height:1.6}
+.md blockquote{margin:0 0 1em;padding:2px 0 2px 16px;border-left:3px solid var(--border-strong);color:var(--text-secondary)}
+.md hr{margin:1.6em 0;border:0;border-top:1px solid var(--border)}
+.md a{color:var(--accent);text-underline-offset:2px}
+.md__table{max-width:100%;overflow-x:auto;margin:0 0 1em}.md table{border-collapse:collapse;font-size:var(--text-sm)}
+.md th,.md td{padding:6px 12px;border:1px solid var(--border);text-align:left;vertical-align:top}.md th{background:var(--surface-muted);font-weight:500}.md td>p:last-child{margin:0}
+.md__img{color:var(--text-muted);font-style:italic}
+@media (prefers-reduced-motion:reduce){.is-fresh>.frow{animation:none;background:var(--accent-subtle)}.frow__chev svg,.fprog .meter__fill,.frow{transition:none}.fview[open],.fview::backdrop{animation:none}}
 `;

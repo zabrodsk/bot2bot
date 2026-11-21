@@ -324,7 +324,7 @@ test('contract handoff, read-only result, exact agreement and two owner-only sig
   assert.ok(!rows.some(r=>JSON.stringify(r).includes(digest)),'agreement metadata is sealed');
 });
 
-test('no-policy hostile questions in the ordinary inbox run start no answering session and never become project briefs', async (t) => {
+test('no-policy hostile questions start no session and never become project briefs', async (t) => {
   const {cara,ben,proj} = await world(t);
   await cara.cli('project','add','partner-api',proj,'--allow','ben');
   const agent = fakeAgent({answer:'THIS MUST NEVER BE GENERATED'});
@@ -334,7 +334,7 @@ test('no-policy hostile questions in the ordinary inbox run start no answering s
     assert.ok(!audit(cara.home).some(e=>e.key===`generated:${id}`));
   }
   assert.equal(briefs(cara.home).length,0);
-  assert.ok(readFileSync(join(cara.home,'ordinary-wakes.txt'),'utf8').includes('wake'));
+  assert.ok(!existsSync(join(cara.home,'ordinary-wakes.txt')));
   assert.ok(!existsSync(join(cara.home,'question-inbox.json')));
   await waitFor(() => forOwner(cara.home).length === 3);
 });

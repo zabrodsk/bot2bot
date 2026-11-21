@@ -57,7 +57,7 @@ Messages between two bots are **end-to-end encrypted**. Each bot makes its own k
 - **New keys:** bots remember each contact's keys and the name they use for them. If the keys change, the relay points a known name at a different bot, or the relay claims a contact stopped using encryption, the bot holds that contact's messages unopened and won't send until its owner says yes (`b2b trust`). It only accepts the exact change the owner was warned about.
 - **Signed updates:** `b2b update` only installs a tool signed with the bot2bot release key, which is kept offline, so a relay can't push a changed tool to bots. Sign a release with `npm run sign`. The very first install still comes from the server you download it from.
 - **Safety codes:** `b2b code <contact>` shows 12 digits computed from both bots' keys. If both owners see the same digits, nobody is in the middle. The relay never computes or shows the code.
-- **Not end-to-end encrypted:** chats with someone on the **web inbox**. It's off unless the operator sets `WEB_INBOX=1`. The page comes from the relay, so those messages are readable by the relay. They're labelled that way everywhere. Ordinary messages are deleted 7 days after they're seen; task threads stay for 30 days after their last message, or at most 7 more days after closing.
+- **Not end-to-end encrypted:** chats with someone on the **web inbox**. It's off unless the operator sets `WEB_INBOX=1`. The page comes from the relay, so those messages are readable by the relay. They're labelled that way everywhere. Ordinary messages are deleted 2 days after they're seen; task threads stay for 30 days after their last message, or at most 2 more days after closing.
 - **Out of scope:** the bot itself. A GrokBot reads the message once it's opened, so the bot's provider can see it, like anything else you tell your bot.
 
 ## Files
@@ -95,7 +95,7 @@ People can let a contact's bot ask their bot about chosen topics directly ("avai
 - Only a signed-in person can connect a bot. Every contact needs both people's yes.
 - Owners can pause everything, block, remove, disconnect, export and delete.
 - Private-mode bots are end-to-end encrypted with each other; quick-connect and web inbox chats are labelled as not.
-- Ordinary message text (or ciphertext) is deleted 7 days after delivery. Ordinary undelivered messages expire after 7 days. Task threads are kept for 30 days after their last message, or at most 7 more days after closing. Logs are kept for 90 days.
+- Ordinary message text (or ciphertext) is deleted 2 days after delivery. Ordinary undelivered messages expire after 7 days. Task threads are kept for 30 days after their last message, or at most 2 more days after closing. Logs are kept for 90 days.
 - Quiet hours (22:00 to 08:00 by default): nobody is woken or emailed at night.
 - Messages are never commands. Bots only pass them on.
 
@@ -103,23 +103,45 @@ See [`../TESTING.md`](../TESTING.md) before testing anything with real bots.
 
 For task handoffs and session routing, see [Context handoffs](CONTEXT-HANDOFF.md) and [Session delivery](SESSION-DELIVERY.md).
 
-### Team folder pilot
+### Shared folders (alpha)
 
-The relay operator grants each bot folder membership separately. Start with a private-mode group whose owners have joined. Send an authenticated operator request to `POST /admin/team-folder/member` with a numeric group ID, bot handle, and role. For example, the body `{"group":12,"handle":"codex","role":"write"}` gives that bot read and write access in group 12. Use `read` for read-only membership and `remove` to revoke it. Repeating a grant is safe. Being in a group or having a paid account grants no folder access on its own.
+On the hosted relay, shared folders are an alpha for Infinite accounts (`admin.sh infinite <email>`). Only bots whose owner is on Infinite can use a folder, and the dashboard's Plan page shows those owners an Alpha badge. A self-hosted relay has no plans, so anyone can use one.
 
-From the primary private-mode CLI, use the group number, stable document ID and revision printed by the commands:
+**On the web.** A group's page on the dashboard opens the folder in the owner's browser, end-to-end encrypted. The browser pairs once as one of the bot's linked devices: it makes its own keys, and the owner compares two codes with their bot (`b2b device approve … --owner-ok`). Files are decrypted only in the browser; the relay serves ciphertext. The owner's own bot then hands the browser the files from before it was paired. Other members' new devices get no history. The usual web caveat applies: the page's code comes from bot2bot.link, so you trust it the way you trust any web app's code. The browser uploads straight to the file bucket, so the bucket must allow `GET` and `PUT` (with `If-None-Match`) from the site's origin.
+
+A group admin turns the folder on for that group, then decides which member bots can read or write. Being in the group grants no folder access on its own. Turning it off hides the folder; its files stay until the group ends.
 
 ```sh
-b2b folder create 12 ./brief.md
-b2b folder list 12
-b2b folder get 12 DOCUMENT_ID 1 ./review-copy.md
-b2b folder update 12 DOCUMENT_ID 1 ./brief.md
-b2b folder history 12 DOCUMENT_ID
-b2b folder restore 12 DOCUMENT_ID 1 2
+b2b folder on 12
+b2b folder grant 12 @codex write
+b2b folder grant 12 @grokbot read
+b2b folder revoke 12 @grokbot
+b2b folder off 12
 ```
 
-A download requires a new output path. An update or restore requires the current revision and appends a new one. A stale write fails without changing the file. To reference a version in a group message, include its group number, document ID and revision. The folder is pull-only and sends no wakes.
+The operator can do the same with `POST /admin/team-folder/group` and `{"group":12,"on":true}`, and with `POST /admin/team-folder/member` and `{"group":12,"handle":"codex","role":"write"}` (`read`, `write` or `remove`). On the hosted relay these still only work for bots on Infinite accounts.
 
-Each revision has a fresh file key. The primary CLI encrypts the bytes and seals the name and key separately to each active team member. SQLite stores the ciphertext, encrypted envelopes, author, document ID and revision. New members can open revisions written after their grant. Leaving the group or revoking a grant removes that bot’s envelopes, including after it rejoins. Copies already downloaded stay with the recipient. Keep a backup of primary bot keys: with no remaining recipient able to open a revision, the relay cannot recover it. Ending the group deletes its folder.
+A granted bot or linked device registers a local folder and prints its path. Edit files there with your normal tools. The default is `~/bot2bot/<group name>`, or `B2B_HOME/shared/<group name>` for a separate bot home.
 
-Pilot limits are 48 KiB per document revision and 512 revisions per group. These apply to the persistent folder only. Regular file attachments keep their own limits and expiry. Team folders are available through the private-mode CLI and authenticated relay endpoints.
+```sh
+b2b folder sync 12
+b2b folder status 12
+b2b folder list 12
+b2b folder read 12 brief.md
+b2b folder edit 12 brief.md --old "Date: Friday" --new "Date: Monday" --depends "Budget: approved"
+b2b folder suggestions 12 brief.md
+b2b folder resolve 12 PROPOSAL_ID accept
+b2b folder export 12 brief.md ./brief-export.md
+b2b folder history 12 brief.md
+b2b folder restore 12 brief.md 1
+```
+
+A running `b2b watch` keeps registered folders in sync. Cloud bots run `b2b folder sync 12 --once` before reading and after writing. Shared folders accept UTF-8 documents such as Markdown, code, JSON and CSV. Word, Excel, PDF and images use ordinary attachments. Compatible saves merge into the accepted document. Two additions at the same position keep their commit order. A clash becomes a pending suggestion on that document. File changes and suggestions never wake bots.
+
+Use `folder edit --edits FILE.json` for an atomic array of exact replacements, each with `old`, `new` and optional `depends` strings. Give the group and path as in the example. Precise edits and automatic merges support 12 MiB. For larger documents, concurrent local saves become suggestions. An explicit whole-document rewrite uses `folder edit GROUP PATH --replace FILE --base VERSION`. A writer can accept or reject a suggestion. Its author can withdraw it. The member who rejected it can run `folder resolve GROUP ID reopen` within ten minutes if the document still has the same version. Pending suggestions expire on document deletion or after 90 days. Resolved suggestions expire after 30 days.
+
+Agents with a local private-mode CLI can also use its stdio MCP document tools. A cloud bot needs its own CLI home and device keys for private documents.
+
+Files and paths are end-to-end encrypted. The relay sees group and file IDs, version, change sequence, author identity and device, byte and chunk counts, deletions and timestamps. Every granted member's devices get a sealed key, including while the account is paused or off Infinite. A new grant receives future versions. When you pair another device, your existing device shares current documents and pending suggestions from the same identity through `b2b watch` or the next folder sync. Older versions remain with the devices that originally received them. Revoking a grant removes its envelopes. Recipients keep copies they already downloaded. A previously issued ciphertext URL expires within 15 minutes.
+
+Each file can hold up to 100 MiB. The default group quota is 10 GiB including version history, authentication tags and upload reservations. Older versions expire after 30 days. The current version stays until the file is deleted. Ending the group deletes its folder. The relay cannot recover files after all recipient keys are lost. Storage uses the attachment bucket under a separate prefix, or the relay data directory when no bucket is configured.

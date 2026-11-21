@@ -243,7 +243,7 @@ test('blocking from the dashboard drops queued messages and refuses new ones', a
   await assert.rejects(ben.cli('send', 'Tom', 'again'), /not reachable/);
 });
 
-test('message text is erased 7 days after delivery; undelivered mail expires', async (t0) => {
+test('message text is erased 2 days after delivery; undelivered mail expires after 7', async (t0) => {
   const env = await setup(t0);
   const ben = await owner(env, 'ben5@example.com', 'ben5');
   const zoe = await owner(env, 'zoe@example.com', 'zoe');
@@ -254,11 +254,13 @@ test('message text is erased 7 days after delivery; undelivered mail expires', a
   await zoe.b('/app/pause', { method: 'POST', form: { on: '1' } });
   const stuck = (await ben.cli('send', 'Zoe', 'Are you there?')).match(/Sent (msg_[\w-]+)/)[1];
 
-  env.advance(6 * 86_400_000); env.relay.retention();
+  env.advance(1 * 86_400_000); env.relay.retention();
   assert.ok(env.relay.db.prepare('SELECT sealed FROM messages WHERE id = ?').get(delivered).sealed);
-  env.advance(2 * 86_400_000); env.relay.retention();
+  env.advance(1.5 * 86_400_000); env.relay.retention();
   const row = env.relay.db.prepare('SELECT text, links, sealed, body_purged_at FROM messages WHERE id = ?').get(delivered);
   assert.equal(row.text, ''); assert.equal(row.links, '[]'); assert.equal(row.sealed, null); assert.ok(row.body_purged_at);
+  assert.doesNotMatch(await ben.cli('status', stuck), /not_delivered/);
+  env.advance(5 * 86_400_000); env.relay.retention();
   assert.match(await ben.cli('status', stuck), /not_delivered/);
   assert.match((await ben.b('/app/activity')).text, /Text deleted/);
 });

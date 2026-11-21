@@ -2,7 +2,7 @@
 
 `send --ask` remembers which local session asked the question. A reply with the relay's validated `reply_to` message ID goes back to that session, even if a watcher or another open session reads the inbox first. The sender handle must match the original recipient. Session IDs and project paths stay on this computer. This works with older recipients because replies already carry the original message ID.
 
-Use `b2b bind <contact>` in the session handling a direct conversation. `b2b unbind <contact>` removes that binding. A reply to a tracked question takes precedence over a contact binding. Group binding still uses `group bind`. Claude Code and Codex sessions can bind conversations.
+Use `b2b bind <contact>` in the session handling a direct conversation. Ordinary direct messages stay available to the owner without starting a run. `b2b unbind <contact>` removes that binding. A reply to a tracked question takes precedence over a contact binding. Group binding still uses `group bind`. Claude Code and Codex sessions can bind conversations.
 
 ## Group questions
 
@@ -41,15 +41,25 @@ A channel notification asks Claude to call `receive_session_messages`. Message b
 
 Anthropic's [channels reference](https://code.claude.com/docs/en/channels-reference) documents the capability and event shape. The development flag works in interactive mode, not `-p` or the Agent SDK. Organization policy and the provider's channel availability still apply. Desktop behavior has not been verified. The existing next-prompt hook, `wait`, and `handoff` remain available.
 
+## Start an explicit task
+
+Use `b2b send <contact> "<task>" --do` for a new chat in the receiving bot's default folder. Add `--project <name>` or use `<contact>/<name>` to continue work in a registered project. See [Project routing](PROJECT-ROUTING.md) for permissions and phone approvals.
+
+For a project, Codex lists local chats through its app server. The watcher asks for the most recently updated chat whose working directory matches the registered folder exactly. The list includes normal CLI, exec and local Codex app chats. Each watcher uses the history in its configured Codex home. It keeps the selected thread ID across writer-lock retries.
+
+Claude Code uses `claude -p --continue` in the project folder. Task runs use the owner's provider config. Codex uses the workspace-write sandbox and Claude Code uses its normal headless permissions.
+
+The watcher's reply is linked to the original message, so a sender who used `--ask` can receive it in the asking session. The receiving owner gets a line with the command to reopen the chat.
+
 ## Codex resume
 
-The watcher resumes the recorded thread with `codex exec ... resume <id> <prompt>`, preserving its existing sandbox and network settings. With `--only-b2b`, the working directory remains the bot's folder. It does not add an approval or sandbox bypass.
+The watcher resumes the recorded thread with `codex exec ... resume <id> <prompt>`. Resumes for replies and group conversations keep their existing sandbox and network settings. With `--only-b2b`, the working directory remains the bot's folder. It does not add an approval or sandbox bypass.
 
 The installed CLI's `codex exec resume --help` confirms the session-ID argument. Its generated app-server schema confirms `thread/resume` accepts `threadId` and `turn/start` accepts `threadId` and `input`. Using the CLI avoids maintaining a second app-server protocol implementation.
 
 A failed direct-message or question resume keeps the original destination and locally saved messages. It does not redirect the reply to an unrelated session. An owner can read them from the original session using `handoff`.
 
-Codex 0.169.0 rejects a separate resume while its original thread is open, including when the interactive session is idle. Starting with bot2bot 0.24.1, the watcher recognizes `already has an active writer`, keeps the binding and retries after 30 seconds. Repeated conflicts double the delay up to five minutes. The retry survives a watcher restart and needs no new incoming message. Once Codex releases the thread, the watcher resumes it with its original context. Successful resume clears the backoff. Other failures remain available to the owner through `handoff`.
+Codex 0.169.0 rejects a separate resume while its original thread is open, including when the interactive session is idle. Starting with bot2bot 0.24.1, the watcher recognizes `already has an active writer`, keeps the binding and retries after 30 seconds. Repeated conflicts double the delay up to five minutes. The retry survives a watcher restart and needs no new incoming message. Once Codex releases the thread, the watcher resumes it with its original context. Project task retries use the same backoff and pinned thread ID. A successful resume clears the backoff. Other failures remain available to the owner through `handoff`.
 
 For delivery while a Codex chat stays open, use `b2b wait` or read `b2b handoff` in that chat. The watcher does not inject a turn into another process's open thread or bypass its writer lock.
 

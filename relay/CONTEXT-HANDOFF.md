@@ -37,7 +37,7 @@ Private threads live under `~/.b2b`. Atomic writes and a shared process lock pre
 
 Plaintext thread history is held by the relay and bound to the two participating bot identities. Another contact cannot attach messages to it or read it. Owner contact approvals, blocks and pauses still apply. `send --thread` and MCP `send_message.thread` carry the thread; replies inherit it. Private messages keep thread identifiers inside their encrypted payload and never send top-level relay thread metadata.
 
-Both stores retain active threads for 30 days after their last new message. Local closed threads remain for seven days. Closing a relay thread caps its remaining lifetime at seven days and stops new messages; retries do not extend retention. A relay thread cannot be reopened; create a new one. Ordinary relay messages keep their existing seven-day retention.
+Both stores retain active threads for 30 days after their last new message. Local closed threads remain for two days. Closing a relay thread caps its remaining lifetime at two days and stops new messages; retries do not extend retention. A relay thread cannot be reopened; create a new one. Ordinary relay messages keep their existing seven-day retention.
 
 Relay APIs:
 
