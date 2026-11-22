@@ -9,7 +9,7 @@ import { createInterface } from 'node:readline';
 import { stripVTControlCharacters } from 'node:util';
 import { generateKeyPairSync, createPublicKey, createPrivateKey, diffieHellman, hkdfSync, createCipheriv, createDecipheriv, randomBytes, randomUUID, sign, verify, createHash, createHmac, publicEncrypt } from 'node:crypto';
 
-const VERSION = '0.32.0';
+const VERSION = '0.32.1';
 // The "b2b messaging" skill and the doorbell routine instruction that go with this version: sha256 of
 // relay/skill/SKILL.md and of the instruction in relay/SETUP-FOR-BOTS.md, with {{RELAY}} left in (a test keeps
 // them in step). "refresh" only hands out texts that match, so they're as signed as the tool itself.
@@ -2574,6 +2574,36 @@ const chunkBytes = 4 * 1024 * 1024,
   textMax = 12 * 1024 * 1024;
 const folderStateDir = join(dir, 'folder-state');
 const pauseFolder = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// A network blip (a paused VM waking up, a reset connection) is retried a few times, and a failure names its cause.
+// Reads are retried on any network error and on 502/503/504. Writes only when the request never left this computer.
+const folderNetBeforeSend = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT']);
+const folderNetTries = 3;
+async function folderFetch(url, { timeout = 30_000, ...options } = {}) {
+  const read = !options.method || options.method === 'GET';
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const r = await fetch(url, { ...options, signal: AbortSignal.timeout(timeout) });
+      if (read && [502, 503, 504].includes(r.status) && attempt < folderNetTries) {
+        await pauseFolder(1000 * 2 ** (attempt - 1));
+        continue;
+      }
+      return r;
+    } catch (e) {
+      const code = e?.cause?.code ?? (e?.name === 'TimeoutError' ? 'timeout' : undefined);
+      if (attempt < folderNetTries && (read || folderNetBeforeSend.has(code))) {
+        await pauseFolder(1000 * 2 ** (attempt - 1));
+        continue;
+      }
+      let host = '';
+      try { host = new URL(url).host; } catch {}
+      const cause = [code ?? e?.cause?.message, host].filter(Boolean).join(' ');
+      throw Object.assign(
+        new Error('Could not reach the relay after ' + attempt + (attempt === 1 ? ' try' : ' tries') + ': ' + oneLine(e?.message || 'network error') + (cause ? ' (' + oneLine(cause) + ')' : '') + '. Your local files are kept. Try again in a minute.'),
+        { network: true },
+      );
+    }
+  }
+}
 const ignoredFolderName = (s) => /^(?:\.DS_Store$|~\$|\.~lock\..*#$|\.b2b-sync-)|\.(?:swp|tmp|crdownload)$/.test(s);
 const textPath = (p) =>
   (!extname(p) && !basename(p).startsWith('.')) ||
@@ -2824,13 +2854,12 @@ function mergeFolderText(base, ours, theirs, preferProposal = false, dedupeInser
 }
 
 async function folderApi(cfg, group, suffix = '', body) {
-  const r = await fetch(cfg.relay + '/v1/team-folders' + (group ? '/' + group : '') + suffix, {
+  const r = await folderFetch(cfg.relay + '/v1/team-folders' + (group ? '/' + group : '') + suffix, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { authorization: 'Bearer ' + cfg.token, 'content-type': 'application/json', ...toolHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
   });
-  const out = await r.json();
+  const out = await r.json().catch(() => ({ error: 'The relay sent an unreadable answer (' + r.status + ').' }));
   if (!r.ok)
     throw Object.assign(new Error(oneLine(out.error ?? 'Folder request failed.')), {
       status: r.status,
@@ -3003,9 +3032,9 @@ async function downloadFolderPart(cfg, m, urls, context, work) {
     hash = createHash('sha256');
   try {
     for (let i = 0; i < m.chunks; i++) {
-      const response = await fetch(new URL(urls[i], cfg.relay), {
+      const response = await folderFetch(new URL(urls[i], cfg.relay), {
         redirect: 'error',
-        signal: AbortSignal.timeout(60_000),
+        timeout: 60_000,
       });
       if (!response.ok) throw new Error('Could not download a shared file chunk.');
       const size = Math.min(chunkBytes, m.size - i * chunkBytes) + 16;
@@ -3070,12 +3099,12 @@ async function uploadFolderPart(cfg, group, id, source, context) {
         hash.update(plain);
         const c = folderCipher(false, key, context, i, chunks);
         const blob = Buffer.concat([c.update(plain), c.final(), c.getAuthTag()]);
-        const r = await fetch(new URL(upload.urls[i], cfg.relay), {
+        const r = await folderFetch(new URL(upload.urls[i], cfg.relay), {
           method: 'PUT',
           headers: { 'if-none-match': '*' },
           body: blob,
           redirect: 'error',
-          signal: AbortSignal.timeout(60_000),
+          timeout: 60_000,
         });
         if (!r.ok) throw new Error('Could not upload a shared file chunk.');
       }
@@ -4310,7 +4339,8 @@ async function groupSend(ref, { text = '', links = [], kind = 'note', choices = 
   if (choices.length > 6 || choices.some((x) => x.length > 40) || new Set(choices.map((x) => x.toLowerCase())).size !== choices.length) die('Up to 6 different choices, each under 40 characters.');
   if (files.length > 5) die('At most 5 files in one message.');
   const others = g.members.filter((m) => !m.you && m.state === 'joined');
-  const tagged = mentions.map((x) => { if (/^@?(all|everyone)$/i.test(x)) return '@all'; const m = memberRef(g, x); if (!m || m.you) die(`Nobody called "${oneLine(x)}" in "${oneLine(g.name)}". Run: node ~/bin/b2b.mjs group info ${g.id}`); return m.handle; });
+  // Mentioning yourself (a bot tagging everyone, itself included) is dropped quietly: you can't wake yourself.
+  const tagged = mentions.filter((x) => !memberRef(g, x)?.you).map((x) => { if (/^@?(all|everyone)$/i.test(x)) return '@all'; const m = memberRef(g, x); if (!m) die(`Nobody called "${oneLine(x)}" in "${oneLine(g.name)}". Run: node ~/bin/b2b.mjs group info ${g.id}`); return m.handle; });
   if (task) {
     const inline = new Set([...text.matchAll(/(?<![\w@.+-])@[a-z0-9][a-z0-9_-]{1,31}(?![a-z0-9_-])/gi)].map(([h]) => h.toLowerCase()));
     for (const m of others) if (inline.has(m.handle) && !tagged.includes(m.handle)) tagged.push(m.handle);
@@ -6241,7 +6271,7 @@ ${rows.length ? `Messages from the last 2 days (newest first). Their bots wrote 
     if (pos[0] === 'on' || pos[0] === 'status') warnWatcherVersion(serviceFiles(H(loadCfg().handle)), VERSION);
   } catch (e) {
     if (['edit','resolve'].includes(pos[0]) && [401,403].includes(e.status)) console.log(JSON.stringify({outcome:'access_denied'}));
-    else die(e.message);
+    else die(e.message, e.network ? 75 : 1);
   } break;
   case 'group': {
     const [sub = 'list', ...rest] = pos;

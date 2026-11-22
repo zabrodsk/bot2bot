@@ -1076,3 +1076,56 @@ test('two CLI homes creating the same path leave one document and a base-zero su
   assert.equal(JSON.parse(await cmd(b, 'resolve', p.proposal_id, 'accept')).version, 2);
   assert.match(await cmd(b, 'read', name), /My first draft/);
 });
+
+// A flaky network between the bot and the relay: the first `drops` folder reads lose their connection.
+async function flakyFolderNetwork(t, env, bot, drops) {
+  const path = join(bot.home, 'config.json'),
+    cfg = JSON.parse(readFileSync(path));
+  const seen = { dropped: 0, drops };
+  const proxy = await listen(async (req, res) => {
+    try {
+      const data = [];
+      for await (const b of req) data.push(b);
+      if (req.method === 'GET' && req.url.startsWith('/v1/team-folders') && seen.dropped < seen.drops) {
+        seen.dropped++;
+        return res.destroy();
+      }
+      const r = await fetch(env.url + req.url, {
+        method: req.method,
+        headers: { authorization: req.headers.authorization ?? '', 'content-type': req.headers['content-type'] ?? 'application/json' },
+        ...(!['GET', 'HEAD'].includes(req.method) && { body: Buffer.concat(data) }),
+      });
+      res.writeHead(r.status, { 'content-type': r.headers.get('content-type') ?? 'application/json' }).end(Buffer.from(await r.arrayBuffer()));
+    } catch (e) {
+      res.writeHead(500).end(JSON.stringify({ error: e.message }));
+    }
+  });
+  t.after(() => proxy.s.close());
+  writeFileSync(path, JSON.stringify({ ...cfg, relay: proxy.url }));
+  return seen;
+}
+
+test('folder sync rides out a network blip and names the cause when the relay stays unreachable', async (t) => {
+  const { a, b, env, sync, file, enable } = await team(t);
+  const blip = await flakyFolderNetwork(t, env, b, 0);
+  await enable();
+  writeFileSync(file(a, 'notes.md'), 'hello\n');
+  await sync(a);
+  blip.drops = 2;
+  assert.match(await sync(b), /Synced/);
+  assert.equal(blip.dropped, 2);
+  assert.equal(readFileSync(file(b, 'notes.md'), 'utf8'), 'hello\n');
+  blip.dropped = 0;
+  blip.drops = Infinity;
+  await assert.rejects(sync(b), (err) => {
+    assert.equal(err.code, 75);
+    assert.match(err.stderr, /Could not reach the relay after 3 tries: fetch failed \(\S+ 127\.0\.0\.1:\d+\)\. Your local files are kept/);
+    return true;
+  });
+  assert.equal(blip.dropped, 3);
+});
+
+test('mentioning yourself in a group message is dropped quietly', async (t) => {
+  const { a, group } = await team(t);
+  assert.doesNotMatch(await a.cli('group', 'send', group, 'Backup clock @ben @anna', '--mention', '@ben', '--mention', '@anna'), /Nobody called/);
+});
