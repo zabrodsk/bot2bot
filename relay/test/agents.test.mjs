@@ -13,6 +13,7 @@ import { setup, login, cliHome, waitFor, sleep, owner, connectHandled, listen } 
 
 const run = promisify(execFile);
 const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'b2b.mjs');
+const VERSION = readFileSync(CLI, 'utf8').match(/^const VERSION = '([\d.]+)';$/m)[1];
 const runIn = (home, env = {}) => async (...a) => {
   try { const r = await run(process.execPath, [CLI, ...a], { env: { ...process.env, B2B_HOME: home, HOME: home, ...env } }); return { code: 0, out: r.stdout + r.stderr }; }
   catch (e) { return { code: e.code, out: `${e.stdout}${e.stderr}` }; }
@@ -56,14 +57,150 @@ async function joinAgent(env, email, handle, agent = 'claude-code') {
   const botId = env.relay.db.prepare('SELECT id FROM bots WHERE handle = ?').get(handle).id;
   return { b, home, cli, done, botId };
 }
-const startWatcher = (t0, home, bin, agent = 'claude-code', ...extra) => {
-  const p = spawn(process.execPath, [CLI, 'watch', '--agent', agent, '--bin', bin, ...extra], { env: { ...process.env, B2B_HOME: home, HOME: home } });
+const watchProcess = (t0, home, args) => {
+  const p = spawn(process.execPath, args, { env: { ...process.env, B2B_HOME: home, HOME: home } });
   let log = '';
   p.stdout.on('data', (c) => { log += c; });
   p.stderr.on('data', (c) => { log += c; });
   t0.after(() => p.kill());
   return { p, log: () => log };
 };
+const startWatcher = (t0, home, bin, agent = 'claude-code', ...extra) =>
+  watchProcess(t0, home, [CLI, 'watch', '--agent', agent, '--bin', bin, ...extra]);
+
+test('watcher backs off fast failures, tells the owner once, and retries the inbox after restart', async (t0) => {
+  const { home } = cliHome();
+  t0.after(() => rmSync(home, { recursive: true, force: true }));
+  let ready = 0, waiting;
+  const { s, url } = await listen((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/v1/me') {
+      res.end(JSON.stringify({ handle: 'hera', platform: 'hermes', inbox_ready: ready,
+        doorbell: { kind: 'watch', watching: true, verified: true } }));
+      return;
+    }
+    if (req.url !== '/v1/watch') { res.writeHead(404).end('{}'); return; }
+    waiting = res;
+    const timer = setTimeout(() => res.end('{"ring":false}'), 150);
+    res.once('close', () => { clearTimeout(timer); if (waiting === res) waiting = null; });
+  });
+  t0.after(() => s.close());
+  writeFileSync(join(home, 'config.json'), JSON.stringify({ relay: url, token: 'local-test', handle: 'hera' }));
+  const path = join(home, 'watch-state.json');
+  const state = () => existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+  const offset = join(home, 'offset'), preload = join(home, 'clock.mjs');
+  writeFileSync(offset, '0');
+  writeFileSync(preload, `import { readFileSync } from 'node:fs';\nconst now = Date.now;\nDate.now = () => now() + Number(readFileSync(${JSON.stringify(offset)}, 'utf8'));\n`);
+  const bin = join(home, 'hermes'), healthy = join(home, 'healthy');
+  writeFileSync(bin, `#!${process.execPath}\nif (!require('node:fs').existsSync(${JSON.stringify(healthy)})) {\n  console.error('Signing in…\\nOAuth session expired');\n  process.exitCode = 1;\n}\n`, { mode: 0o755 });
+  const cli = runIn(home);
+  const start = () => watchProcess(t0, home, ['--import', preload, CLI, 'watch', '--agent', 'hermes', '--bin', bin]);
+  const ring = async () => {
+    await waitFor(() => waiting && !waiting.writableEnded);
+    waiting.end('{"ring":true,"reason":"pending"}');
+  };
+  const w = start();
+  for (let n = 1; n <= 3; n++) {
+    await ring();
+    await waitFor(() => state().failure?.failures === n);
+  }
+  const first = state().failure;
+  assert.equal(first.reason, 'OAuth session expired');
+  assert.ok(first.retryAt - Date.parse(first.since) >= 30_000);
+  const status = (await cli('watch', '--status')).out;
+  assert.ok(status.includes(`Watcher version: ${VERSION}. CLI version: ${VERSION}.`));
+  assert.match(status, /Agent runs failing since .*: OAuth session expired\nNext retry at /);
+  assert.doesNotMatch(status, /tested|Signing in/);
+  assert.match((await cli('waiting')).out, /watcher for @hera keeps failing\. OAuth session expired/);
+
+  // A new message rings during the cooldown. The watcher receives it without starting a run.
+  ready = 1;
+  await ring();
+  await waitFor(() => waiting && !waiting.writableEnded);
+  assert.equal((w.log().match(/ring: starting/g) ?? []).length, 3);
+  await new Promise((resolve) => { w.p.once('exit', resolve); w.p.kill(); });
+  const restarted = start();
+  await waitFor(() => state().pid === restarted.p.pid);
+  await ring();
+  await waitFor(() => waiting && !waiting.writableEnded);
+  assert.doesNotMatch(restarted.log(), /ring: starting/);
+  assert.deepEqual(state().failure, first);
+
+  // No more rings arrive. The inbox is still ready, so the watcher makes its own retry.
+  writeFileSync(offset, '31000');
+  await waitFor(() => state().failure?.failures === 4);
+  assert.equal(state().failure.since, first.since);
+  assert.ok(state().failure.retryAt - first.retryAt >= 60_000);
+  assert.doesNotMatch((await cli('waiting')).out, /keeps failing/);
+  writeFileSync(healthy, 'ready');
+  writeFileSync(offset, '94000');
+  await waitFor(() => !state().failure);
+  assert.doesNotMatch((await cli('watch', '--status')).out, /failing since|Next retry/);
+
+  // A successful run resets the consecutive failure count.
+  rmSync(healthy);
+  await ring();
+  await waitFor(() => state().failure?.failures === 1);
+  assert.equal(state().failure.since, undefined);
+});
+
+test('watcher status and folder commands warn about an older local service', async (t0) => {
+  const env = await setup(t0);
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-claude');
+  const ann = await owner(env, t0, 'ann@example.com', 'ann-bot');
+  await connectHandled(ann, cara, 'ann');
+  const created = await cara.cli('group', 'new', 'Folder', 'ann');
+  const group = created.out.match(/number (\d+)/)[1];
+  const state = join(cara.home, 'watch-state.json');
+  writeFileSync(state, JSON.stringify({ pid: process.pid, version: '0.22.16' }));
+  const warning = /Your watcher runs 0\.22\.16\. Stop it and rerun the watch command/;
+  assert.match((await cara.cli('folder', 'on', group)).out, warning);
+  assert.match((await cara.cli('folder', 'status', group)).out, warning);
+  assert.ok((await cara.cli('watch', '--status')).out.includes(`Watcher version: 0.22.16. CLI version: ${VERSION}.`));
+  writeFileSync(state, JSON.stringify({ pid: 0, version: '0.22.16' }));
+  assert.doesNotMatch((await cara.cli('folder', 'status', group)).out, /Your watcher/);
+
+  if (!['darwin', 'linux'].includes(process.platform)) return;
+  // A legacy service has a live PID, but there is no way to recover its in-memory version from the new file on disk.
+  const mac = process.platform === 'darwin';
+  const svc = mac ? join(cara.home, 'Library', 'LaunchAgents', 'link.bot2bot.watch.cara-claude.plist')
+    : join(cara.home, '.config', 'systemd', 'user', 'b2b-watch-cara-claude.service');
+  mkdirSync(dirname(svc), { recursive: true });
+  writeFileSync(svc, 'test service');
+  const manager = join(cara.home, mac ? 'launchctl' : 'systemctl');
+  writeFileSync(manager, `#!/bin/sh\necho '${mac ? `"PID" = ${process.pid};` : process.pid}'\n`, { mode: 0o755 });
+  const cli = runIn(cara.home, { PATH: `${cara.home}:${process.env.PATH}` });
+  const status = (await cli('watch', '--status')).out;
+  assert.ok(status.includes(`Watcher version: unknown. CLI version: ${VERSION}.`));
+  assert.match(status, /Your watcher didn't report its version\. To use CLI .*restart it with /);
+  assert.match(status, mac ? /launchctl bootout .* && launchctl bootstrap / : /systemctl --user restart b2b-watch-cara-claude\.service/);
+  assert.match((await cli('folder', 'status', group)).out, /Your watcher didn't report its version/);
+});
+
+test('watch install writes only the selected agent home and reloads a running service', { skip: !['darwin', 'linux'].includes(process.platform) }, async (t0) => {
+  const env = await setup(t0);
+  const cara = await joinAgent(env, 'cara@example.com', 'cara-claude');
+  const mac = process.platform === 'darwin';
+  const calls = join(cara.home, 'service-calls');
+  const manager = join(cara.home, mac ? 'launchctl' : 'systemctl');
+  // Stop after the service file is written. All manager calls go to this stub.
+  writeFileSync(manager, `#!${process.execPath}\nconst args = process.argv.slice(2);\nrequire('node:fs').appendFileSync(${JSON.stringify(calls)}, args.join(' ') + '\\n');\nprocess.exitCode = args.includes(${JSON.stringify(mac ? 'bootstrap' : 'restart')}) ? 1 : 0;\n`, { mode: 0o755 });
+  const svc = mac ? join(cara.home, 'Library', 'LaunchAgents', 'link.bot2bot.watch.cara-claude.plist')
+    : join(cara.home, '.config', 'systemd', 'user', 'b2b-watch-cara-claude.service');
+  const cli = runIn(cara.home, { PATH: `${cara.home}:${process.env.PATH}`, CODEX_HOME: '/test/codex', HERMES_HOME: '/test/hermes' });
+  for (const agent of ['claude-code', 'codex', 'hermes', 'custom']) {
+    writeFileSync(calls, '');
+    const args = agent === 'custom' ? ['--command', `${process.execPath} --help`] : ['--agent', agent, '--bin', process.execPath];
+    const install = await cli('watch', '--install', ...args);
+    assert.match(install.out, /Couldn't start the watcher service/);
+    const file = readFileSync(svc, 'utf8');
+    assert.match(file, /B2B_SERVICE/);
+    assert.equal(file.includes('CODEX_HOME') && file.includes('/test/codex'), agent === 'codex');
+    assert.equal(file.includes('HERMES_HOME') && file.includes('/test/hermes'), agent === 'hermes');
+    const actions = readFileSync(calls, 'utf8');
+    assert.match(actions, mac ? /^bootout .*\nbootstrap / : /^--user daemon-reload\n--user enable .*\n--user restart /);
+  }
+});
 
 test('Cue joins in private mode and verifies delivery from its scheduled inbox check', async (t0) => {
   const env = await setup(t0);

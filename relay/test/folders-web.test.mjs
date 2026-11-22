@@ -6,7 +6,11 @@ import assert from 'node:assert/strict';
 import * as nc from 'node:crypto';
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
-import { folderCrypto, folderMerge, folderClient, FOLDERS_JS } from '../folders-web.mjs';
+import { folderCrypto, folderMerge, folderClient, folderZip, FOLDERS_JS } from '../folders-web.mjs';
+import zlib from 'node:zlib';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const core = folderCrypto(globalThis.crypto);
 const merge = folderMerge();
@@ -163,8 +167,28 @@ test('three-way merge: separate edits merge, insertions at one spot keep both in
 
 test('the page script is built from the tested functions and has no imports or eval', () => {
   assert.doesNotThrow(() => new Function(FOLDERS_JS));
-  for (const fn of [folderCrypto, folderMerge, folderClient]) assert.ok(FOLDERS_JS.includes(fn.toString()));
+  for (const fn of [folderCrypto, folderMerge, folderClient, folderZip]) assert.ok(FOLDERS_JS.includes(fn.toString()));
   assert.doesNotMatch(FOLDERS_JS, /\bimport\(|\beval\(|innerHTML|insertAdjacentHTML|document\.write|new Function/);
+});
+
+test('wrapped device keys keep AES-GCM wrapKey and unwrapped Ed25519/X25519 keys non-extractable and interoperate', async () => {
+  const { keys, wrapped } = await core.newWrappedDeviceKeys();
+  assert.equal(wrapped.v, 2);
+  assert.equal(wrapped.wrapKey.extractable, false);
+  assert.equal(wrapped.wrapKey.algorithm.name, 'AES-GCM');
+  assert.equal(keys.sign.privateKey.extractable, false);
+  assert.equal(keys.box.privateKey.extractable, false);
+  const restored = await core.unwrapDeviceKeys(wrapped);
+  assert.equal(restored.sign.privateKey.extractable, false);
+  assert.equal(restored.box.privateKey.extractable, false);
+  assert.deepEqual(restored.pub, keys.pub);
+  const link = await core.linkRequest(restored, 'web-safari');
+  assert.equal(await core.deviceCheck('request', link.request, link.proof, restored.pub.sign), true);
+  const peer = await core.newDeviceKeys();
+  const meta = { from: restored.pub.sign, to: peer.pub.box, kind: 'team-folder/2/1/f_' + 'a'.repeat(32) + '/1' };
+  const sealed = await core.seal({ v: 2, path: 'note.md' }, { sign: restored.sign.privateKey, peerBox: peer.pub.box, meta });
+  const opened = await core.unseal(sealed, { box: peer.box.privateKey, boxPub: peer.pub.box, peerSign: restored.pub.sign, meta });
+  assert.deepEqual(opened, { v: 2, path: 'note.md' });
 });
 
 // ───── a fake v2 relay, from the spec and the relay implementer's notes ─────
@@ -204,7 +228,7 @@ function fakeRelay(group, people) {
     const key = `${who.p.handle}:${who.d.name}`, root = `/v1/team-folders/${group}`, json = body.length ? JSON.parse(body) : null;
     const p = u.pathname.slice(root.length);
     if (!u.pathname.startsWith(root)) return send(404, {});
-    if (req.method === 'GET' && p === '') return send(200, { alpha: true, name: 'Research', role: who.p.role ?? 'write', roster: 'r' + people.length, recipients: recipients(), members: people.map((x) => ({ handle: x.handle, role: 'write', sign: x.root.sign, box: x.root.box, device_list: x.list })), quota: { used: [...objects.values()].reduce((s, b) => s + b.length, 0), max: 10 * 1024 ** 3 }, max_file_bytes: 100 * 1024 * 1024, seq });
+    if (req.method === 'GET' && p === '') return send(200, { alpha: true, name: 'Research', role: who.p.role ?? 'write', roster: 'r' + people.length, recipients: recipients(), members: people.map((x) => ({ handle: x.handle, role: 'write', sign: x.root.sign, box: x.root.box, device_list: x.list })), quota: { used: [...objects.values()].reduce((s, b) => s + b.length, 0), max: 10 * 1024 ** 3 }, max_file_bytes: 200 * 1024 * 1024, seq });
     if (req.method === 'GET' && p === '/changes') { const since = Number(u.searchParams.get('since')); return send(200, { changes: rows.filter((r) => r.seq > since).map((r) => view(r, key)), suggestion_events: events.filter((e) => e.seq > since), seq }); }
     const fresh = (id) => { assert.match(id, /^req_[0-9a-f]{32}$/); assert.ok(!requests.has(id), 'a new request id per attempt'); requests.add(id); };
     const keysOk = (env) => JSON.stringify(Object.keys(env).sort()) === JSON.stringify(recipients().map((r) => `${r.handle}:${r.device}`).sort());
@@ -403,6 +427,61 @@ test('the browser client: write, read on another device, merge, suggestions, del
   await assert.rejects(web.write({ path: 'x.txt', data: enc.encode('x') }), (e) => e.code === 'keys');
 });
 
+test('history: what each save changed, undoing one save on top of later ones, a clash waits, own suggestions', async (t) => {
+  const ben = await identity('ben', ['web-chrome']), anna = await identity('anna');
+  const relay = fakeRelay(6, [ben, anna]);
+  await new Promise((ok) => relay.server.listen(0, '127.0.0.1', ok));
+  t.after(() => relay.server.close());
+  const url = `http://127.0.0.1:${relay.server.address().port}`;
+  const web = clientFor(url, 6, ben, 'web-chrome'), other = clientFor(url, 6, anna);
+  await web.refresh(); await other.refresh();
+  const dec = (d) => new TextDecoder().decode(d);
+  const textOf = async (c, id, v) => dec((await c.load(id, v)).data);
+  const edit = async (c, id, fn) => { await c.sync(); const f = c.state.files.get(id), t0 = await textOf(c, id, f.version); return c.write({ fileId: id, path: f.manifest.path, data: enc.encode(fn(t0)), base: f.version, baseData: enc.encode(t0) }); };
+
+  // v1 Ben writes, v2 Anna adds a line, v3 Ben (an old copy saved whole) drops it and adds his own.
+  const { file_id: id } = await web.write({ path: 'r3/timeline.md', data: enc.encode('# Timeline\n- alpha\n') });
+  await edit(other, id, (x) => `${x}- beta (anna)\n`);
+  await web.sync();
+  const v3 = await web.write({ fileId: id, path: 'r3/timeline.md', data: enc.encode('# Timeline\n- alpha\n- gamma (ben)\n'), base: 2 });
+  assert.equal(v3.version, 3);
+  // Then Anna edits the top line, so the undo has a later save to keep.
+  await edit(other, id, (x) => x.replace('# Timeline', '# Timeline, day 1'));
+
+  // The summary: lines added and removed against the version before, and the first version against nothing.
+  assert.deepEqual(await web.change(id, 1), { add: 2, del: 0 });
+  assert.deepEqual(await web.change(id, 2, 1), { add: 1, del: 0 });
+  assert.deepEqual(await web.change(id, 3, 2), { add: 1, del: 1 });
+
+  // Undo version 3 only: Anna's line comes back, Ben's goes, and her later heading stays.
+  const r = await web.revert(id, 3, 2);
+  assert.deepEqual([r.outcome, r.version, r.before], ['saved', 5, 4]);
+  assert.equal(await textOf(other, id, 5), '# Timeline, day 1\n- alpha\n- beta (anna)\n');
+  // Nothing left to undo the second time.
+  assert.equal((await web.revert(id, 3, 2)).outcome, 'same');
+  // The toast's Undo: undoing the undo puts version 3's change back, still keeping the heading.
+  const back = await web.revert(id, 5, 4);
+  assert.equal(back.outcome, 'saved');
+  assert.equal(await textOf(other, id, back.version), '# Timeline, day 1\n- alpha\n- gamma (ben)\n');
+
+  // When a later save changed the same lines, the undo commits nothing and waits as Ben's suggestion.
+  await edit(other, id, (x) => x.replace('- gamma (ben)', '- gamma (ben, checked by anna)'));
+  const rows = relay.rows.length;
+  const clash = await web.revert(id, 3, 2);
+  assert.equal(clash.outcome, 'suggestion');
+  assert.equal(relay.rows.length, rows);
+  const full = await web.details(clash.suggestion);
+  assert.deepEqual([full.base, full.original.text, full.proposed.text], [3, await textOf(web, id, 3), await textOf(web, id, 2)]);
+  // On Ben's other devices it shows as his own, waiting; on Anna's as one to decide.
+  await web.sync(); await other.sync();
+  assert.deepEqual(web.mineWaiting().map((p) => p.file_id), [id]);
+  assert.deepEqual(other.mineWaiting(), []);
+  assert.equal(other.pending()[0].author, 'ben');
+
+  // Bots keep only text files on their disks (the CLI's rule): the page marks the rest as web only.
+  assert.deepEqual(['a.md', 'notes', 'x/data.jsonl', '.env', 'chart.png', 'report.pdf', '.hidden', 'a.'].map(core.onDisk), [true, true, true, true, false, false, false, false]);
+});
+
 // ───── against the real relay and the real CLI ─────
 import { setup, owner, connect } from './helpers.mjs';
 
@@ -430,6 +509,9 @@ test('the browser links as a device with the same protocol as b2b device link, a
   assert.equal(approved.status, 'approved');
   await assert.rejects(core.finishLink(link, keys, approved, 'ABCDEF0123456789'), (e) => e.code === 'mismatch');
   const done = await core.finishLink(link, keys, approved, back.toLowerCase().replace(/(.{4})/g, '$1 '));
+  // Pasting the bot's whole reply works too: the 16-character code is taken out of it.
+  assert.equal((await core.finishLink(link, keys, approved, said)).handle, 'ben');
+  assert.equal((await core.finishLink(link, keys, approved, `Here's the code: ${back}`)).handle, 'ben');
   assert.equal(done.handle, 'ben');
   assert.equal(done.device.name, 'web-chrome');
   const cfg = JSON.parse(readFileSync(`${ben.home}/config.json`, 'utf8'));
@@ -471,15 +553,15 @@ test('the group page: the folder section, its strict CSP, access for admins with
   assert.equal((await ben.b(`/app/groups/${group}/folder`, { method: 'POST', form: { bot: ben.botId, on: '1' } })).status, 303);
   page = await pageOf(ben);
   assert.match(page.text, /class="toast toast--undo"[^]*Shared folder on[^]*name="undo" value="1"/);
-  assert.match(page.text, /Who can open it[^]*@ben[^]*No access[^]*Read[^]*Write[^]*@anna/);
-  assert.match((await pageOf(anna)).text, /Your bot doesn’t have access yet\. A group admin can give it\./);
+  assert.match(page.text, /Who can open it[^]*@ben[^]*No access[^]*Read[^]*Read and write[^]*@anna/);
+  assert.match((await pageOf(anna)).text, /id="folder-app"/);
   assert.equal((await anna.b(`/app/groups/${group}/folder-access`, { method: 'POST', form: { bot: anna.botId, member: anna.botId, role: 'write' } })).status, 403);
 
   await ben.b(`/app/groups/${group}/folder-access`, { method: 'POST', form: { bot: ben.botId, member: ben.botId, role: 'write' } });
   await ben.b(`/app/groups/${group}/folder-access`, { method: 'POST', form: { bot: ben.botId, member: anna.botId, role: 'read' } });
   page = await pageOf(ben);
   assert.match(page.text, /Anna|anna/);
-  assert.match(page.text, /can read the folder[^]*name="role" value="remove"/);
+  assert.match(page.text, /can read the folder[^]*name="role" value="write"/);
   const grants = () => Object.fromEntries(db.prepare('SELECT b.handle, m.role FROM team_folder_members m JOIN bots b ON b.id = m.bot_id WHERE m.group_id = ?').all(group).map((r) => [r.handle, r.role]));
   assert.deepEqual(grants(), { ben: 'write', anna: 'read' });
   await ben.b(`/app/groups/${group}/folder-access`, { method: 'POST', form: { bot: ben.botId, member: anna.botId, role: 'remove', undo: '1' } });
@@ -487,9 +569,9 @@ test('the group page: the folder section, its strict CSP, access for admins with
 
   // Granted: the app mounts with public facts only, its words, and the versioned script.
   page = await pageOf(ben);
-  const app = page.text.match(/<div class="card card--folder" id="folder-app"[^>]*>/)[0];
+  const app = page.text.match(/<div class="card card--folder card--tab" data-tab="[^"]*" id="folder-app"[^>]*>/)[0];
   const cfg = JSON.parse(readFileSync(`${ben.home}/config.json`, 'utf8'));
-  assert.match(app, new RegExp(`data-group="${group}" data-handle="ben" data-sign="${cfg.keys.sign.x}" data-box="${cfg.keys.box.x}"`));
+  assert.match(app, new RegExp(`data-group="${group}" data-bot="\\d+" data-handle="ben" data-sign="${cfg.keys.sign.x}" data-box="${cfg.keys.box.x}"`));
   assert.match(app, /data-devices="\[&quot;primary&quot;\]"/);
   assert.doesNotMatch(page.text, new RegExp(cfg.token));
   const words = JSON.parse(page.text.match(/<script nonce="[^"]+" type="application\/json" id="folder-words">([^<]*)<\/script>/)[1]);
@@ -500,7 +582,7 @@ test('the group page: the folder section, its strict CSP, access for admins with
   assert.match(js.headers.get('content-type'), /^text\/javascript/);
   assert.match(js.headers.get('cache-control'), /immutable/);
   assert.equal(js.text, FOLDERS_JS);
-  assert.match((await pageOf(anna)).text, /Your bot doesn’t have access yet/);
+  assert.match((await pageOf(anna)).text, /Your bot has no folder access/);
 
   // In Czech, the script's words come in Czech too.
   db.prepare("UPDATE users SET lang = 'cs' WHERE email = 'ben@example.com'").run();
@@ -653,4 +735,161 @@ test('accepting applies only the reviewed change to the latest version, and text
   const m = await web.write({ fileId: f.file_id, path: 'data/big.csv', data: enc.encode(big + 'tail\n'), base: 1, baseData: enc.encode(big) });
   assert.equal(m.outcome, 'merged');
   assert.equal(await text(web, f.file_id, m.version), 'head\n' + big + 'tail\n');
+});
+
+// ───── Download all files: one zip, built in the browser ─────
+// A minimal reader, from the ZIP spec (APPNOTE 4.3): the end record, every central entry, and its local header must
+// agree, and each file's bytes must match its CRC-32 (checked with zlib's, not the writer's).
+function readZip(buf) {
+  const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength), e = buf.length - 22;
+  assert.equal(v.getUint32(e, true), 0x06054b50, 'end of central directory');
+  const count = v.getUint16(e + 10, true), cdSize = v.getUint32(e + 12, true), cdAt = v.getUint32(e + 16, true);
+  assert.equal(v.getUint16(e + 8, true), count);
+  assert.equal(cdAt + cdSize, e, 'the central directory ends where the end record starts');
+  const out = [];
+  let p = cdAt;
+  for (let i = 0; i < count; i++) {
+    assert.equal(v.getUint32(p, true), 0x02014b50, 'central entry');
+    const c = { flags: v.getUint16(p + 8, true), method: v.getUint16(p + 10, true), time: v.getUint16(p + 12, true), date: v.getUint16(p + 14, true), crc: v.getUint32(p + 16, true), csize: v.getUint32(p + 20, true), size: v.getUint32(p + 24, true) };
+    const nlen = v.getUint16(p + 28, true), xlen = v.getUint16(p + 30, true), clen = v.getUint16(p + 32, true), at = v.getUint32(p + 42, true);
+    const raw = buf.subarray(p + 46, p + 46 + nlen);
+    assert.equal(v.getUint32(at, true), 0x04034b50, 'local header');
+    assert.deepEqual([v.getUint16(at + 6, true), v.getUint16(at + 8, true), v.getUint16(at + 10, true), v.getUint16(at + 12, true), v.getUint32(at + 14, true), v.getUint32(at + 18, true), v.getUint32(at + 22, true)], [c.flags, c.method, c.time, c.date, c.crc, c.csize, c.size]);
+    const ln = v.getUint16(at + 26, true), lx = v.getUint16(at + 28, true);
+    assert.deepEqual(buf.subarray(at + 30, at + 30 + ln), raw);
+    const data = buf.subarray(at + 30 + ln + lx, at + 30 + ln + lx + c.csize);
+    assert.equal(zlib.crc32(data), c.crc, 'CRC-32');
+    out.push({ ...c, name: new TextDecoder('utf-8', { fatal: true }).decode(raw), data });
+    p += 46 + nlen + xlen + clen;
+  }
+  assert.equal(p, e);
+  return out;
+}
+const joinParts = (parts) => { const out = new Uint8Array(parts.reduce((n, x) => n + x.length, 0)); let at = 0; for (const x of parts) { out.set(x, at); at += x.length; } return out; };
+
+test('the zip writer: stored files, UTF-8 names with their folders, CRC-32, DOS times, safe names', () => {
+  const z = folderZip();
+  assert.equal(z.crc32(enc.encode('123456789')), 0xcbf43926);
+  assert.equal(z.crc32(new Uint8Array(0)), 0);
+  assert.equal(z.crc32(enc.encode('6789'), z.crc32(enc.encode('12345'))), 0xcbf43926, 'runs on');
+  const big = new Uint8Array(nc.randomBytes(70_000));
+  zlib.crc32(big) === z.crc32(big) || assert.fail('CRC-32 differs from zlib');
+  const when = new Date(2026, 10, 21, 14, 37, 58).getTime();
+  const files = readZip(joinParts(z.zip([
+    { name: 'notes/plán týmu.md', data: enc.encode('# Plán\n'), mtime: when },
+    { name: 'data/set.bin', data: big, mtime: 0 },
+    { name: 'empty.txt', data: new Uint8Array(0), mtime: when },
+    { name: '../../etc/../x/./y.txt', data: enc.encode('kept inside'), mtime: when },
+    { name: 'notes/plán týmu.md', data: enc.encode('a twin'), mtime: when },
+  ])));
+  assert.deepEqual(files.map((f) => f.name), ['notes/plán týmu.md', 'data/set.bin', 'empty.txt', 'etc/x/y.txt']);
+  for (const f of files) { assert.equal(f.method, 0, 'stored'); assert.equal(f.flags & 0x0800, 0x0800, 'UTF-8 names'); assert.equal(f.csize, f.size); }
+  assert.equal(new TextDecoder().decode(files[0].data), '# Plán\n');
+  assert.deepEqual(files[1].data, big);
+  assert.equal(files[2].data.length, 0);
+  const t0 = files[0];
+  assert.deepEqual([(t0.date >> 9) + 1980, (t0.date >> 5) & 15, t0.date & 31, t0.time >> 11, (t0.time >> 5) & 63, (t0.time & 31) * 2], [2026, 11, 21, 14, 37, 58]);
+  assert.equal((files[1].date >> 9) + 1980, 1980, 'before 1980 clamps to 1980');
+  // An empty folder is still a valid (empty) zip.
+  assert.deepEqual(readZip(joinParts(z.zip([]))), []);
+  // The file name, from the group's name.
+  assert.equal(z.fileName('Acme launch'), 'Acme launch');
+  assert.equal(z.fileName('a/b:c*?"<>|\\d'), 'a b c d');
+  assert.equal(z.fileName('...'), 'Shared folder');
+  assert.equal(z.fileName('  '), 'Shared folder');
+});
+
+test('download all: the current files, decrypted and checked like one download, as one zip', async (t) => {
+  const ben = await identity('ben', ['web-chrome']), anna = await identity('anna');
+  const relay = fakeRelay(5, [ben, anna]);
+  await new Promise((ok) => relay.server.listen(0, '127.0.0.1', ok));
+  t.after(() => relay.server.close());
+  const url = `http://127.0.0.1:${relay.server.address().port}`;
+  const web = clientFor(url, 5, ben, 'web-chrome'), other = clientFor(url, 5, anna);
+  await web.refresh(); await other.refresh();
+  const plan = await other.write({ path: 'notes/plán.md', data: enc.encode('first\n') });
+  await other.write({ fileId: plan.file_id, path: 'notes/plán.md', data: enc.encode('second\n'), base: 1, baseData: enc.encode('first\n') });
+  const big = new Uint8Array(nc.randomBytes(core.CHUNK + 99));
+  await other.write({ path: 'data/set.bin', data: big });
+  const gone = await other.write({ path: 'old.txt', data: enc.encode('deleted') });
+  await other.remove(gone.file_id);
+  await web.sync();
+
+  // What the page does: the live files (no deletions, no history), each loaded and checked, then zipped.
+  const live = web.live().sort((a, b) => a.manifest.path.localeCompare(b.manifest.path));
+  assert.deepEqual(live.map((f) => f.manifest.path), ['data/set.bin', 'notes/plán.md']);
+  const entries = [];
+  for (const f of live) { const r = await web.load(f.file_id, f.version); entries.push({ name: f.manifest.path, data: r.data, mtime: f.manifest.mtime }); }
+  const files = readZip(joinParts(folderZip().zip(entries)));
+  assert.deepEqual(files.map((f) => f.name), ['data/set.bin', 'notes/plán.md']);
+  assert.deepEqual(files[0].data, big);
+  assert.equal(new TextDecoder().decode(files[1].data), 'second\n', 'the newest version only');
+
+  // Tampered ciphertext never makes it in: the load throws, as for a single download.
+  const row = relay.rows.find((r) => r.file_id === plan.file_id && r.version === 2);
+  const key = `${row.upload_id}/0`, good = relay.objects.get(key), bad = Buffer.from(good); bad[5] ^= 1;
+  relay.objects.set(key, bad);
+  await assert.rejects(web.load(plan.file_id, 2));
+  relay.objects.set(key, good);
+});
+
+test('ending a group with a shared folder: its admin can download every file first, and ending never waits for it', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'b2b-folder-end-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = await setup(t, { dbPath: join(dir, 'relay.db'), autoTick: false });
+  const ben = await owner(env, t, 'ben@example.com', 'ben');
+  const anna = await owner(env, t, 'anna@example.com', 'anna');
+  await connect(ben, anna, 'Ben');
+  const group = Number((await ben.cli('group', 'new', 'Acme launch', 'anna')).match(/number (\d+)/)[1]);
+  const db = env.relay.db;
+  env.relay.groups.join(db.prepare('SELECT * FROM bots WHERE id=?').get(anna.botId), group, { byOwner: true });
+  const pageOf = (who) => who.b(`/app/groups/${group}?bot=${who.botId}`);
+  const endRow = (html) => html.match(/<div class="setrow gend">[^]*?<\/form><\/div><\/div>/)?.[0] ?? '';
+  const sync = (who) => who.cli('folder', 'sync', String(group), '--once');
+
+  // No folder yet: ending looks as it always did.
+  let row = endRow((await pageOf(ben)).text);
+  assert.match(row, /End the group[^]*Everyone is out and it closes for good\./);
+  assert.doesNotMatch(row, /data-folder-zip|deletes its copy/);
+
+  // A folder, but no files in it yet: nothing to download.
+  await ben.cli('folder', 'on', String(group));
+  await ben.cli('folder', 'grant', String(group), '@ben', 'write');
+  await ben.cli('folder', 'grant', String(group), '@anna', 'write');
+  await sync(ben);
+  assert.doesNotMatch(endRow((await pageOf(ben)).text), /data-folder-zip|deletes its copy/);
+
+  // Files: the admin is offered Download all files first, with one line about what happens to them.
+  writeFileSync(join(ben.home, 'shared', 'Acme launch', 'plan.md'), '# Plan\n');
+  await sync(ben);
+  let page = await pageOf(ben);
+  row = endRow(page.text);
+  assert.match(row, /bot2bot deletes its copy of the shared folder\. Everyone keeps the files already on their computer\.[^]*<button type="button" class="btn small ghost fzip" data-folder-zip><svg[^]*<span class="fzip__label">Download all files<\/span><\/button><form method="post" action="\/app\/groups\/\d+\/end" class="cm"/);
+  assert.match(page.text, /id="folder-app" data-group="\d+"[^>]* data-name="Acme launch"/);
+  // The button only shows once the folder script says this browser can build the zip.
+  assert.match(page.text, /html:not\(\[data-fzip\]\) \.fzip\{display:none\}/);
+  assert.match(FOLDERS_JS, /dataset\.fzip = ''/);
+  // Not for members who can't end the group.
+  page = await pageOf(anna);
+  assert.doesNotMatch(page.text, /data-folder-zip|setrow gend/);
+
+  // An admin whose bot has no access to the folder hears what happens, but can't download it here.
+  db.prepare('UPDATE group_members SET role = ? WHERE group_id = ? AND bot_id = ?').run('admin', group, anna.botId);
+  await ben.cli('folder', 'revoke', String(group), '@anna');
+  row = endRow((await pageOf(anna)).text);
+  assert.match(row, /deletes its copy/);
+  assert.doesNotMatch(row, /data-folder-zip/);
+
+  // In Czech too.
+  db.prepare("UPDATE users SET lang = 'cs' WHERE email = 'ben@example.com'").run();
+  row = endRow((await pageOf(ben)).text);
+  assert.match(row, /bot2bot smaže svou kopii sdílené složky\. Každému zůstanou soubory, které už má v počítači\.[^]*Stáhnout všechny soubory/);
+
+  // Ending without downloading works as before, and the relay's encrypted copy goes with it.
+  assert.ok(db.prepare('SELECT count(*) n FROM team_folder_revisions WHERE group_id = ?').get(group).n > 0);
+  const ended = await ben.b(`/app/groups/${group}/end`, { method: 'POST', form: { bot: ben.botId } });
+  assert.equal(ended.status, 303);
+  assert.ok(db.prepare('SELECT ended_at FROM chat_groups WHERE id = ?').get(group).ended_at);
+  assert.equal(db.prepare('SELECT count(*) n FROM team_folder_revisions WHERE group_id = ?').get(group).n, 0);
+  assert.equal(db.prepare('SELECT count(*) n FROM team_folder_groups WHERE group_id = ?').get(group).n, 0);
 });

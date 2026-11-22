@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { presign } from './files.mjs';
 
 export const folderChunkBytes = 4 * 1024 ** 2;
-export const folderMaxFileBytes = 100 * 1024 ** 2;
+export const folderMaxFileBytes = 200 * 1024 ** 2;
 export const folderQuotaBytes = 10 * 1024 ** 3;
 export const folderKeepMs = 30 * 86400_000;
 const sizeOf = (size, i) => Math.min(folderChunkBytes, size - i * folderChunkBytes) + 16;

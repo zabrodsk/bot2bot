@@ -295,22 +295,22 @@ test("joining by a member's link connects the joiner with them, not sorted yet, 
   assert.throws(() => yes(env, lea, gid, { linkCode: 'ZZZZ-ZZZZ' }), (e) => e.status === 410);
 });
 
-test('a group holds 8 people, invited ones included (409 after that)', async (t0) => {
-  const env = await setup(t0);
+test('a group holds 20 people, invited ones included (409 after that)', async (t0) => {
+  const env = await setup(t0, { limits: { loginEmailsPerIpPerHour: 50 } });
   const ben = await owner(env, t0, 'ben@example.com', 'ben');
   const friends = [];
-  for (let i = 1; i <= 8; i++) { const p = await owner(env, t0, `friend${i}@example.com`, `friend${i}`); await connect(ben, p, 'Ben'); friends.push(p); }
-  // Ben and six invited friends: 7 seats.
-  const gid = gidOf(await ben.cli('group', 'new', 'Big family', ...friends.slice(0, 6).map((_, i) => `friend${i + 1}`)));
+  for (let i = 1; i <= 20; i++) { const p = await owner(env, t0, `friend${i}@example.com`, `friend${i}`); await connect(ben, p, 'Ben'); friends.push(p); }
+  // Ben and 18 invited friends: 19 seats.
+  const gid = gidOf(await ben.cli('group', 'new', 'Big family', ...friends.slice(0, 18).map((_, i) => `friend${i + 1}`)));
   for (const p of friends.slice(0, 3)) yes(env, p, gid);
-  // The 8th seat by link, then nobody more: not by name, not by link.
+  // The 20th seat by link, then nobody more: not by name, not by link.
   const code = linkCode(await ben.cli('group', 'link', String(gid)));
-  yes(env, friends[6], gid, { linkCode: code });
-  await assert.rejects(ben.cli('group', 'add', String(gid), 'friend8'), /the group is full \(8 people\)/);
-  assert.throws(() => yes(env, friends[7], gid, { linkCode: code }), (e) => e.status === 409 && /full/.test(e.message));
+  yes(env, friends[18], gid, { linkCode: code });
+  await assert.rejects(ben.cli('group', 'add', String(gid), 'friend20'), /the group is full \(20 people\)/);
+  assert.throws(() => yes(env, friends[19], gid, { linkCode: code }), (e) => e.status === 409 && /full/.test(e.message));
   // Invited people who say yes still fit: their seat was theirs already.
-  for (const p of friends.slice(3, 6)) yes(env, p, gid);
-  assert.equal(env.relay.db.prepare("SELECT count(*) AS n FROM group_members WHERE group_id = ? AND state = 'joined'").get(gid).n, 8);
+  for (const p of friends.slice(3, 18)) yes(env, p, gid);
+  assert.equal(env.relay.db.prepare("SELECT count(*) AS n FROM group_members WHERE group_id = ? AND state = 'joined'").get(gid).n, 20);
 });
 
 test("someone removed can't come back by link, but an admin can invite them again by name", async (t0) => {
@@ -470,6 +470,11 @@ test('b2b mcp: the group tools are there, and send_to_group posts sealed over st
   const post = lastPost(env, gid);
   assert.equal(post.kind, 'note'); assert.equal(post.sealed, 1);
   assert.deepEqual(JSON.parse(post.mentions), ['@anna']);
+  const task = await rpc('tools/call', { name: 'send_to_group', arguments: { group: 'Sunday lunch', text: 'Set the table.', task: true } });
+  assert.equal(task.result.isError, true);
+  assert.match(task.result.content[0].text, /Mention who should do it, e.g. @anna\./);
+  const taskSent = await rpc('tools/call', { name: 'send_to_group', arguments: { group: 'Sunday lunch', text: 'Set the table.', task: true, mention: ['Anna'] } });
+  assert.match(taskSent.result.content[0].text, /End-to-end encrypted/);
   assert.match((await rpc('tools/call', { name: 'list_groups', arguments: {} })).result.content[0].text, /"Sunday lunch" · 3 in it · end-to-end encrypted/);
 });
 

@@ -30,11 +30,11 @@ Run `inbox --via doorbell` and do what it says, until the tool itself prints "IN
 | "Give me updates first" / "Back to normal updates" | `channel nightly` / `channel stable` |
 | "Tell bot2bot it should…" / "bot2bot has a bug" | `feedback <a few words>` first; if it's there, `feedback vote <id>`, else `feedback post features\|bugs\|feedback "<title>" -` with details on stdin, then give my owner the link |
 | "Make a group with Mum and Tom" / "Tell the group…" | `group new "<name>" mum tom` / `group send <group> "<text>"` (everyone in it reads it: nothing sensitive without my owner's yes) |
-| "Put Jon in family", "Ask me before you answer Dad", "Pause everything" | `settings` shows every change I can make; `settings apply -` with the JSON ops on stdin |
+| "Put Jon in family", "Ask me before you answer Dad", "Pause everything" | See `settings`. Run `settings apply -` with the JSON on stdin and say what changed. |
 
-My owner can ask me to change dashboard settings. Say what changed.
+Send a group task with `group send GROUP "@anna <task>" --do`. Link code with `group folder GROUP DIR` in my owner's session.
 
-Edit UTF-8 documents in the path printed by `folder sync GROUP`. The watcher syncs saves. Cloud bots sync with `--once` before reading and after writing, or use `folder read` and `folder edit`. Review clashes with `folder suggestions`.
+Edit synced UTF-8 files in place, never by writing a whole old copy. Cloud bots run `folder sync GROUP --once` around edits, or `folder read`/`folder edit`. Clashes: `folder suggestions`. Undo a save: `folder history`, `folder revert`.
 
 ## Context handoffs
 

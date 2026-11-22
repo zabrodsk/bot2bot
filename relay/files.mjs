@@ -16,6 +16,8 @@ export const FILE_LIMITS = {
   fileMaxFree: 10 * MB,      // one file on the free plan (what the owner picked, before encryption)
   filesPerDayFree: 10,       // files a person's bots can send in a UTC day on the free plan
   fileMaxPaid: 50 * MB,
+  fileMaxInfinite: 200 * MB, // the Infinite plan (family and friends)
+  bigFileMinTool: '0.31.1',  // the first tool that opens files over 50 MB (older ones drop them)
   filesPerDayPaid: 100,
   filesPerMessage: 5,
   fileOverhead: 64,          // encryption adds a few bytes to each file
@@ -93,12 +95,13 @@ export function createFiles({ q, clock, L, HttpError, log, hosted, coverage, new
     // The limited-time deal lifts the free plan's file size until it ends.
     const ends = promoEnd || L.filePromoUntil;
     const promoUntil = free && ends > t ? ends : null;
-    const maxBytes = free ? (promoUntil ? Math.max(L.fileMaxFree, L.fileMaxPromo) : L.fileMaxFree) : L.fileMaxPaid;
+    const usualBytes = free ? L.fileMaxFree : state === 'infinite' ? L.fileMaxInfinite : L.fileMaxPaid;
+    const maxBytes = promoUntil ? Math.max(usualBytes, L.fileMaxPromo) : usualBytes;
     const perDay = free ? L.filesPerDayFree : L.filesPerDayPaid;
     const d = new Date(t);
     const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
     const used = user ? q('SELECT count(*) AS n FROM files WHERE user_id = ? AND created_at >= ?').get(user.id, start).n : 0;
-    return { free, maxBytes, usualBytes: free ? L.fileMaxFree : L.fileMaxPaid, promoUntil, perDay, used, left: Math.max(0, perDay - used) };
+    return { free, maxBytes, usualBytes, promoUntil, perDay, used, left: Math.max(0, perDay - used) };
   }
   const METHOD = { put: 'PUT', get: 'GET', del: 'DELETE' };
   const link = (op, id, size = null) => {
@@ -130,8 +133,10 @@ export function createFiles({ q, clock, L, HttpError, log, hosted, coverage, new
       for (const ref of refs) {
         const p = checkChat(me, recipient, refs.length - out.length);
         // A file the chat wrote out arrives as bytes already; the rest are fetched from the chat app's (or a public) link.
-        const plain = ref.plain ?? await downloadChat(ref.download_url, p.maxBytes);
-        if (plain.length > p.maxBytes) throw new HttpError(413, 'the file is bigger than your file size limit');
+        // Chat files pass through this process's memory, so they stay at the paid size even on bigger plans.
+        const max = Math.min(p.maxBytes, L.fileMaxPaid);
+        const plain = ref.plain ?? await downloadChat(ref.download_url, max);
+        if (plain.length > max) throw new HttpError(413, 'the file is bigger than your file size limit');
         const key = randomBytes(32), iv = randomBytes(12);
         const c = createCipheriv('aes-256-gcm', key, iv);
         const blob = Buffer.concat([c.update(plain), c.final(), c.getAuthTag()]);
@@ -169,13 +174,21 @@ export function createFiles({ q, clock, L, HttpError, log, hosted, coverage, new
     if (!sealed && !isChat(me)) throw new HttpError(400, 'files only go in end-to-end encrypted messages');
     const list = [...new Set(ids.map(String))];
     if (list.length > L.filesPerMessage) throw new HttpError(413, `at most ${L.filesPerMessage} files in one message`);
+    let big = false;
     for (const id of list) {
       const f = FILE_ID_RE.test(id) ? q('SELECT * FROM files WHERE id = ?').get(id) : null;
       if (!f || f.bot_id !== me.id || f.deleted_at || f.expires_at <= clock()) throw new HttpError(400, `${id.slice(0, 48)} isn't a file this bot uploaded (or it expired)`);
       if (!sealed && !f.chat_meta) throw new HttpError(400, 'this is not a chat attachment');
+      if (f.size > L.fileMaxPaid + L.fileOverhead) big = true;
     }
     for (const r of recipientBots) {
       const why = whyNot(r, me.id); if (why) throw new HttpError(403, why);
+      // Tools before bigFileMinTool drop files over 50 MB, so the recipient updates first.
+      const b = big && q('SELECT handle, tool_version FROM bots WHERE id = ?').get(r);
+      if (b && (!b.tool_version || newerVersion(L.bigFileMinTool, b.tool_version))) {
+        needTool(r, L.bigFileMinTool, { waiter: me.id, what: 'files' });
+        throw new HttpError(403, `@${b.handle}'s bot needs a newer bot2bot tool before it can open files over 50 MB. bot2bot just asked it to update, and your bot hears as soon as it has`);
+      }
       if (!sealed) checkChat(me, q('SELECT * FROM bots WHERE id = ?').get(r), 0);
     }
     return list;

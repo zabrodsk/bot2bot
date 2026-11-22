@@ -157,10 +157,17 @@ test("a group's shared folder: admins turn it on and pick who reads or writes, w
 
   const on = await go(ben.b, `/app/groups/${gid}/folder`, { bot: ben.botId, on: '1' });
   assert.match(on, /class="toast__what">Shared folder on<[^]*toast__undo">Undo</);
-  assert.match(on, new RegExp(`id="fperm-${anna.botId}">Anna<[^]*aria-pressed="true">No access<`));
+  assert.match(on, new RegExp(`id="fperm-${anna.botId}">Anna<[^]*aria-pressed="true">Read and write<`));
+  // All three joined bots can write as soon as the folder opens.
+  assert.match(on, /data-gtab="folder" data-also="folder-access"[^>]*><span>Shared folder<\/span><span class="gtabs__dot"/);
+  assert.match(on, /<details class="fold" id="folder-access"><summary>[^]*Manage access[^]*3 can write[^]*Who can open it/);
 
   const granted = await go(ben.b, `/app/groups/${gid}/folder-access`, { bot: ben.botId, member: anna.botId, role: 'read' });
-  assert.match(granted, /class="toast__what">Anna can read the folder<[^]*name="role" value="remove"[^]*toast__undo">Undo</);
+  // The redirect opens the access settings again.
+  assert.match(granted, /<details class="fold" id="folder-access"><summary>[^]*Manage access[^]*class="fold__sub">2 can write · 1 read-only</);
+  const again = await ben.b(`/app/groups/${gid}/folder-access`, { method: 'POST', form: { bot: ben.botId, member: anna.botId, role: 'read' } });
+  assert.equal(again.location, `/app/groups/${gid}?bot=${ben.botId}#folder-access`);
+  assert.match(granted, /class="toast__what">Anna can read the folder<[^]*name="role" value="write"[^]*toast__undo">Undo</);
   assert.match(granted, new RegExp(`id="fperm-${anna.botId}">Anna<[^]*aria-pressed="true">Read<`));
   assert.equal(env.relay.db.prepare('SELECT role FROM team_folder_members WHERE group_id = ? AND bot_id = ?').get(gid, Number(anna.botId)).role, 'read');
   // Her bot can open the folder now, and her page opens it (no access controls: she isn't an admin).

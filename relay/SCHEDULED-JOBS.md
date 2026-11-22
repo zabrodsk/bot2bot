@@ -34,7 +34,7 @@ Use a separate private-mode identity such as `@server-jobs`. Do not convert the 
    b2b group bind 12
    ```
 
-The group has at most eight members, including invited members and the service sender. Setup adds no seat and joins nobody. It requires an already joined identity whose only group was created by the same owner. This version scopes the identity to that one group. All jobs on this machine use it.
+The group has at most 20 members, including invited members and the service sender. Setup adds no seat and joins nobody. It requires an already joined identity whose only group was created by the same owner. This version scopes the identity to that one group. All jobs on this machine use it.
 
 Only an attended owner session can run setup. It removes the identity's doorbell, revokes connected-app tokens and invite links, mutes its membership and erases its inbox. The relay refuses direct messages to it and makes no receiving copies of later group posts or notices. A service token can fetch its own group's member-key manifest and post sealed copies there. Setup can be repeated for that same group to update the local triage member, and cannot add a destination. It cannot read history, claim an inbox, watch, invite, join another group, change settings or set a doorbell. The owner can still remove or disconnect it on the dashboard.
 

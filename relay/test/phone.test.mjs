@@ -508,4 +508,21 @@ console.log(JSON.stringify({ type: 'result', session_id: 'project-claude-session
   assert.match(await sender.cli('status', expired), /left it waiting/);
   assert.match((await cli('project', 'load', 'acme-leads')).out, /Rewrite the scoring tests/);
   assert.equal(readFileSync(runs, 'utf8').trim().split('\n').length, 1);
+
+  const group = (await cli('group', 'new', 'Importer', 'anna')).out.match(/\(number (\d+)\)/)[1];
+  env.relay.groups.join(env.relay.db.prepare('SELECT * FROM bots WHERE id = ?').get(Number(sender.botId)), Number(group), { byOwner: true });
+  await cli('group', 'folder', group, project);
+  const post = (await sender.cli('group', 'send', group, '@cara Check the group importer.', '--do')).match(/Sent (gp_[\w-]+)/)[1];
+  const { id } = env.relay.db.prepare('SELECT id FROM messages WHERE group_post = ? AND to_bot = ?').get(post, Number(cara.botId));
+  await phone.waitFor(() => !!phone.button('Approve once') && /Check the group importer/.test(phone.text()));
+  assert.match(phone.text(), /anna wants Claude Code to run a task in the group "Importer"/);
+  assert.equal(row(id).state, 'approving');
+  assert.equal(readFileSync(runs, 'utf8').trim().split('\n').length, 1);
+  await phone.button('Approve once').click();
+  await phone.passUndo();
+  await waitFor(() => row(id)?.state === 'done', 15_000);
+  const groupRun = readFileSync(runs, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+  assert.equal(groupRun.cwd, realpathSync(project));
+  assert.ok(groupRun.args.includes('--continue'));
+  assert.match(await sender.cli('group', 'read', group), /reply to gp_[\w-]+[^]*The test task is done/);
 });

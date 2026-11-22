@@ -23,6 +23,10 @@ export function migrateTeamFolders(db) {
       role TEXT NOT NULL CHECK(role IN ('read','write')), UNIQUE(group_id,bot_id),
       FOREIGN KEY(group_id,bot_id) REFERENCES group_members(group_id,bot_id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS team_folder_denied (
+      group_id INTEGER NOT NULL, bot_id INTEGER NOT NULL, PRIMARY KEY(group_id,bot_id),
+      FOREIGN KEY(group_id,bot_id) REFERENCES group_members(group_id,bot_id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS team_folder_groups (
       group_id INTEGER PRIMARY KEY REFERENCES chat_groups(id) ON DELETE CASCADE, enabled_at INTEGER NOT NULL
     );
@@ -83,13 +87,16 @@ export function migrateTeamFolders(db) {
     CREATE TRIGGER IF NOT EXISTS folder_collect AFTER DELETE ON folder_uploads BEGIN
       INSERT OR IGNORE INTO folder_garbage VALUES(OLD.id, OLD.group_id, OLD.chunks, OLD.expires, OLD.size);
     END;
-    CREATE TRIGGER IF NOT EXISTS team_folder_leave AFTER UPDATE OF state ON group_members
+    DROP TRIGGER IF EXISTS team_folder_leave;
+    CREATE TRIGGER team_folder_leave AFTER UPDATE OF state ON group_members
       WHEN NEW.state <> 'joined' BEGIN
+        DELETE FROM team_folder_denied WHERE group_id=NEW.group_id AND bot_id=NEW.bot_id;
         DELETE FROM team_folder_members WHERE group_id=NEW.group_id AND bot_id=NEW.bot_id;
       END;
     DROP TRIGGER IF EXISTS team_folder_end;
     CREATE TRIGGER team_folder_end AFTER UPDATE OF ended_at ON chat_groups
       WHEN NEW.ended_at IS NOT NULL BEGIN
+        DELETE FROM team_folder_denied WHERE group_id=NEW.id;
         DELETE FROM team_folder_members WHERE group_id=NEW.id;
         DELETE FROM team_folder_revisions WHERE group_id=NEW.id;
         DELETE FROM folder_suggestions WHERE group_id=NEW.id;
@@ -100,6 +107,8 @@ export function migrateTeamFolders(db) {
         DELETE FROM team_folder_groups WHERE group_id=NEW.id;
       END;
   `);
+  if (!db.prepare('PRAGMA table_info(team_folder_members)').all().some((c) => c.name === 'write_epoch'))
+    db.exec('ALTER TABLE team_folder_members ADD COLUMN write_epoch TEXT');
   for (const table of ['team_folder_copies', 'folder_suggestion_copies']) {
     if (
       !db
@@ -152,10 +161,17 @@ export function createTeamFolders({
   };
   const root = '/v1/team-folders/:group';
   const enabled = (group) => !!q('SELECT 1 FROM team_folder_groups WHERE group_id=?').get(group);
+  function autoGrant(group) {
+    q(`INSERT INTO team_folder_members(grant_id,group_id,bot_id,role) SELECT lower(hex(randomblob(16))),gm.group_id,gm.bot_id,'write'
+      FROM group_members gm JOIN team_folder_groups USING(group_id) ${active}
+      AND NOT EXISTS (SELECT 1 FROM team_folder_members m WHERE m.group_id=gm.group_id AND m.bot_id=gm.bot_id)
+      AND NOT EXISTS (SELECT 1 FROM team_folder_denied d WHERE d.group_id=gm.group_id AND d.bot_id=gm.bot_id)`).run(group);
+  }
   function access(me, group) {
     alphaOnly(me);
     if (!enabled(group)) fail(404, 'this group has no shared folder');
-    const members = q(`SELECT m.grant_id, m.role, b.id, b.handle, b.box_pub AS box, b.sign_pub AS sign
+    autoGrant(group);
+    const members = q(`SELECT m.grant_id, m.role, m.write_epoch, b.id, b.handle, b.box_pub AS box, b.sign_pub AS sign
       FROM group_members gm JOIN team_folder_members m ON m.group_id=gm.group_id AND m.bot_id=gm.bot_id
       ${sealable} ORDER BY b.id`).all(group);
     const own = members.find((m) => m.id === me.id);
@@ -179,7 +195,7 @@ export function createTeamFolders({
       'SELECT 1 FROM contacts WHERE blocked=1 AND ((owner_bot=? AND peer_bot=?) OR (owner_bot=? AND peer_bot=?))',
     ).get(a, b, b, a);
   function rows(group, { own, device }, filter, ...values) {
-    return q(`SELECT r.file_id,r.version,coalesce(c.available_seq,r.seq) AS seq,r.author,r.author_device,r.sign_key,r.created_at,c.envelope,c.backfill,
+    return q(`SELECT r.file_id,r.version,coalesce(c.available_seq,r.seq) AS seq,r.author_id,r.author,r.author_device,r.sign_key,r.created_at,c.envelope,c.backfill,
       b.sign_pub AS root_sign,b.box_pub AS root_box,d.manifest AS device_list,r.upload_id,
       coalesce(u.size,0) AS size,coalesce(u.chunks,0) AS chunks
       FROM team_folder_revisions r JOIN team_folder_copies c USING(group_id,file_id,version)
@@ -281,7 +297,7 @@ export function createTeamFolders({
     };
   }
   function suggestions(group, a, filter, ...args) {
-    return q(`SELECT s.proposal_id,s.file_id,s.base,s.observed,s.logical_edit_id,s.state,s.author,s.author_device,s.sign_key,
+    return q(`SELECT s.proposal_id,s.file_id,s.base,s.observed,s.logical_edit_id,s.state,s.author_id,s.author,s.author_device,s.sign_key,
       s.created_at,s.resolved_at,s.resolved_version,max(s.seq,coalesce(c.available_seq,0)) AS seq,c.envelope,c.backfill,b.sign_pub AS root_sign,b.box_pub AS root_box,d.manifest AS device_list
       FROM folder_suggestions s JOIN folder_suggestion_copies c USING(proposal_id)
       JOIN bots b ON b.id=s.author_id LEFT JOIN device_rosters d ON d.bot_id=b.id
@@ -359,17 +375,20 @@ export function createTeamFolders({
     if (!enabled(group)) fail(400, 'turn the shared folder on for this group first');
     const name = handle.replace(/^@/, '').toLowerCase();
     if (role === 'remove') {
-      const gone = q(
-        'DELETE FROM team_folder_members WHERE group_id=? AND bot_id=(SELECT id FROM bots WHERE handle=?)',
-      ).run(group, name).changes;
-      if (!gone) fail(404, `@${name} has no access to this folder`);
+      const member = q("SELECT gm.bot_id FROM group_members gm JOIN bots b ON gm.bot_id=b.id WHERE gm.group_id=? AND gm.state='joined' AND b.handle=?").get(group, name);
+      if (!member) fail(404, 'choose a joined member');
+      q('INSERT OR IGNORE INTO team_folder_denied VALUES(?,?)').run(group, member.bot_id);
+      q('DELETE FROM team_folder_members WHERE group_id=? AND bot_id=?').run(group, member.bot_id);
     } else {
       const bot = q(`SELECT b.id FROM group_members gm ${active} AND b.handle=?`).get(group, name);
       const member = !bot && q(`SELECT b.user_id FROM group_members gm ${sealable} AND b.handle=?`).get(group, name);
       if (member && !infinite(member)) fail(400, `@${name} isn't on an Infinite account; ${ALPHA}`);
       if (!bot) fail(400, 'choose an active joined private-mode bot with files enabled');
+      q('DELETE FROM team_folder_denied WHERE group_id=? AND bot_id=?').run(group, bot.id);
       q(
-        `INSERT INTO team_folder_members VALUES (?,?,?,?) ON CONFLICT(group_id,bot_id) DO UPDATE SET role=excluded.role`,
+        `INSERT INTO team_folder_members(grant_id,group_id,bot_id,role) VALUES (?,?,?,?)
+         ON CONFLICT(group_id,bot_id) DO UPDATE SET role=excluded.role,
+         write_epoch=CASE WHEN role='read' AND excluded.role='write' THEN excluded.grant_id ELSE write_epoch END`,
       ).run(randomUUID(), group, bot.id, role);
     }
     return { group, handle: name, role };
@@ -383,6 +402,7 @@ export function createTeamFolders({
   const routes = {
     'GET /v1/team-folders': ({ me }) => {
       alphaOnly(me);
+      for (const { group_id } of q("SELECT group_id FROM group_members JOIN team_folder_groups USING(group_id) WHERE bot_id=? AND state='joined'").all(me.id)) autoGrant(group_id);
       return {
         groups: q(`SELECT gm.group_id FROM group_members gm JOIN team_folder_members m USING(group_id,bot_id)
         JOIN team_folder_groups enabled USING(group_id) JOIN bots b ON b.id=gm.bot_id JOIN chat_groups g ON g.id=gm.group_id
@@ -403,6 +423,7 @@ export function createTeamFolders({
           if (!q('SELECT 1 FROM chat_groups WHERE id=? AND ended_at IS NULL').get(group)) fail(404, 'group not found');
           q('INSERT OR IGNORE INTO team_folder_groups VALUES (?,?)').run(group, clock());
         }
+        if (on) autoGrant(group);
         return { group, on };
       }),
     'POST /admin/team-folder/member': ({ admin, body }) =>
@@ -418,6 +439,7 @@ export function createTeamFolders({
         if (typeof body?.on !== 'boolean') fail(400, 'provide on (true or false)');
         if (body.on) q('INSERT OR IGNORE INTO team_folder_groups VALUES (?,?)').run(group, clock());
         else q('DELETE FROM team_folder_groups WHERE group_id=?').run(group);
+        if (body.on) autoGrant(group);
         return { group, on: body.on, alpha: true };
       }),
     [`POST ${root}/members`]: ({ me, params, body }) =>
@@ -433,6 +455,7 @@ export function createTeamFolders({
       return {
         alpha: true,
         role: own.role,
+        write_epoch: own.write_epoch,
         roster,
         recipients,
         quota: quota(group),
@@ -483,35 +506,40 @@ export function createTeamFolders({
     },
     [`GET ${root}/backfill`]: ({ me, params: { group } }) => {
       const a = access(me, group);
-      const own = a.recipients.filter((d) => d.handle === me.handle && d.device !== a.device.device);
-      if (!own.length) return { items: [] };
+      const members = new Map(a.members.map((m) => [m.handle, m]));
+      const targets = a.recipients.filter((d) => d !== a.device && !blocked(me.id, members.get(d.handle).id));
+      const missingDevices = (devices) => {
+        const others = devices.filter((d) => d.handle !== me.handle).map(({ handle, device }) => ({ handle, device }));
+        return { missing: devices.filter((d) => d.handle === me.handle).map((d) => d.device), ...(others.length && { missing_members: others }) };
+      };
+      if (!targets.length) return { items: [] };
       const items = [];
       for (const r of rows(
         group,
         a,
         'r.upload_id IS NOT NULL AND r.version=(SELECT max(h.version) FROM team_folder_revisions h WHERE h.group_id=r.group_id AND h.file_id=r.file_id)',
       )) {
-        const missing = own.filter(
-          (d) =>
+        const missing = targets.filter(
+          (d) => !blocked(members.get(d.handle).id, r.author_id) &&
             !q(
               'SELECT 1 FROM team_folder_copies WHERE group_id=? AND file_id=? AND version=? AND grant_id=? AND device=? AND recipient_key=?',
-            ).get(group, r.file_id, r.version, a.own.grant_id, d.device, d.box),
+            ).get(group, r.file_id, r.version, members.get(d.handle).grant_id, d.device, d.box),
         );
         if (missing.length)
-          items.push({ file_id: r.file_id, version: r.version, missing: missing.map((d) => d.device) });
+          items.push({ file_id: r.file_id, version: r.version, ...missingDevices(missing) });
       }
       for (const s of suggestions(group, a, "s.state='pending'")) {
-        const missing = own.filter(
-          (d) =>
+        const missing = targets.filter(
+          (d) => !blocked(members.get(d.handle).id, s.author_id) &&
             !q('SELECT 1 FROM folder_suggestion_copies WHERE proposal_id=? AND grant_id=? AND device=? AND box=?').get(
               s.proposal_id,
-              a.own.grant_id,
+              members.get(d.handle).grant_id,
               d.device,
               d.box,
             ),
         );
         if (missing.length)
-          items.push({ file_id: s.file_id, proposal_id: s.proposal_id, missing: missing.map((d) => d.device) });
+          items.push({ file_id: s.file_id, proposal_id: s.proposal_id, ...missingDevices(missing) });
       }
       return { items };
     },
@@ -519,9 +547,10 @@ export function createTeamFolders({
       tx(() => {
         const a = access(me, group);
         const target = a.recipients.find(
-          (d) => d.handle === me.handle && d.device === body?.device && d.device !== a.device.device,
+          (d) => d.handle === (body?.handle ?? me.handle) && d.device === body?.device && d !== a.device,
         );
-        if (!target) fail(403, 'choose one of your other current devices');
+        const member = target && a.members.find((m) => m.handle === target.handle);
+        if (!member || blocked(me.id, member.id)) fail(403, 'choose a current folder device');
         if (body.roster !== a.roster) fail(409, 'refresh the folder roster');
         const { file_id: file, version, proposal_id: id, envelope } = body;
         if (
@@ -533,13 +562,14 @@ export function createTeamFolders({
           fail(400, 'invalid backfill target');
         if (id) {
           const s = visibleSuggestion(group, a, id);
+          if (blocked(s.author_id, member.id)) fail(403, 'a team member is blocked');
           if (s.file_id !== file || s.state !== 'pending') fail(409, 'suggestion changed');
         } else {
           const r = head(group, file, a);
+          if (r && blocked(r.author_id, member.id)) fail(403, 'a team member is blocked');
           if (r?.version !== version || r.deleted) fail(409, 'document changed');
         }
         const manifest = linkedDevices.roster(me.id);
-        if (!manifest) fail(403, 'a signed device list is required');
         const kind = id
           ? 'team-suggestion/1/' + group + '/' + file + '/' + id
           : 'team-folder/2/' + group + '/' + file + '/' + version;
@@ -556,7 +586,7 @@ export function createTeamFolders({
           )
         )
           fail(400, 'invalid backfill signature');
-        const other = { ...a, device: target };
+        const other = { ...a, own: member, device: target };
         if (
           id
             ? suggestions(group, other, 's.proposal_id=?', id).length
@@ -564,15 +594,15 @@ export function createTeamFolders({
         )
           return { added: false, seq: latest(group) };
         const seq = nextSeq(group),
-          proof = JSON.stringify({ device: a.device.device, sign: a.device.sign, device_list: manifest });
+          proof = JSON.stringify({ device: a.device.device, sign: a.device.sign, device_list: manifest, handle: me.handle, root_sign: a.own.sign });
         if (id)
           q(
             'INSERT INTO folder_suggestion_copies(proposal_id,grant_id,device,box,envelope,backfill,available_seq) VALUES(?,?,?,?,?,?,?)',
-          ).run(id, a.own.grant_id, target.device, target.box, envelope, proof, seq);
+          ).run(id, member.grant_id, target.device, target.box, envelope, proof, seq);
         else
           q(
             'INSERT INTO team_folder_copies(group_id,file_id,version,grant_id,device,recipient_key,envelope,backfill,available_seq) VALUES(?,?,?,?,?,?,?,?,?)',
-          ).run(group, file, version, a.own.grant_id, target.device, target.box, envelope, proof, seq);
+          ).run(group, file, version, member.grant_id, target.device, target.box, envelope, proof, seq);
         return { added: true, seq };
       }),
     [`GET ${root}/files/:file/history`]: ({ me, params: { group, file } }) => ({
@@ -589,7 +619,7 @@ export function createTeamFolders({
           { file_id, size, chunks } = body ?? {};
         if (typeof file_id !== 'string' || !fileId.test(file_id) || !Number.isSafeInteger(size) || size < 0)
           fail(400, 'invalid file id or size');
-        if (size > folderMaxFileBytes) fail(413, 'choose a file up to 100 MiB');
+        if (size > folderMaxFileBytes) fail(413, 'choose a file up to 200 MiB');
         if (chunks !== Math.max(1, Math.ceil(size / folderChunkBytes))) fail(400, 'invalid chunk count');
         const { used, max } = quota(group);
         if (used + size + 16 * chunks > max) fail(413, 'shared folder quota reached');
@@ -614,7 +644,7 @@ export function createTeamFolders({
       }),
     [`GET ${root}/suggestions`]: ({ me, params: { group }, url }) => {
       const file = url.searchParams.get('file_id');
-      return { suggestions: suggestions(group, access(me, group), '(? IS NULL OR s.file_id=?)', file, file) };
+      return { suggestions: suggestions(group, access(me, group), '(? IS NULL OR s.file_id=?)', file, file).map(publicRow) };
     },
     [`GET ${root}/suggestions/:id`]: ({ me, params: { group, id } }) => {
       const s = visibleSuggestion(group, access(me, group), id);
@@ -623,7 +653,7 @@ export function createTeamFolders({
         'SELECT p.part,u.* FROM folder_suggestion_parts p JOIN folder_uploads u ON u.id=p.upload_id WHERE proposal_id=?',
       ).all(id))
         urls[u.part] = storage.urls('GET', group, u.id, u.size, u.chunks);
-      return { ...s, urls };
+      return { ...publicRow(s), urls };
     },
     [`POST ${root}/suggestions`]: async ({ me, params: { group }, body }) => {
       function check() {
@@ -784,7 +814,7 @@ export function createTeamFolders({
     },
   };
   routes[`GET ${root}/`] = routes[`GET ${root}`];
-  return { routes, sweep, chunk: storage.serve };
+  return { routes, autoGrant, sweep, chunk: storage.serve };
 }
 const recipientKey = (d) => d.handle + ':' + d.device;
-const publicRow = ({ upload_id, ...row }) => row;
+const publicRow = ({ upload_id, author_id, ...row }) => row;

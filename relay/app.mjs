@@ -1685,7 +1685,7 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
     const inviterOf = (r) => { const by = groups.member(r.id, r.bot_id)?.invited_by; return by ? q('SELECT alias FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(r.bot_id, by)?.alias ?? ownerName(by) : ''; };
     const row = (r) => {
       const invited = r.state === 'invited';
-      const sub = [invited ? tr('{name} invited you', { name: esc(inviterOf(r)) }) : tr.n(r.people, '{n} person|{n} people'),
+      const sub = [invited ? tr('{name} invited you', { name: esc(inviterOf(r)) }) : tr.n(r.people, '{n} bot|{n} bots'),
         !invited && r.last_at ? tr('active {ago}', { ago: esc(tr.ago(r.last_at, now)) }) : '',
         groups.encrypted(r.id) ? tr('End-to-end encrypted') : tr('Not end-to-end encrypted'), multi ? r.handles.map((h) => `@${esc(h)}`).join(', ') : ''].filter(Boolean).join(' · ');
       const link = `<a class="line line--link" href="/app/groups/${r.id}?bot=${r.bot_id}">${groupPile(r.id, r.bot_id)}<span class="line__main"><span class="line__title">${esc(r.name)}</span><span class="line__sub">${sub}</span></span>${invited ? '' : ICON.chev}</a>`;
@@ -1708,7 +1708,7 @@ ${confirmMorph({ action: '/app/invites/cancel', fields: `<input type="hidden" na
     return layout(tr('New group'), `${error ? alertBox('danger', esc(error), '') : ''}${pick}<section class="card"><form method="post" action="/app/groups/new" class="stack" style="margin:0"><input type="hidden" name="bot" value="${b.id}">
 ${field({ label: tr('Name'), name: 'name', value: name, attrs: `required maxlength="40" autocomplete="off" placeholder="${tr('Sunday lunch')}"` })}
 ${people.length ? peoplePick(people, picked, tr('Who to invite'), tr) : `<p class="muted">${tr('Once the group is made, you get a link to share with anyone you like.')}</p>`}
-<p class="muted small">${tr('Up to {n} people. Each one says yes before they join.', { n: L.groupMax })}</p>
+<p class="muted small">${tr('Up to {n} bots. Each owner says yes before their bot joins.', { n: L.groupMax })}</p>
 <div><button class="btn" data-busy><span class="btn__label">${tr('Make the group')}</span><span class="btn__spin" aria-hidden="true"></span></button></div></form></section>`,
     { user, tab: 'home', width: 'read', bar: { back: '/app', title: tr('New group') } });
   }
@@ -1737,7 +1737,7 @@ ${people.length ? peoplePick(people, picked, tr('Who to invite'), tr) : `<p clas
 <form method="post" action="${act('rename')}" class="ptitle__form">${ids}<label class="sr" for="ptitle-in">${tr('Group name')}</label><span class="ptitle__box ptitle__box--plain"><input id="ptitle-in" name="name" value="${esc(g.name)}" required maxlength="40" autocomplete="off"${nameError ? ' aria-invalid="true" aria-describedby="ptitle-e" autofocus' : ''}></span>
 <button class="btn small">${tr('Save')}</button><a class="btn small ghost" href="/app/groups/${g.id}?bot=${b.id}" data-close>${tr('Cancel')}</a>
 ${nameError ? `<p class="field__error ptitle__desc" id="ptitle-e" role="alert">${esc(nameError)}</p>` : ''}<p class="ptitle__desc">${tr('Everyone in the group sees the new name.')}</p></form></details></div>` : `<h1>${esc(g.name)}</h1>`;
-    const head = `<div class="ghead">${title}<p class="ghead__meta">${lockBadge(encrypted, tr)}<span>${tr.n(members.filter((m) => m.state === 'joined').length, '{n} person|{n} people')}</span></p></div>`;
+    const head = `<div class="ghead">${title}<p class="ghead__meta">${lockBadge(encrypted, tr)}<span>${tr.n(members.filter((m) => m.state === 'joined').length, '{n} bot|{n} bots')}</span></p></div>`;
 
     // Invited: the owner's own yes (or no). A bot whose tool is too old to read the group updates first.
     const inviter = me.invited_by && me.invited_by !== b.id ? nameFor(me.invited_by, ownerName(me.invited_by), '') : '';
@@ -1757,6 +1757,20 @@ ${ready ? `<div class="actions"><form method="post" action="${act('join')}">${id
       const choices = !p.sealed && !p.body_purged_at && p.choices ? JSON.parse(p.choices) : [];
       return `<li class="bubble ${out ? 'out' : 'in'}"><div class="meta">${out ? tr('You') : esc(who)} · ${esc(tr.ago(p.created_at, now))}${p.via === 'web' ? ` · ${tr('typed on the web')}` : ''}${p.kind === 'ask' ? ` · <b>${tr('question')}</b>` : ''}</div>${text ? `<div class="text">${text}</div>` : ''}${choices.length ? `<div class="choices--show">${choices.map((c) => `<span class="chip">${esc(c)}</span>`).join('')}</div>` : ''}</li>`;
     };
+    // Sealed posts show nothing readable, so a run of them folds into one quiet line: how many, from whom, when.
+    const condensed = (list) => {
+      const out = [];
+      for (let i = 0; i < list.length;) {
+        const p = list[i];
+        if (!p.sealed || p.body_purged_at || p.kind === 'event') { out.push(post(p)); i++; continue; }
+        let j = i; while (j < list.length && list[j].sealed && !list[j].body_purged_at && list[j].kind !== 'event') j++;
+        const run = list.slice(i, j), names = [...new Set(run.map((x) => (x.from_bot === b.id ? tr('You') : x.from_bot !== b.id && mine.has(x.from_bot) ? `@${x.handle}` : nameFor(x.from_bot, x.person, x.handle))))];
+        const shown = names.length > 3 ? `${names.slice(0, 3).join(', ')} +${names.length - 3}` : names.join(', ');
+        out.push(`<li class="gsys gsealed"><span>${tr.n(run.length, '{n} end-to-end encrypted message|{n} end-to-end encrypted messages')} · ${esc(shown)} · ${esc(tr.ago(run[run.length - 1].created_at, now))}</span></li>`);
+        i = j;
+      }
+      return out;
+    };
     // Typing here works only where no bot would get a sealed copy: the group isn't encrypted, and no member's bot
     // and yours both have keys (the relay can't seal for them).
     const sealedPair = !!b.box_pub && members.some((m) => m.state === 'joined' && m.bot_id !== b.id && m.box_pub && !m.disconnected_at && !m.removed_at);
@@ -1765,11 +1779,13 @@ ${ready ? `<div class="actions"><form method="post" action="${act('join')}">${id
 <label class="sr" for="gmsg">${tr('Message to {name}', { name: esc(g.name) })}</label><textarea id="gmsg" name="text" rows="2" maxlength="8000" placeholder="${tr('Message {name}', { name: esc(g.name) })}" required></textarea>
 <details class="extra"><summary>${tr('Add a link or ask a question')}</summary><label>${tr('Link')}<input name="link" type="url" placeholder="https://"></label>
 <label>${tr('Answer options, separated by commas')}<input name="choices" placeholder="${tr('Yes, No, Maybe')}"></label></details>
-<button class="btn small">${tr('Send')}</button></form>`
-      : joined && !b.paused_at ? `<p class="gtell">${encrypted ? tr('This group is end-to-end encrypted, so only the bots can read it. Tell your bot what to say.') : tr('To write here, tell your bot what to say.')}</p>` : '';
-    const privateHistory = joined && b.box_pub && groupBrowser ? `<p><a class="btn small ghost" href="/app/groups/${g.id}/history?bot=${b.id}">${tr('Open private history')}</a></p>` : '';
+<button class="btn small">${tr('Send')}</button></form>` : '';
+    // Under the thread, one quiet row: how writing works here, and the private history beside it.
+    const tellText = !canType && joined && !b.paused_at ? (encrypted ? tr('This group is end-to-end encrypted, so only the bots can read it. Tell your bot what to say.') : tr('To write here, tell your bot what to say.')) : '';
+    const privateHistory = joined && b.box_pub && groupBrowser ? `<a class="btn small ghost" href="/app/groups/${g.id}/history?bot=${b.id}">${tr('Open private history')}</a>` : '';
+    const talkFoot = tellText || privateHistory ? `<div class="gfoot">${tellText ? `<p class="gtell">${tellText}</p>` : ''}${privateHistory}</div>` : '';
     const talk = joined ? `<section class="group" aria-labelledby="talk-h"><div class="group__head"><h2 id="talk-h">${tr('Conversation')}</h2></div><div class="card">
-${posts.length ? `<ul class="thread">${posts.map(post).join('')}</ul>` : `<p class="muted">${tr('Nothing said yet.')}</p>`}${compose}${privateHistory}</div></section>` : '';
+${posts.length ? `<ul class="thread">${condensed(posts).join('')}</ul>` : `<p class="muted">${tr('Nothing said yet.')}</p>`}${compose}${talkFoot}</div></section>` : '';
 
     // Who's in it. People who aren't your contacts are one tap away from being one (they say yes on their side).
     const memberRow = (m) => {
@@ -1785,25 +1801,32 @@ ${m.state === 'joined' ? `<form method="post" action="${act('admin')}">${ids}${m
       return `<li class="gline"><div class="line">${avatar(who, 'md', picFor(m.bot_id, m.photo?.id, m.photo?.photo_at, m.photo?.avatar))}<span class="line__main"><span class="line__title">${esc(who)}</span><span class="line__sub">${sub}</span></span></div>${asContact || menu ? `<div class="gline__act${asContact ? ' gline__act--row' : ''}">${asContact}${menu}</div>` : ''}</li>`;
     };
     const canAdd = mayAdd ? addable(b, g.id) : [];
-    const addFold = canAdd.length ? `<div class="card"><details class="fold"><summary><span class="fold__title">${tr('Add people')}</span></summary>
+    const addFold = canAdd.length ? `<div class="card card--fold"><details class="fold"><summary><span class="fold__title">${tr('Add bots')}</span></summary>
 <form method="post" action="${act('add')}" class="stack" style="margin:0">${ids}${peoplePick(canAdd, [], tr('Your contacts'), tr)}<div><button class="btn small">${tr('Invite them')}</button></div></form></details></div>` : '';
     const link = pg.link ? `${origin}/g/${pg.link.plain_code}` : '';
     const invite = mayAdd ? `<div class="card" id="invite">${link ? `<p class="setrow__label">${tr('Invite link')}</p><p class="setrow__desc">${tr('Anyone with it can join for 7 days. They become your contact too.')}</p>${codeBlock('glink', tr('Invite link'), link, tr)}`
       : `<div class="setrow setrow--flush"><div><p class="setrow__label">${tr('Invite link')}</p><p class="setrow__desc">${tr('Anyone with it can join for 7 days. They become your contact too.')}</p></div><form method="post" action="${act('link')}">${ids}<button class="btn small ghost">${tr('Make an invite link')}</button></form></div>`}</div>` : '';
-    const people = `<section class="group" aria-labelledby="ppl-h"><div class="group__head"><h2 id="ppl-h">${tr('People')} <span class="count">${members.length}</span></h2></div>
+    const people = `<section class="group" aria-labelledby="ppl-h"><div class="group__head"><h2 id="ppl-h">${tr('Bots')} <span class="count">${members.length}</span></h2></div>
 <div class="card card--list${admin ? ' card--menus' : ''}"><ul class="list">${members.map(memberRow).join('')}</ul></div>${addFold}${invite}</section>`;
 
     // Settings: how it wakes your bot, whether it shows on the overview; admins also who may add people, links, ending it.
     const seg = `<form method="post" action="${act('wake')}">${ids}<div class="seg seg--fit" role="group" aria-labelledby="wake-l"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span>${[['mentions', tr('Questions and mentions')], ['all', tr('Everything')], ['muted', tr('Muted')]].map(([v, l]) => `<button name="wake" value="${v}" aria-pressed="${me.wake === v}">${l}</button>`).join('')}</div></div></form>`;
     const sw = (action, id, label, desc, on) => `<form method="post" action="${action}" class="setrow">${ids}<div><p class="setrow__label" id="${id}">${label}</p>${desc ? `<p class="setrow__desc">${desc}</p>` : ''}</div>
 <label class="switch"><input type="checkbox" role="switch" name="on" value="1" aria-labelledby="${id}" data-autosave${on ? ' checked' : ''}><span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span></label><noscript><button class="btn small ghost">${tr('Save')}</button></noscript></form>`;
+    // Ending a group with files in its shared folder: the row says what happens to them, and when this page can open
+    // the folder (its bot has access and keys), offers every file as one zip first. Ending never waits for it.
+    const folderLiveHere = joined && folderAlpha(user) && folderOn(g.id);
+    const endFiles = admin && folderLiveHere && folderFiles(g.id) > 0;
+    const endZip = endFiles && !!b.box_pub && ['read', 'write'].includes(folderGrants(g.id).get(b.id));
     const settings = `<section class="group" aria-labelledby="gset-h"><div class="group__head"><h2 id="gset-h">${tr('Settings')}</h2></div><div class="card card--rows">
 <div class="setrow gset"><div><p class="setrow__label" id="wake-l">${tr('Wake your bot for')}</p><p class="setrow__desc">${me.wake === 'muted' ? tr('Nothing wakes it. It reads the group when it runs anyway.') : me.wake === 'all' ? tr('Every message wakes it.') : tr('Questions and messages that name it wake it. The rest waits for its next run.')}</p></div>${seg}</div>
 ${sw(act('hide'), 'ghide-l', tr('Hide from the overview'), '', !!pg.me.hidden)}
-${admin ? sw(act('admins-add'), 'gadm-l', tr('Only admins can add people'), '', !!g.only_admins_add) : ''}
+${admin ? sw(act('admins-add'), 'gadm-l', tr('Only admins can add bots'), '', !!g.only_admins_add) : ''}
 ${admin ? `<div class="setrow"><div><p class="setrow__label">${tr('Turn off invite links')}</p><p class="setrow__desc">${tr('Links already shared stop working. New ones can be made.')}</p></div><form method="post" action="${act('reset-links')}">${ids}<button class="btn small ghost">${tr('Turn off')}</button></form></div>` : ''}
+</div><div class="card card--rows card--leave">
 ${joined ? `<div class="setrow"><div><p class="setrow__label">${tr('Leave the group')}</p></div>${confirmMorph({ action: act('leave'), fields: ids, label: tr('Leave'), prompt: tr('Leave {name}?', { name: g.name }), confirm: tr('Leave'), pending: tr('Leaving'), tr })}</div>` : ''}
-${admin ? `<div class="setrow"><div><p class="setrow__label">${tr('End the group')}</p><p class="setrow__desc">${tr('Everyone is out and it closes for good.')}</p></div>${confirmMorph({ action: act('end'), fields: ids, label: tr('End group'), prompt: tr('End {name} for everyone?', { name: g.name }), confirm: tr('End group'), pending: tr('Ending'), tr })}</div>` : ''}
+${admin ? `<div class="setrow gend"><div><p class="setrow__label">${tr('End the group')}</p><p class="setrow__desc">${tr('Everyone is out and it closes for good.')}</p>${endFiles ? `<p class="setrow__desc">${tr('bot2bot deletes its copy of the shared folder. Everyone keeps the files already on their computer.')}</p>` : ''}</div>
+<div class="gend__act">${endZip ? `<button type="button" class="btn small ghost fzip" data-folder-zip>${ICON.down}<span class="fzip__label">${tr('Download all files')}</span></button>` : ''}${confirmMorph({ action: act('end'), fields: ids, label: tr('End group'), prompt: tr('End {name} for everyone?', { name: g.name }), confirm: tr('End group'), pending: tr('Ending'), tr })}</div></div>` : ''}
 </div></section>`;
     // A run from a template, set or under way: who holds which role, when, and Stop for whoever started it or an admin.
     let run = null;
@@ -1818,38 +1841,75 @@ ${admin || run.by === `@${b.handle}` ? confirmMorph({ action: act('run-stop'), f
 
     // Shared folder (alpha): files the group's bots keep together, end-to-end encrypted. This browser opens them as one
     // of the bot's linked devices (folders-web.mjs); the server only says who may, and serves ciphertext.
+    const folderShown = joined && folderAlpha(user), folderLive = folderShown && folderOn(g.id);
     const folder = (() => {
-      if (!joined || !folderAlpha(user)) return '';
-      const on = folderOn(g.id), grants = folderGrants(g.id), myRole = grants.get(b.id);
+      if (!folderShown) return '';
+      const on = folderLive, grants = folderGrants(g.id), myRole = ['read', 'write'].includes(grants.get(b.id)) && grants.get(b.id);
       const top = `<div class="group__head"><h2 id="folder-h">${tr('Shared folder')} ${badge(tr('Alpha'), 'info')}</h2>${on && myRole && b.box_pub ? '<div class="group__act" id="folder-actions"></div>' : ''}</div>`;
       const line = (text) => `<div class="card"><p class="fnote">${text}</p></div>`;
       const access = (m) => {
-        const role = grants.get(m.bot_id) ?? 'remove', id = `fperm-${m.bot_id}`;
+        const role = grants.get(m.bot_id) ?? 'write', id = `fperm-${m.bot_id}`;
         const who = m.bot_id === b.id ? tr('You') : nameFor(m.bot_id, m.name, m.handle);
-        const pick = m.box_pub ? `<div class="seg" role="group" aria-labelledby="${id}"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span>${[['remove', tr('No access')], ['read', tr('Read')], ['write', tr('Write')]].map(([v, l]) => `<button name="role" value="${v}" aria-pressed="${role === v}">${l}</button>`).join('')}</div></div>`
+        const pick = m.box_pub ? `<div class="seg" role="group" aria-labelledby="${id}"><div class="seg__track"><span class="seg__sel" aria-hidden="true"></span>${[['remove', tr('No access')], ['read', tr('Read')], ['write', tr('Read and write')]].map(([v, l]) => `<button name="role" value="${v}" aria-pressed="${role === v}">${l}</button>`).join('')}</div></div>`
           : `<span class="fperm__none">${tr('Needs end-to-end encryption')}</span>`;
         return `<form method="post" action="${act('folder-access')}" class="setrow fperm">${ids}<input type="hidden" name="member" value="${m.bot_id}">${avatar(who, 'md', picFor(m.bot_id, m.photo?.id, m.photo?.photo_at, m.photo?.avatar))}<div class="fperm__who"><p class="setrow__label" id="${id}">${esc(who)}</p><p class="setrow__desc">@${esc(m.handle)}</p></div>${pick}</form>`;
       };
-      const manage = admin ? `<div class="card card--rows">${sw(act('folder'), 'gfold-l', on ? tr('Shared folder') : tr('Turn on the shared folder'), '', on)}
-${on ? `<p class="fperm__h">${tr('Who can open it')}</p>${members.filter((m) => m.state === 'joined').map(access).join('')}` : ''}</div>` : '';
+      // Admins: off is one switch in plain view. On, the switch and who may open it fold into Manage access, which
+      // starts open while nobody has access yet (and stays open while you grant several people in a row).
+      const roles = [...grants.values()], writers = roles.filter((r) => r === 'write').length, readers = roles.filter((r) => r === 'read').length;
+      const accessSub = writers || readers ? [writers ? tr.n(writers, '{n} can write|{n} can write') : '', readers ? tr.n(readers, '{n} read-only|{n} read-only') : ''].filter(Boolean).join(' · ') : tr('No one has access');
+      const manage = !admin ? '' : !on ? `<div class="card card--rows card--tab fstart" data-tab="${esc(g.name)}">${FOLDER_ART}${sw(act('folder'), 'gfold-l', tr('Turn on the shared folder'), tr('Your group’s bots keep files in one place, end-to-end encrypted.'), false)}</div>`
+        : `<div class="card card--fold"><details class="fold" id="folder-access"${writers || readers ? '' : ' open'}><summary><span><span class="fold__title">${tr('Manage access')}</span><span class="fold__sub">${accessSub}</span></span></summary>
+<div class="fold__rows">${sw(act('folder'), 'gfold-l', tr('Shared folder'), '', true)}<p class="fperm__h">${tr('Who can open it')}</p>${members.filter((m) => m.state === 'joined').map(access).join('')}</div></details></div>`;
       let body = '';
       if (!on) body = admin ? '' : line(tr('The shared folder is off. A group admin can turn it on.'));
       else if (!b.box_pub) body = line(tr('Your bot needs end-to-end encryption to use the shared folder.'));
-      else if (!myRole) body = admin ? '' : line(tr('Your bot doesn’t have access yet. A group admin can give it.'));
+      else if (!myRole) body = admin ? line(tr('Give your bot access to open the folder here.')) : line(tr('Your bot has no folder access. A group admin can change that.'));
       else {
         const names = Object.fromEntries(members.map((m) => [m.handle, nameFor(m.bot_id, m.name, m.handle)]));
-        body = `<div class="card card--folder" id="folder-app" data-group="${g.id}" data-handle="${esc(b.handle)}" data-sign="${esc(b.sign_pub)}" data-box="${esc(b.box_pub)}" data-lang="${tr.lang}" data-devices="${esc(JSON.stringify(deviceNames(b.id)))}" data-people="${esc(JSON.stringify(names))}"><p class="fnote">${tr('Opening the folder…')}</p></div>`;
+        // Any of the owner's bots in this group with folder access may approve this browser: the page checks the
+        // approving bot against this list (its handle and root keys), then opens the folder as that bot.
+        const joinedIds = new Set(members.filter((m) => m.state === 'joined').map((m) => m.bot_id));
+        const pairable = myBots(user).filter((x) => x.sign_pub && x.box_pub && ['read', 'write'].includes(grants.get(x.id)) && joinedIds.has(x.id))
+          .map((x) => ({ id: x.id, handle: x.handle, sign: x.sign_pub, box: x.box_pub, name: `@${x.handle}` }));
+        body = `<div class="card card--folder card--tab" data-tab="${esc(g.name)}" id="folder-app" data-group="${g.id}" data-bot="${b.id}" data-handle="${esc(b.handle)}" data-sign="${esc(b.sign_pub)}" data-box="${esc(b.box_pub)}" data-lang="${tr.lang}" data-name="${esc(g.name)}" data-devices="${esc(JSON.stringify(deviceNames(b.id)))}" data-people="${esc(JSON.stringify(names))}" data-mine="${esc(JSON.stringify(pairable))}"><p class="fnote">${tr('Opening the folder…')}</p></div>`;
       }
       const script = on && myRole && b.box_pub ? `<script type="application/json" id="folder-words">${JSON.stringify(folderWords(tr)).replace(/</g, '\\u003c')}</script><script src="/app/folders.js?v=${FOLDERS_JS_HASH}" defer></script>` : '';
       return `<section class="group" aria-labelledby="folder-h" id="folder">${top}${body}${manage}</section>${script}`;
     })();
-    return layout(g.name, `${head}${error ? alertBox('danger', esc(error), '') : ''}${joinCard}${runCard}${talk}${folder}${people}${joined ? settings : ''}<script>${REFRESH_JS}</script>`, { user, tab: 'home', bar: { back: '/app', backLabel: tr('Overview'), bot: b.id } });
+    // Joined: one view at a time under Arc tabs. Without JavaScript the bar stays hidden and every section shows.
+    // A hash picks the tab (#talk, #folder, #people, #settings, or an id inside one: #invite, #folder-access); else the
+    // tab last picked for this group in this browser tab, else Conversation.
+    const folderTab = folder ? ['folder', tr('Shared folder'), folderLive ? '<span class="gtabs__dot" aria-hidden="true"></span>' : '', admin && folderLive ? 'folder-access' : ''] : null;
+    // With the folder on, it's what you came for: it opens first, the (mostly sealed) conversation next to it.
+    const tabs = [...(folderLive ? [folderTab, ['talk', tr('Conversation'), '']] : [['talk', tr('Conversation'), ''], folderTab]),
+      ['people', tr('Bots'), ` <span class="count">${members.length}</span>`, 'invite'], ['settings', tr('Settings'), '']].filter(Boolean);
+    const panes = { talk, folder, people, settings };
+    const tabbed = joined ? `<div class="gtabs" data-gtabs="${g.id}"><div class="gtabs__bar" role="tablist" aria-label="${tr('Group')}" hidden><span class="gtabs__sel" aria-hidden="true"></span>${tabs.map(([k, label, extra, also]) => `<button type="button" role="tab" class="gtabs__tab" id="gtab-${k}" data-gtab="${k}"${also ? ` data-also="${also}"` : ''} aria-controls="gp-${k}" aria-selected="false" tabindex="-1"><span>${label}</span>${extra}</button>`).join('')}</div>
+<script>(${GTABS_PICK})(document.currentScript.parentNode);</script>${tabs.map(([k]) => `<div class="gtabs__panel" id="gp-${k}" data-gpanel="${k}">${panes[k]}</div>`).join('')}</div>` : people;
+    return layout(g.name, `${head}${error ? alertBox('danger', esc(error), '') : ''}${joinCard}${runCard}${tabbed}<script>${REFRESH_JS}</script>`, { user, tab: 'home', bar: { back: '/app', backLabel: tr('Overview'), bot: b.id } });
   }
+  // The shared folder's scene, in the same family as the files card's airmail: two bots either side of a manila folder
+  // with a lock on it. Off, it rests; switched on, each bot slips a sheet into the folder.
+  const FOLDER_ART = `<div class="foldart" aria-hidden="true"><div class="foldart__stage">
+<img class="foldart__bot foldart__bot--a" src="/stickers/robot-wave.png" alt="" width="56" height="56"><img class="foldart__bot foldart__bot--b" src="/stickers/robot-heart-eyes.png" alt="" width="56" height="56">
+<svg class="foldart__back" viewBox="0 0 96 72" width="96" height="72"><path d="M6 14a5 5 0 0 1 5-5h22.5a4 4 0 0 1 3 1.3l4.2 4.7H85a5 5 0 0 1 5 5V67H6z"/><rect class="foldart__paper" x="17" y="8" width="58" height="44" rx="3"/><path class="foldart__lines" d="M25 18h30M25 24h42M25 30h36"/></svg>
+<span class="foldart__sheet foldart__sheet--a"></span><span class="foldart__sheet foldart__sheet--b"></span>
+<svg class="foldart__front" viewBox="0 0 96 72" width="96" height="72"><path d="M3.6 33.2A5 5 0 0 1 8.5 29h79a5 5 0 0 1 4.9 4.2l-3.3 33.6A5 5 0 0 1 84.2 71H11.8a5 5 0 0 1-4.9-4.2z"/></svg>
+<span class="foldart__lock"><svg viewBox="0 0 16 16" width="11" height="11"><path d="M5 7V5a3 3 0 0 1 6 0v2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="3" y="7" width="10" height="7.5" rx="2" fill="currentColor"/></svg></span>
+</div></div>`;
   // The folder's alpha gate, as the relay's: Infinite owners on the hosted relay, anyone on a self-hosted one.
   const folderAlpha = (user) => !hosted || !!user.infinite_at;
   // Read-only looks at the folder tables the relay keeps (team-folders.mjs); a relay without them has no folder.
   const folderOn = (gid) => { try { return !!q('SELECT 1 FROM team_folder_groups WHERE group_id = ?').get(gid); } catch { return false; } };
-  const folderGrants = (gid) => { try { return new Map(q('SELECT bot_id, role FROM team_folder_members WHERE group_id = ?').all(gid).map((r) => [r.bot_id, r.role])); } catch { return new Map(); } };
+  // Files in the folder now: each file's newest version that isn't a deletion.
+  const folderFiles = (gid) => { try { return q(`SELECT count(*) n FROM team_folder_revisions r WHERE r.group_id = ? AND r.upload_id IS NOT NULL
+    AND r.version = (SELECT max(version) FROM team_folder_revisions x WHERE x.group_id = r.group_id AND x.file_id = r.file_id)`).get(gid).n; } catch { return 0; } };
+  const folderGrants = (gid) => {
+    ctx.teamFolders.autoGrant(gid);
+    return new Map(q(`SELECT bot_id,role FROM team_folder_members WHERE group_id=?
+      UNION ALL SELECT bot_id,'remove' FROM team_folder_denied WHERE group_id=?`).all(gid, gid).map((r) => [r.bot_id, r.role]));
+  };
   const deviceNames = (botId) => { try { const r = q('SELECT manifest FROM device_rosters WHERE bot_id = ?').get(botId); return r ? JSON.parse(r.manifest).roster.devices.map((d) => d.name) : ['primary']; } catch { return ['primary']; } };
   // A group page carries the folder's code: its own CSP, with a nonce for the page's inline scripts.
   const groupHtml = (res, status, html) => {
@@ -2993,7 +3053,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             const was = row.wake;
             groups.settings(b, gid, { wake: String(f.wake || '') });
             tell(user, { what: wakeSaid(f.wake, tr), undo: again || was === f.wake ? null : undoForm(`/app/groups/${gid}/wake`, { ...ids, wake: was }) });
-            return redirect(res, here), true;
+            return redirect(res, `${here}#settings`), true;
           }
           if (sub === 'hide') {
             const on = f.on === '1';
@@ -3019,13 +3079,13 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           if (sub === 'reset-links') {
             groups.settings(b, gid, { reset_links: true });
             tell(user, { what: tr('Invite links turned off') });
-            return redirect(res, here), true;
+            return redirect(res, `${here}#settings`), true;
           }
           if (sub === 'admins-add') {
             const on = f.on === '1';
             groups.settings(b, gid, { only_admins_add: on });
-            tell(user, { what: on ? tr('Only admins can add people') : tr('Everyone can add people'), undo: again ? null : undoForm(`/app/groups/${gid}/admins-add`, { ...ids, ...(on ? {} : { on: '1' }) }) });
-            return redirect(res, here), true;
+            tell(user, { what: on ? tr('Only admins can add bots') : tr('Everyone can add bots'), undo: again ? null : undoForm(`/app/groups/${gid}/admins-add`, { ...ids, ...(on ? {} : { on: '1' }) }) });
+            return redirect(res, `${here}#settings`), true;
           }
           if (sub === 'add') {
             const who = pickedPeers(f);
@@ -3033,34 +3093,34 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             const added = groups.add(b, gid, who, { via: 'web', ownerYes: user.id });
             const n = added.filter((x) => x.invited).length, mine = added.filter((x) => x.joined).length;
             tell(user, { what: [n ? tr.n(n, '{n} person invited|{n} people invited') : '', mine ? tr.n(mine, '{n} of your bots is in it|{n} of your bots are in it') : ''].filter(Boolean).join(' · ') || tr.n(0, '{n} person invited|{n} people invited') });
-            return redirect(res, here), true;
+            return redirect(res, `${here}#people`), true;
           }
           if (sub === 'contact') {
             const peer = Number(f.peer);
             const r = groups.requestContact(b, peer, gid);
             const name = someone(peer);
             tell(user, r.already ? { what: tr('{name} is already a contact', { name }) } : { what: tr('Asked {name} to connect', { name }), undo: undoForm('/app/contacts/remove', { bot: b.id, peer }) });
-            return redirect(res, here), true;
+            return redirect(res, `${here}#people`), true;
           }
           if (sub === 'remove') {
             const peer = Number(f.member);
             groups.remove(b, gid, String(peer));
             tell(user, { what: tr('Removed {name} from the group', { name: someone(peer) }) });
-            return redirect(res, here), true;
+            return redirect(res, `${here}#people`), true;
           }
           if (sub === 'admin') {
             const peer = Number(f.member), on = f.on === '1';
             groups.setAdmin(b, gid, String(peer), on);
             tell(user, { what: on ? tr('{name} is an admin now', { name: someone(peer) }) : tr('{name} is no longer an admin', { name: someone(peer) }),
               undo: again ? null : undoForm(`/app/groups/${gid}/admin`, { ...ids, member: peer, ...(on ? {} : { on: '1' }) }) });
-            return redirect(res, here), true;
+            return redirect(res, `${here}#people`), true;
           }
           if (sub === 'send') {
             const choices = String(f.choices || '').split(',').map((x) => x.trim()).filter(Boolean);
             const links = String(f.link || '').trim() ? [String(f.link).trim()] : [];
             groups.send(b, gid, { kind: choices.length ? 'ask' : 'note', text: String(f.text || ''), links, choices }, { ownerWeb: true });
             tell(user, { what: tr('Sent to the group') });
-            return redirect(res, here), true;
+            return redirect(res, `${here}#talk`), true;
           }
           if (sub === 'run-stop' && groupRuns) {
             const r = groupRuns.stop(b, String(gid), String(f.run || ''));
@@ -3078,12 +3138,12 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
             const peer = Number(f.member), role = String(f.role || '');
             const m = groups.page(gid, b.id)?.members.find((x) => x.bot_id === peer && x.state === 'joined');
             if (!m || !['read', 'write', 'remove'].includes(role)) throw new HttpError(400, 'Pick someone in the group and what they may do.');
-            const was = folderGrants(gid).get(peer) ?? 'remove';
-            if (was !== role) routes['POST /v1/team-folders/:group/members']({ me: b, params: { group: String(gid) }, body: { handle: m.handle, role } });
+            const was = folderGrants(gid).get(peer) ?? 'write';
+            routes['POST /v1/team-folders/:group/members']({ me: b, params: { group: String(gid) }, body: { handle: m.handle, role } });
             const name = peer === b.id ? tr('Your bot') : someone(peer);
             tell(user, { what: role === 'write' ? tr('{name} can read and change the folder', { name }) : role === 'read' ? tr('{name} can read the folder', { name }) : tr('{name} has no access to the folder', { name }),
               undo: again || was === role ? null : undoForm(`/app/groups/${gid}/folder-access`, { ...ids, member: peer, role: was }) });
-            return redirect(res, `${here}#folder`), true;
+            return redirect(res, `${here}#folder-access`), true;
           }
           if (sub === 'leave') {
             groups.leave(b, gid);
@@ -3612,6 +3672,7 @@ const ICON = {
   updown: svg('<path d="m7 15 5 5 5-5M7 9l5-5 5 5"/>'),
   chevDown: svg('<path d="m6 9 6 6 6-6"/>'),
   arrowUp: svg('<path d="M12 19V5M5 12l7-7 7 7"/>'),
+  down: svg('<path d="M12 5v14M5 12l7 7 7-7"/>'),
   bell: svg('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'),
   bellOn: svg('<path fill="currentColor" d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="M2 8.5c0-2.2.7-4.3 2-6"/><path d="M22 8.5a10 10 0 0 0-2-6"/>'),
   bellOff: svg('<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/>'),
@@ -3924,7 +3985,7 @@ const orient=()=>list.setAttribute('aria-orientation',row.matches?'horizontal':'
 // Every string the shared folder's page script shows, in the owner's language (the script gets them as JSON).
 const folderWords = (tr) => ({
   'Undo': tr('Undo'),
-  'Over 100 MB. Split it or zip it smaller.': tr('Over 100 MB. Split it or zip it smaller.'),
+  'Over 200 MB. Split it or zip it smaller.': tr('Over 200 MB. Split it or zip it smaller.'),
   'The folder is full. Delete something first.': tr('The folder is full. Delete something first.'),
   'Someone’s keys changed. Check with them before saving here.': tr('Someone’s keys changed. Check with them before saving here.'),
   'You can read this folder, not change it.': tr('You can read this folder, not change it.'),
@@ -3968,7 +4029,7 @@ const folderWords = (tr) => ({
   'This browser forgot its keys': tr('This browser forgot its keys'),
   'Drop into {name}': tr('Drop into {name}'),
   'Drop to upload': tr('Drop to upload'),
-  '{name} is over 100 MB. Split it or zip it smaller.': tr('{name} is over 100 MB. Split it or zip it smaller.'),
+  '{name} is over 200 MB. Split it or zip it smaller.': tr('{name} is over 200 MB. Split it or zip it smaller.'),
   'Uploading {name}…': tr('Uploading {name}…'),
   'Someone changed {name} first. Upload it again to replace theirs.': tr('Someone changed {name} first. Upload it again to replace theirs.'),
   'Someone changed it first. Yours waits as a suggestion': tr('Someone changed it first. Yours waits as a suggestion'),
@@ -3984,6 +4045,14 @@ const folderWords = (tr) => ({
   'Preview': tr('Preview'),
   'History': tr('History'),
   'Downloaded {name}': tr('Downloaded {name}'),
+  'Download all files': tr('Download all files'),
+  'Downloading {n} of {total}': tr('Downloading {n} of {total}'),
+  '{name} files': tr('{name} files'),
+  'Downloaded {name}. {n} files didn’t pass their check, so they’re not in it.': tr('Downloaded {name}. {n} files didn’t pass their check, so they’re not in it.'),
+  'That’s too much for one zip. Download the files one by one.': tr('That’s too much for one zip. Download the files one by one.'),
+  'There are no files yet.': tr('There are no files yet.'),
+  'To download the files, open the folder in this browser first.': tr('To download the files, open the folder in this browser first.'),
+  'The folder is still opening. Try again in a moment.': tr('The folder is still opening. Try again in a moment.'),
   'Deleted {name}': tr('Deleted {name}'),
   'Brought back {name}': tr('Brought back {name}'),
   'Opening {name}…': tr('Opening {name}…'),
@@ -3997,6 +4066,19 @@ const folderWords = (tr) => ({
   'Current': tr('Current'),
   'Restore': tr('Restore'),
   'Restored version {n}': tr('Restored version {n}'),
+  'Yours, waiting': tr('Yours, waiting'),
+  'Web only': tr('Web only'),
+  'Uploaded {name}. {other} waits as a suggestion': tr('Uploaded {name}. {other} waits as a suggestion'),
+  'Uploaded {n} files. {other} waits as a suggestion': tr('Uploaded {n} files. {other} waits as a suggestion'),
+  'Uploaded {name}. Bots only get text files, so it stays on the web': tr('Uploaded {name}. Bots only get text files, so it stays on the web'),
+  'Uploaded {n} files. Bots only get the text files': tr('Uploaded {n} files. Bots only get the text files'),
+  'Same text': tr('Same text'),
+  '{add} lines added, {del} removed': tr('{add} lines added, {del} removed'),
+  'Undo this change': tr('Undo this change'),
+  'Nothing left to undo from version {n}': tr('Nothing left to undo from version {n}'),
+  'A later save changed the same lines. Your undo waits as a suggestion': tr('A later save changed the same lines. Your undo waits as a suggestion'),
+  'Undid the changes from version {n}': tr('Undid the changes from version {n}'),
+  'Someone saved since. Your undo waits as a suggestion': tr('Someone saved since. Your undo waits as a suggestion'),
   '{n} lines unchanged': tr('{n} lines unchanged'),
   'Added': tr('Added'),
   'Removed': tr('Removed'),
@@ -4027,13 +4109,29 @@ const folderWords = (tr) => ({
   '{who} made {name} first. Yours waits as a suggestion': tr('{who} made {name} first. Yours waits as a suggestion'),
   'Your bot has new keys. Set this browser up again.': tr('Your bot has new keys. Set this browser up again.'),
   'Opening the folder…': tr('Opening the folder…'),
+  'Send this to any of your bots in this group: {bots}': tr('Send this to any of your bots in this group: {bots}'),
+  'That approval came from a bot that isn’t one of yours in this group.': tr('That approval came from a bot that isn’t one of yours in this group.'),
+  'Try again': tr('Try again'),
+  'This is taking longer than usual.': tr('This is taking longer than usual.'),
+  'Loading the file list…': tr('Loading the file list…'),
+  'Unlocking files: {n} of {total}': tr('Unlocking files: {n} of {total}'),
+  'Almost there…': tr('Almost there…'),
   'This browser was removed from your bot’s devices. Set it up again.': tr('This browser was removed from your bot’s devices. Set it up again.'),
   'Your bot doesn’t have access to this folder yet.': tr('Your bot doesn’t have access to this folder yet.'),
   'The shared folder is off.': tr('The shared folder is off.'),
   'Can’t reach the folder right now.': tr('Can’t reach the folder right now.'),
   'This browser can’t open the folder. Try a current Chrome, Edge, Safari or Firefox.': tr('This browser can’t open the folder. Try a current Chrome, Edge, Safari or Firefox.'),
 });
-const REFRESH_JS = `setInterval(()=>{if(document.visibilityState!=='visible'||document.querySelector('details[open]:not(.bsec__d),.cm[data-state=ask],.acc[data-open=true],[data-hold]')||document.querySelector('[data-find] input')?.value||/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||''))return;window.b2bStay&&b2bStay();location.reload();},30000);`;
+// Picks a group page's tab before its panels draw (an inline script right after the tab bar runs it, and the page
+// script again on content a save brings in place): a hash naming a tab or an id inside one, else the tab last picked
+// for this group in this browser tab, else the first. A hash that only names a tab is dropped, so a later click sticks.
+const GTABS_PICK = `function(w){const ts=[...w.querySelectorAll('[data-gtab]')],key='b2b-gtab-'+w.dataset.gtabs;let h='',k=null;try{h=decodeURIComponent(location.hash.slice(1));}catch(e){}
+const by=h?ts.find(t=>t.dataset.gtab===h||(t.dataset.also||'').split(' ').includes(h)):null;if(by)k=by.dataset.gtab;else try{k=sessionStorage.getItem(key);}catch(e){}
+if(!ts.some(t=>t.dataset.gtab===k))k=ts[0].dataset.gtab;try{sessionStorage.setItem(key,k);}catch(e){}
+if(by&&k===h)history.replaceState(history.state,'',location.pathname+location.search);
+w.dataset.tab=k;ts.forEach(t=>{const on=t.dataset.gtab===k;t.setAttribute('aria-selected',String(on));t.tabIndex=on?0:-1;});w.querySelector('[role=tablist]').hidden=false;}`;
+// Reloads every 30 s unless you're in the middle of something: an open fold you can see, a question, typing.
+const REFRESH_JS = `setInterval(()=>{if(document.visibilityState!=='visible'||[...document.querySelectorAll('details[open]:not(.bsec__d)')].some(d=>d.getClientRects().length)||document.querySelector('.cm[data-state=ask],.acc[data-open=true],[data-hold]')||document.querySelector('[data-find] input')?.value||/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||''))return;window.b2bStay&&b2bStay();location.reload();},30000);`;
 // The behaviour of the Arc components above, in plain JS. Every page loads it once.
 const uiJsFor = (tr) => `(function(){const $$=(s,r=document)=>[...r.querySelectorAll(s)];document.documentElement.classList.add('js');
 /* Staying in place: a save answers with the same page, so it comes back where you were, without the entrance animation. */
@@ -4090,6 +4188,23 @@ const at=el=>({x:el.offsetLeft,w:el.offsetWidth}),put=p=>{sel.style.width=p.w+'p
 let from=null;try{from=JSON.parse(sessionStorage.getItem('tab-from'));sessionStorage.removeItem('tab-from');}catch(e){}
 put(from||at(cur));sel.offsetWidth;n.classList.add('ready');if(n.scrollWidth>n.clientWidth)n.scrollLeft=cur.offsetLeft-(n.clientWidth-cur.offsetWidth)/2;if(from)requestAnimationFrame(()=>put(at(cur)));
 $$('a',n).forEach(a=>a.addEventListener('click',()=>{try{sessionStorage.setItem('tab-from',JSON.stringify(at(cur)));}catch(e){}put(at(a));}));addEventListener('resize',()=>put(at(cur)));});
+/* Group tabs (Arc): one view of the group at a time. The pill glides to the chosen tab and its panel slides in from
+   that side; arrows and Home/End move between tabs. Segmented controls in a panel that was hidden measure again. */
+$$('.gtabs',r).forEach(w=>{const bar=w.querySelector('.gtabs__bar'),sel=bar.querySelector('.gtabs__sel'),ts=$$('[role=tab]',bar),ps=$$('[data-gpanel]',w),key='b2b-gtab-'+w.dataset.gtabs;
+if(!w.dataset.tab)(${GTABS_PICK})(w);
+ps.forEach(p=>{p.setAttribute('role','tabpanel');p.setAttribute('aria-labelledby','gtab-'+p.dataset.gpanel);});
+const cur=()=>ts.find(t=>t.dataset.gtab===w.dataset.tab)||ts[0],put=t=>{sel.style.width=t.offsetWidth+'px';sel.style.transform='translateX('+t.offsetLeft+'px)';};
+const refit=p=>{const gs=$$('.seg.ready',p);gs.forEach(g=>g.classList.toggle('ready',false));dispatchEvent(new Event('resize'));p.offsetWidth;requestAnimationFrame(()=>gs.forEach(g=>g.classList.add('ready')));};
+const show=(t,focus)=>{const was=cur();if(focus)t.focus();if(t===was)return;const k=t.dataset.gtab,p=ps.find(x=>x.dataset.gpanel===k);
+w.dataset.tab=k;try{sessionStorage.setItem(key,k);}catch(e){}if(location.hash)history.replaceState(history.state,'',location.pathname+location.search);
+ts.forEach(x=>{const on=x===t;x.setAttribute('aria-selected',String(on));x.tabIndex=on?0:-1;});put(t);
+if(p){refit(p);p.style.setProperty('--gdir',ts.indexOf(t)>ts.indexOf(was)?'1':'-1');p.classList.toggle('is-in',false);p.offsetWidth;p.classList.add('is-in');}
+if(bar.scrollWidth>bar.clientWidth)t.scrollIntoView({block:'nearest',inline:'nearest',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});};
+ts.forEach(t=>t.addEventListener('click',()=>show(t)));
+bar.addEventListener('keydown',e=>{const i=ts.indexOf(document.activeElement);if(i<0)return;const n=e.key==='ArrowRight'?ts[(i+1)%ts.length]:e.key==='ArrowLeft'?ts[(i-1+ts.length)%ts.length]:e.key==='Home'?ts[0]:e.key==='End'?ts[ts.length-1]:null;if(!n)return;e.preventDefault();show(n,true);});
+const c=cur();put(c);if(bar.scrollWidth>bar.clientWidth)bar.scrollLeft=c.offsetLeft-(bar.clientWidth-c.offsetWidth)/2;requestAnimationFrame(()=>bar.classList.add('ready'));addEventListener('resize',()=>put(cur()));});
+/* A link to a fold (its id as the hash) opens it. */
+if(top&&location.hash){let d=null;try{d=document.getElementById(decodeURIComponent(location.hash.slice(1)));}catch(e){}if(d&&d.matches('details.fold'))d.open=true;}
 /* Switch that saves as soon as it changes. */
 $$('[data-autosave]',r).forEach(i=>i.addEventListener('change',()=>i.form.requestSubmit()));
 /* Sortable table: one column at a time, aria-sort says which and which way. */
@@ -4123,15 +4238,20 @@ let r,html;try{r=await fetch(f.action,{method:'POST',body});html=await r.text();
 const doc=new DOMParser().parseFromString(html,'text/html'),col=doc.querySelector('.col'),cur=document.querySelector('.col'),to=path(r.url);
 if(!col||!cur||(to!==here&&to!==path(f.action))){location.assign(r.url);return;}
 await settle;
-const open=$$('.acc[data-open=true] .acc__panel',cur).map(p=>p.id);
+const open=$$('.acc[data-open=true] .acc__panel',cur).map(p=>p.id),folds=$$('details.fold[open][id]',cur).map(d=>d.id);
 const typed=$$('input,textarea,select',cur).filter(x=>x.form!==f&&x.name&&!/^(hidden|checkbox|radio|submit|button|file)$/.test(x.type)&&(x.tagName==='SELECT'?[...x.options].some(o=>o.selected!==o.defaultSelected):x.value!==x.defaultValue)).map(x=>({a:formOf(x),n:x.name,v:x.value}));
+const prevFolder=cur.querySelector('#folder-app'),nextFolder=col.querySelector('#folder-app');
+const sameFolder=prevFolder&&nextFolder&&['group','handle','sign','box'].every(k=>prevFolder.dataset[k]===nextFolder.dataset[k]);
+if(sameFolder){prevFolder.dataset.devices=nextFolder.dataset.devices;prevFolder.dataset.people=nextFolder.dataset.people;nextFolder.replaceWith(prevFolder);const pa=cur.querySelector('#folder-actions'),na=col.querySelector('#folder-actions');if(pa&&na)na.replaceWith(pa);}
 cur.replaceChildren(...col.childNodes);
 typed.forEach(t=>{const y=$$('[name="'+CSS.escape(t.n)+'"]',cur).find(y=>formOf(y)===t.a);if(y)y.value=t.v;});
+folds.forEach(id=>{const d=document.getElementById(id);if(d&&d.tagName==='DETAILS')d.open=true;});
 open.forEach(id=>{const p=document.getElementById(id);if(!p)return;const a=p.closest('.acc');a.dataset.open='true';a.querySelector('.acc__head').setAttribute('aria-expanded','true');p.removeAttribute('inert');});
 $$('body > .toast').forEach(t=>t.remove());const said=doc.querySelector('.toast');if(said)document.body.append(said);
 ['lang','data-theme'].forEach(k=>{const v=doc.documentElement.getAttribute(k);if(v===null)H.removeAttribute(k);else H.setAttribute(k,v);});
 $$('meta[name=theme-color]',document.head).forEach(m=>m.remove());$$('meta[name=theme-color]',doc.head).forEach(m=>document.head.append(m));document.title=doc.title;
 init(cur);
+if(nextFolder&&!sameFolder){if(window.b2bFolderMount)window.b2bFolderMount();else{const s=doc.querySelector('script[src^="/app/folders.js"]');if(s){const n=document.createElement('script');n.src=s.getAttribute('src');document.head.append(n);}}}
 if(key){const y=$$('form[action="'+CSS.escape(act)+'"] [name="'+CSS.escape(key.n)+'"]',cur).find(y=>(y.type!=='radio'&&y.tagName!=='BUTTON')||y.value===key.v);if(y)y.focus({preventScroll:true});}}
 document.addEventListener('submit',e=>{const f=e.target;if(e.defaultPrevented||f.target==='_blank')return;
 if('hard' in f.dataset){delete f.dataset.hard;stay(path(f.action));return;}
@@ -4706,6 +4826,29 @@ details summary{cursor:pointer}
 .gmark{display:grid;flex:none;place-items:center;width:34px;height:34px;border-radius:12px;background:var(--surface-muted);color:var(--text-secondary)}.gmark svg{width:18px;height:18px}
 .gmark--lg{width:64px;height:64px;margin:0 auto 14px;border-radius:22px}.gmark--lg svg{width:28px;height:28px}
 .ghead{display:grid;gap:10px}.ghead__meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0;color:var(--text-secondary);font-size:var(--text-sm)}.ghead__meta--center{justify-content:center;margin-top:10px}
+/* Group tabs (Arc tabs): a pill track like the segmented control, its pill gliding between tabs and each panel sliding
+   in from the side you went. It scrolls sideways on a phone. Without JavaScript the bar stays hidden and all panels show. */
+.gtabs{display:grid;gap:28px}.gtabs[data-tab]{gap:16px}
+.gtabs__bar{position:relative;isolation:isolate;display:flex;gap:2px;justify-self:start;max-width:100%;padding:3px;overflow-x:auto;scrollbar-width:none;border:1px solid var(--border);border-radius:var(--radius-pill);background:var(--surface-muted)}
+.gtabs__bar::-webkit-scrollbar{display:none}.gtabs__bar[hidden]{display:none}
+.gtabs__tab{position:relative;z-index:1;display:inline-flex;flex:none;align-items:center;gap:7px;min-height:32px;padding:0 14px;border:0;border-radius:var(--radius-pill);background:transparent;color:var(--text-muted);font:inherit;font-weight:500;white-space:nowrap;cursor:pointer;transition:color var(--duration-fast) var(--ease-standard)}
+.gtabs__tab[aria-selected="true"]{color:var(--foreground)}.gtabs__tab:focus-visible{outline-offset:-2px}@media (hover:hover) and (pointer:fine){.gtabs__tab:hover{color:var(--foreground)}}
+.gtabs__tab .count{min-width:20px;height:20px;padding:0 6px;background:color-mix(in oklab,var(--foreground) 7%,transparent)}
+.gtabs__dot{width:6px;height:6px;border-radius:50%;background:var(--success)}
+.gtabs__sel{position:absolute;z-index:0;top:3px;bottom:3px;left:0;width:0;border-radius:var(--radius-pill);background:var(--surface);box-shadow:var(--shadow-resting),0 0 0 .5px color-mix(in oklab,var(--foreground) 8%,transparent)}
+.gtabs__bar.ready .gtabs__sel{transition:transform var(--duration-spring) var(--ease-spring),width var(--duration-spring) var(--ease-spring)}
+.gtabs[data-tab] .gtabs__panel{display:none}
+.gtabs[data-tab=talk] [data-gpanel=talk],.gtabs[data-tab=folder] [data-gpanel=folder],.gtabs[data-tab=people] [data-gpanel=people],.gtabs[data-tab=settings] [data-gpanel=settings]{display:block}
+.gtabs__panel.is-in{animation:gtab-in var(--duration-standard) var(--ease-standard)}@keyframes gtab-in{from{opacity:0;transform:translateX(calc(var(--gdir,1) * 8px))}}@keyframes gtab-fade{from{opacity:0}}
+@media (prefers-reduced-motion:reduce){.gtabs__panel.is-in{animation-name:gtab-fade}.gtabs__bar.ready .gtabs__sel{transition:none}}
+/* Headings the tab already says stay for screen readers. The folder's shows: it carries Alpha and the folder's actions. */
+.gtabs[data-tab] [data-gpanel]:not([data-gpanel=folder])>.group>.group__head{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+/* Under the thread: how writing works here, with the private history beside it. */
+.gfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 16px;margin-top:8px;padding-top:14px;border-top:1px solid var(--border-subtle)}
+.gfoot .gtell{flex:1 1 260px;margin:0;padding:0;border:0}
+/* A card that is one fold: the summary is the card's own row, the rows open under a hairline. */
+.card--fold{padding:16px 20px}.card--fold .fold>summary{min-height:36px}.card--fold .fold[open]>summary{margin-bottom:12px}
+.fold__rows{border-top:1px solid var(--border-subtle)}
 .ptitle__box--plain input{padding-left:12px}
 .gsys{justify-self:center;max-width:90%;color:var(--text-muted);font-size:var(--text-xs);text-align:center;text-wrap:balance}
 .choices--show{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.choices--show .chip{display:inline-flex;align-items:center;cursor:default}
@@ -4911,7 +5054,37 @@ body.out .topbar{display:flex;align-items:center;justify-content:space-between;g
 /* Czech on a phone: a little less room around each tab, so all six sections fit on a 390px screen. */
 @media (max-width:640px){.tabs__item:lang(cs){padding:0 8px}}
 /* Shared folder (alpha): Arc tree view rows, the file dropzone edge, a viewer sheet with preview, history and editor. */
+/* The shared folder is a folder: its card has a tab with the group's name. Turning it on shows the scene below. */
+.card--tab{position:relative;margin-top:24px;border-top-left-radius:0}
+.card--tab::before{content:attr(data-tab);position:absolute;z-index:4;left:-1px;bottom:calc(100% - 1px);max-width:min(240px,60%);height:29px;padding:0 18px 1px;border:1px solid var(--border);border-bottom:0;border-radius:12px 14px 0 0;background:var(--surface);color:var(--text-secondary);font-size:var(--text-xs);font-weight:500;line-height:28px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;box-sizing:border-box}
+.foldart{--manila:#e9c37e;--manila-deep:#d6a957;--ink:#1d2433;display:grid;place-items:center;height:116px;margin:20px 0 0;border-radius:var(--radius-panel);background:radial-gradient(60% 120% at 50% 115%,color-mix(in oklab,var(--manila) 22%,transparent),transparent 70%),color-mix(in oklab,var(--manila) 7%,var(--surface));overflow:hidden}
+.foldart__stage{position:relative;width:300px;height:100px;flex:none}
+.foldart__bot{position:absolute;bottom:6px;width:56px;height:56px;filter:drop-shadow(0 2px 3px rgb(20 30 60/.14)) saturate(.3);opacity:.75;transition:filter 520ms var(--ease-standard),opacity 520ms var(--ease-standard)}
+.foldart__bot--a{left:18px}.foldart__bot--b{right:18px}
+.foldart__back,.foldart__front{position:absolute;left:102px;bottom:4px;overflow:visible}
+.foldart__back>path:first-child{fill:var(--manila-deep)}
+.foldart__paper{fill:#fff;stroke:rgb(20 30 60/.08)}.foldart__lines{fill:none;stroke:#cdd4e0;stroke-width:2;stroke-linecap:round}
+.foldart__front{z-index:2;filter:drop-shadow(0 -1px 0 rgb(255 255 255/.35)) drop-shadow(0 3px 6px rgb(20 30 60/.14))}.foldart__front path{fill:var(--manila)}
+.foldart__back,.foldart__front{transition:filter 520ms var(--ease-standard)}
+.fstart:not(:has(input:checked)) :is(.foldart__back,.foldart__front){filter:saturate(.35)}
+.foldart__lock{position:absolute;z-index:3;left:150px;bottom:24px;translate:-50% 0;display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--ink);color:#fff;box-shadow:0 0 0 2px color-mix(in oklab,var(--manila) 60%,#fff),0 2px 5px rgb(20 30 60/.22)}
+.foldart__sheet{position:absolute;z-index:1;left:0;top:0;width:20px;height:26px;border-radius:3px;background:repeating-linear-gradient(#cdd4e0 0 1.5px,transparent 1.5px 4px) 4px 6px/11px 13px no-repeat,#fff;box-shadow:0 0 0 .5px rgb(20 30 60/.1),0 3px 7px rgb(20 30 60/.16);offset-rotate:0deg;offset-anchor:center;opacity:0}
+.foldart__sheet--a{offset-path:path("M 60 54 C 88 6, 128 0, 150 52")}.foldart__sheet--b{offset-path:path("M 240 54 C 212 6, 172 0, 150 52")}
+@media (hover:hover) and (pointer:fine){.fstart:hover .foldart__bot{filter:drop-shadow(0 2px 3px rgb(20 30 60/.14)) saturate(.7);opacity:.9}}
+.fstart:has(input:checked) .foldart__bot{filter:drop-shadow(0 2px 3px rgb(20 30 60/.14));opacity:1}
+.fstart:has(input:checked) .foldart__sheet{animation:foldart-in 2.6s cubic-bezier(.45,0,.3,1) infinite both}
+.fstart:has(input:checked) .foldart__sheet--b{animation-delay:1.3s}
+.fstart:has(input:checked) .foldart__lock{animation:foldart-lock 1.3s var(--ease-standard) 1.9s infinite}
+.fstart:has(input:checked) .foldart__bot--a{animation:foldart-hop 2.6s var(--ease-standard) infinite}
+.fstart:has(input:checked) .foldart__bot--b{animation:foldart-hop 2.6s var(--ease-standard) 1.3s infinite}
+@keyframes foldart-in{0%{offset-distance:0%;opacity:0;scale:.7;rotate:-8deg}12%{opacity:1;scale:1}70%{offset-distance:88%;opacity:1;rotate:4deg}88%,100%{offset-distance:100%;opacity:0;scale:.85;rotate:0deg}}
+@keyframes foldart-lock{0%,100%{scale:1}20%{scale:1.2}45%{scale:1}}
+@keyframes foldart-hop{0%,100%{translate:0 0}10%{translate:0 -5px}24%{translate:0 0}}
+.fstart .setrow{gap:20px;flex-wrap:nowrap}.fstart .setrow__label{font-weight:500}
+@media (prefers-reduced-motion:reduce){.foldart__bot,.foldart__back,.foldart__front{transition:none}.fstart:has(input:checked) :is(.foldart__sheet,.foldart__lock,.foldart__bot){animation:none}}
 .group__act{display:flex;align-items:center;gap:8px}.group__act .btn svg{width:16px;height:16px}.group__act input[type=file]{display:none}
+.gend__act{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px}.fzip svg{width:16px;height:16px}html:not([data-fzip]) .fzip{display:none}
+@media (max-width:560px){.group__act .fzip__label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}.gend__act{justify-content:flex-start}}
 .group__head h2 .badge{margin-left:6px;vertical-align:2px}
 .card--folder{position:relative;padding:8px}.card--folder>.fnote{padding:16px}
 .fnote{margin:0;color:var(--text-secondary)}.fapp>.fnote{padding:6px 12px;font-size:var(--text-xs)}
@@ -4933,8 +5106,9 @@ body.out .topbar{display:flex;align-items:center;justify-content:space-between;g
 .fapp.is-drop::after{content:attr(data-drop);position:absolute;inset:0;z-index:2;display:grid;place-items:center;border:1.5px dashed var(--accent);border-radius:inherit;background:color-mix(in oklab,var(--surface) 84%,transparent);color:var(--accent-strong);font-weight:500;pointer-events:none}
 .fempty{display:grid;justify-items:center;gap:6px;margin:4px;padding:36px 16px 32px;border:1.5px dashed var(--border-strong);border-radius:calc(var(--radius-surface) - 12px);text-align:center}
 .fempty p{margin:0}.fempty__title{font-size:var(--text-base);font-weight:500}.fempty__act{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:10px}.fempty__act .btn svg{width:16px;height:16px}
-.fprog{display:grid;gap:8px;padding:10px 12px}.fprog[hidden],.fapp [hidden]{display:none}.fprog__what{color:var(--text-secondary);font-size:var(--text-xs)}.fprog .meter__track{height:6px}.fprog .meter__fill{transition:width var(--duration-standard) var(--ease-standard)}
-.ffoot{display:grid;gap:12px;margin-top:6px;padding:14px 12px 8px;border-top:1px solid var(--border-subtle)}
+.fopen{display:grid;gap:10px;padding:14px 12px}.fopen__bar{display:flex;align-items:center;gap:10px}.fopen__bar .meter__track{flex:1;height:6px}.fopen__bar .meter__fill{transition:width var(--duration-standard) var(--ease-standard)}.fopen__pct{min-width:4ch;text-align:right;color:var(--text-secondary);font-size:var(--text-xs);font-variant-numeric:tabular-nums}.fopen .btn{justify-self:start}.fprog{display:grid;gap:8px;padding:10px 12px}.fprog[hidden],.fapp [hidden]{display:none}.fprog__what{color:var(--text-secondary);font-size:var(--text-xs)}.fprog .meter__track{height:6px}.fprog .meter__fill{transition:width var(--duration-standard) var(--ease-standard)}
+.ffoot{display:grid;gap:8px;align-items:center;margin-top:4px;padding:10px 12px 6px;border-top:1px solid var(--border-subtle)}.ffoot .meter{gap:6px}.ffoot .meter__top{min-height:0}.ffoot .meter__title{font-size:var(--text-sm)}
+@media (min-width:561px){.ffoot{grid-template-columns:minmax(0,260px) 1fr;column-gap:20px}.ffoot>.ffoot__me{justify-self:end;text-align:right}.ffoot>.ffoot__me:only-child{grid-column:1/-1;justify-self:start;text-align:left}}
 .ffoot__me{margin:0;color:var(--text-muted);font-size:var(--text-xs)}
 .linkbtn{padding:0;border:0;background:none;color:inherit;font:inherit;text-decoration:underline;text-decoration-color:var(--border-strong);text-underline-offset:2px;cursor:pointer}.linkbtn--danger{color:var(--danger)}
 .fpair{display:grid;justify-items:start;gap:12px;padding:16px}.fpair>p{margin:0}.fpair__title{font-size:var(--text-base)}
@@ -4985,6 +5159,9 @@ body.out .topbar{display:flex;align-items:center;justify-content:space-between;g
 @media (max-width:640px){.fview{width:100vw;height:100dvh;margin:0;border-radius:0}.fview__head{padding:max(14px,env(safe-area-inset-top)) 12px 10px 16px}.fview__bar{padding:0 16px}.fsug__act{margin:0 -16px -16px;padding:10px 16px;bottom:-16px}.fview__body{padding:0 16px 16px}.fview__foot{flex-wrap:wrap;padding:10px 12px max(10px,env(safe-area-inset-bottom)) 16px}}
 .fhist{list-style:none;margin:8px 0 0;padding:0}.fhist__row{display:flex;align-items:center;gap:12px;min-height:56px;padding:8px 0}.fhist__row+.fhist__row{border-top:1px solid var(--border-subtle)}
 .fhist__main{display:grid;flex:1;min-width:0}.fhist__v{font-weight:500}.fhist__meta{color:var(--text-muted);font-size:var(--text-xs)}
+.fhist__meta{font-variant-numeric:tabular-nums}.fhist__add{color:var(--success)}.fhist__del{color:var(--danger)}.fhist__sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.fhist__act{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}
+@media (max-width:560px){.fhist__row{flex-wrap:wrap;gap:4px 12px}.fhist__act{width:100%;justify-content:flex-start}}
+.frow__dot--mine{background:var(--text-muted)}.frow__web{--badge-bg:transparent}
 .md{max-width:70ch;padding:4px 0 24px;font-size:var(--text-base);line-height:1.6;overflow-wrap:anywhere}
 .md h2,.md h3,.md h4,.md h5,.md h6{margin:1.3em 0 .45em;font-family:var(--font-display);font-weight:500;letter-spacing:-.02em;line-height:1.25}
 .md h2{font-size:var(--text-2xl)}.md h3{font-size:var(--text-xl)}.md h4{font-size:var(--text-lg)}.md h5,.md h6{font-size:var(--text-base)}

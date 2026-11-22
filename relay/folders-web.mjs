@@ -104,6 +104,27 @@ export function folderCrypto(webcrypto) {
     const box = await subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']);
     return { sign, box, pub: { sign: b64(await subtle.exportKey('raw', sign.publicKey)), box: b64(await subtle.exportKey('raw', box.publicKey)) } };
   }
+  // Safari/WebKit can drop Ed25519/X25519 CryptoKeys on IndexedDB read (CryptoKeyOKP deserialization bug).
+  // Wrap them with a non-extractable AES-GCM key so IndexedDB only ever stores an AES-GCM CryptoKey + ciphertext,
+  // and re-import the live signing/encryption keys as non-extractable on every load.
+  async function newWrappedDeviceKeys() {
+    const wrapKey = await subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const sign = await subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const box = await subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
+    const pub = { sign: b64(await subtle.exportKey('raw', sign.publicKey)), box: b64(await subtle.exportKey('raw', box.publicKey)) };
+    const payload = { sign: await subtle.exportKey('jwk', sign.privateKey), box: await subtle.exportKey('jwk', box.privateKey) };
+    const iv = random(12);
+    const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv }, wrapKey, enc.encode(JSON.stringify(payload))));
+    const wrapped = { v: 2, wrapKey, iv, ct, pub };
+    return { keys: await unwrapDeviceKeys(wrapped), wrapped };
+  }
+  async function unwrapDeviceKeys(w) {
+    if (!w || w.v !== 2 || !w.wrapKey || !w.iv || !w.ct || !w.pub) throw new Error('invalid stored keys');
+    const { sign: signJwk, box: boxJwk } = parse(new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv: w.iv }, w.wrapKey, w.ct)));
+    const sign = { privateKey: await subtle.importKey('jwk', signJwk, { name: 'Ed25519' }, false, ['sign']), publicKey: await subtle.importKey('raw', unb64(w.pub.sign), { name: 'Ed25519' }, true, ['verify']) };
+    const box = { privateKey: await subtle.importKey('jwk', boxJwk, { name: 'X25519' }, false, ['deriveBits']), publicKey: await subtle.importKey('raw', unb64(w.pub.box), { name: 'X25519' }, true, []) };
+    return { sign, box, pub: w.pub };
+  }
   const signKey = (x) => subtle.importKey('raw', unb64(x), { name: 'Ed25519' }, false, ['verify']);
   const boxKey = (x) => subtle.importKey('raw', unb64(x), { name: 'X25519' }, false, []);
   const signBytes = async (priv, data) => new Uint8Array(await subtle.sign({ name: 'Ed25519' }, priv, data));
@@ -198,7 +219,9 @@ export function folderCrypto(webcrypto) {
   async function finishLink(pending, keys, poll, confirm) {
     if (poll?.status !== 'approved') throw Object.assign(new Error('not approved yet'), { code: 'waiting' });
     const root = poll.manifest?.roster?.root;
-    const typed = String(confirm).toUpperCase().replace(/[^0-9A-F]/g, '');
+    // People paste the bot's whole reply ("b2b device link --confirm A3D9…"): take the 16-character code out of it.
+    const raw = String(confirm).toUpperCase(), found = raw.match(/(?:^|[^0-9A-F])([0-9A-F]{4}[\s-]?[0-9A-F]{4}[\s-]?[0-9A-F]{4}[\s-]?[0-9A-F]{4})(?![0-9A-F])/);
+    const typed = (found ? found[1] : raw).replace(/[^0-9A-F]/g, '');
     if (!root || typed !== (await deviceReturnCode(pending.request, root))) throw Object.assign(new Error('confirmation code does not match'), { code: 'mismatch' });
     const d = (await verifiedDevices(poll.manifest, root)).find((x) => x.id === pending.request.id);
     if (!d || d.sign !== keys.pub.sign || d.box !== keys.pub.box || d.token_hash !== (await deviceHash(pending.token)) || d.name !== pending.request.name) throw Object.assign(new Error('approved keys do not match'), { code: 'mismatch' });
@@ -281,10 +304,14 @@ export function folderCrypto(webcrypto) {
   const MIME = { md: 'text/markdown', markdown: 'text/markdown', txt: 'text/plain', csv: 'text/csv', tsv: 'text/tab-separated-values', json: 'application/json', yaml: 'application/yaml', yml: 'application/yaml', toml: 'application/toml', html: 'text/html', xml: 'application/xml' };
   const mimeOf = (path) => MIME[ext(path)] || (TEXT.has(ext(path)) ? 'text/plain' : 'application/octet-stream');
   const isText = (path) => TEXT.has(ext(path));
+  // What the bots keep in their folders on disk, as cli/b2b.mjs textPath(): a file with no extension, or a text
+  // extension. Anything else (images, PDFs, zips) stays here on the web; their sync skips it.
+  const DISK = /\.(?:md|markdown|txt|text|csv|tsv|json|yaml|yml|toml|xml|html|css|js|jsx|mjs|ts|tsx|py|sh|go|rs|java|c|h|cpp|sql|ini|log|jsonl|ndjson|jsonc|cxx|cs|dart|bash|fish|m|mm|erb|lua|cmake|gradle|cjs|mts|cts|hpp|rb|php|kt|swift|scala|r|pl|zsh|vue|svelte|tex|rst|conf|env|properties|diff|patch|graphql|proto|srt|vtt)$/i;
+  const onDisk = (path) => { const n = String(path).split('/').pop(); return (n.lastIndexOf('.') <= 0 && !n.startsWith('.')) || DISK.test(n); };
 
-  return { CHUNK, EMPTY_SHA, b64, unb64, hex, random, sha256, concat, chacha20, poly1305, aeadSeal, aeadOpen, newDeviceKeys, seal, unseal, unsealWithKey, envelopeKey,
+  return { CHUNK, EMPTY_SHA, b64, unb64, hex, random, sha256, concat, chacha20, poly1305, aeadSeal, aeadOpen, newDeviceKeys, newWrappedDeviceKeys, unwrapDeviceKeys, seal, unseal, unsealWithKey, envelopeKey,
     deviceBytes, deviceHash, deviceCode, deviceReturnCode, deviceCheck, verifiedDevices, devicesOf, linkRequest, pollProof, finishLink,
-    AAD, SAAD, PARTS, chunkNonce, chunkCount, checkPath, encryptVersion, tombstone, checkManifest, decryptVersion, encryptPart, decryptPart, checkSuggestion, ext, mimeOf, isText };
+    AAD, SAAD, PARTS, chunkNonce, chunkCount, checkPath, encryptVersion, tombstone, checkManifest, decryptVersion, encryptPart, decryptPart, checkSuggestion, ext, mimeOf, isText, onDisk };
 }
 
 // Line-based three-way merge (diff3). Edits that don't touch the same lines merge, and so do insertions at the same
@@ -412,7 +439,9 @@ export function folderClient({ core, merge, fetch: fetchImpl, base = '', group, 
   const state = { info: null, trust: new Map(), files: new Map(), locked: new Set(), unverified: 0, seq: 0, proposals: new Map() };
   const url = (p) => new URL(p, base || globalThis.location?.href).toString();
   async function api(method, path, body) {
-    const r = await fetchImpl(url(root + path), { method, credentials: 'omit', cache: 'no-store',
+    // A request that never answers would leave the page waiting for good: give up after a while and let it retry.
+    const signal = globalThis.AbortSignal?.timeout ? AbortSignal.timeout(/[?&]wait=/.test(path) ? 70_000 : 25_000) : undefined;
+    const r = await fetchImpl(url(root + path), { method, credentials: 'omit', cache: 'no-store', ...(signal ? { signal } : {}),
       headers: { authorization: `Bearer ${device.token}`, 'x-b2b-version': version, ...(body ? { 'content-type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}) });
     let data = null;
@@ -450,19 +479,21 @@ export function folderClient({ core, merge, fetch: fetchImpl, base = '', group, 
     return d;
   }
   const kind = (fileId, v) => `team-folder/2/${group}/${fileId}/${v}`;
-  // A row's manifest, from this device's own envelope, or from a backfill: another device of this same identity seals { v: 1, source_box, source_envelope, opening_key } to us
+  // A row's manifest, from this device's own envelope, or from a backfill: another folder device seals { v: 1, source_box, source_envelope, opening_key } to us
   // under team-backfill/1/<kind>. The source envelope must carry the original author's signature over its kind and
   // source_box (any well-formed box key: a device that received a copy may forward it on); its opening key opens only
   // that one envelope.
   async function manifestOf(row, kindText) {
     if (!row.backfill) return core.unseal(row.envelope, { box: keys.box.privateKey, boxPub: keys.pub.box, peerSign: row.sign_key, meta: { from: row.sign_key, to: keys.pub.box, kind: kindText } });
-    // The descriptor carries the device list as it was when the copy was made: it must be signed by this identity's
-    // own root (pinned at pairing), and name the giving device. A device revoked later still leaves its copies readable.
-    const pin = (await pins?.get(me.handle)) ?? null;
-    if (pin && (pin.sign !== device.root.sign || pin.box !== device.root.box)) throw Object.assign(new Error('this bot\'s keys changed'), { code: 'keys' });
-    const snapshot = await core.devicesOf(row.backfill.device_list ?? null, device.root);
+    // Authenticate the historical list with the source identity pinned during refresh.
+    const { handle, root_sign, device_list } = row.backfill;
+    const h = handle === undefined ? me.handle : bare(handle);
+    const member = state.trust.has(h) && state.info.members.find((m) => bare(m.handle) === h);
+    const root = h === me.handle ? device.root : member || await pins?.get(h);
+    if (!root || (handle !== undefined && root.sign !== root_sign)) throw new Error('unknown backfill source key');
+    const snapshot = await core.devicesOf(device_list ?? null, root);
     const giver = snapshot.find((d) => (d.name === row.backfill.device || d.id === row.backfill.device) && d.sign === row.backfill.sign);
-    if (!giver || giver.sign === keys.pub.sign) throw Object.assign(new Error('backfill from a device that is not ours'), { code: 'author' });
+    if (!giver || giver.sign === keys.pub.sign) throw Object.assign(new Error('unknown backfill source device'), { code: 'author' });
     const b = await core.unseal(row.envelope, { box: keys.box.privateKey, boxPub: keys.pub.box, peerSign: giver.sign, meta: { from: giver.sign, to: keys.pub.box, kind: `team-backfill/1/${kindText}` } });
     if (b?.v !== 1 || typeof b.source_box !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(b.source_box) || core.unb64(b.source_box).length !== 32 || typeof b.source_envelope !== 'string' || typeof b.opening_key !== 'string') throw new Error('invalid backfill');
     return core.unsealWithKey(b.source_envelope, { key: b.opening_key, peerSign: row.sign_key, meta: { from: row.sign_key, to: b.source_box, kind: kindText } });
@@ -477,10 +508,12 @@ export function folderClient({ core, merge, fetch: fetchImpl, base = '', group, 
   const at = (v) => (typeof v === 'number' ? v : Date.parse(v) || 0);
   const entry = (row, manifest) => ({ file_id: row.file_id, version: row.version, seq: row.seq, author: bare(row.author), author_device: row.author_device ?? null, at: at(row.created_at), manifest });
   // Follows the change feed. Rows sealed before this browser was paired have no envelope for it: counted, not shown.
-  async function sync(wait = 0) {
+  async function sync(wait = 0, onRow = null) {
     const r = await api('GET', `/changes?since=${state.seq}${wait ? `&wait=${wait}` : ''}`);
-    const changed = [];
-    for (const row of r.changes ?? []) {
+    const changed = [], rows = r.changes ?? [];
+    let done = 0;
+    for (const row of rows) {
+      onRow?.(++done, rows.length);
       if (!row.envelope) { if (!state.files.has(row.file_id)) state.locked.add(row.file_id); continue; }
       let manifest;
       try { manifest = await open(row); } catch { state.unverified++; continue; }
@@ -563,7 +596,7 @@ export function folderClient({ core, merge, fetch: fetchImpl, base = '', group, 
     const v = base + 1;
     let manifest, upload_id = null;
     if (data) {
-      const max = state.info.max_file_bytes ?? 100 * 1024 * 1024;
+      const max = state.info.max_file_bytes ?? 200 * 1024 * 1024;
       if (data.length > max) throw Object.assign(new Error('file too large'), { code: 'big' });
       const q = state.info.quota;
       if (q && q.used + data.length + 16 * core.chunkCount(data.length) > q.max) throw Object.assign(new Error('quota'), { code: 'quota' });
@@ -763,7 +796,40 @@ export function folderClient({ core, merge, fetch: fetchImpl, base = '', group, 
     }
     throw new Error('the file keeps changing');
   }
-  return { state, api, refresh, sync, load, history, put, write, remove, restore, live, byPath, freePath, newId, me, decode, suggest, proposals, pending, details, reviewed, accept, resolve, again };
+  // Old versions' text, opened once each: null for a deletion or anything that isn't text.
+  const texts = new Map();
+  function textAt(fileId, v) {
+    const k = `${fileId}:${v}`;
+    if (!texts.has(k)) texts.set(k, load(fileId, v).then((r) => (r.data && mergeable(r.manifest.path, r.data) ? decode(r.data) : null), (e) => { texts.delete(k); throw e; }));
+    return texts.get(k);
+  }
+  // Lines version v added and removed, against prev (null: v started from nothing). Null when either isn't text.
+  async function change(fileId, v, prev = null) {
+    const now = await textAt(fileId, v), was = prev ? await textAt(fileId, prev) : '';
+    if (now == null || was == null) return null;
+    let add = 0, del = 0;
+    for (const o of merge.diff(was, now)) { if (o.t === 'add') add++; else if (o.t === 'del') del++; }
+    return { add, del };
+  }
+  // Undoes one save: what version v changed against prev, taken back out of the latest version. Everything saved
+  // since stays. When a later save touched the same lines, the undo waits as a suggestion instead.
+  //   { outcome: 'saved' | 'merged' | 'suggestion' | 'same' } ('same': nothing of it is left to undo)
+  async function revert(fileId, v, prev) {
+    const now = await textAt(fileId, v), was = await textAt(fileId, prev);
+    if (now == null || was == null) throw Object.assign(new Error('not text'), { code: 'changed' });
+    await sync();
+    const f = state.files.get(fileId);
+    if (!f || f.manifest.deleted) throw Object.assign(new Error('deleted'), { code: 'gone' });
+    const cur = await load(fileId, f.version), text = cur.data && mergeable(cur.manifest.path, cur.data) ? decode(cur.data) : null;
+    if (text == null) throw Object.assign(new Error('not text'), { code: 'changed' });
+    const m = merge.merge3(now, was, text);
+    if (m.clean && m.text === text) return { file_id: fileId, version: f.version, outcome: 'same' };
+    if (!m.clean) return { file_id: fileId, outcome: 'suggestion', suggestion: await suggest({ fileId, path: f.manifest.path, base: v, observed: f.version, original: now, current: text, proposed: was }) };
+    return write({ fileId, path: f.manifest.path, data: encode(m.text), base: f.version, baseData: cur.data, mime: f.manifest.mime });
+  }
+  // This bot's own suggestions still waiting (from any of its devices, the watcher included), by file.
+  const mineWaiting = () => pending().filter((p) => p.author === me.handle);
+  return { state, api, refresh, sync, load, history, put, write, remove, restore, live, byPath, freePath, newId, me, decode, suggest, proposals, pending, mineWaiting, details, reviewed, accept, resolve, again, textAt, change, revert };
 }
 
 // Text previews (Markdown, JSON, CSV, numbered code), built from DOM nodes and textContent only: a file can never
@@ -924,14 +990,77 @@ export function folderRender(document) {
 
 // The "Shared folder" section on the group page: reading, editing and reviewing text documents together. The server renders #folder-app with public facts only (group,
 // bot handle and keys, role, device names, display names); everything secret stays in this browser.
-export function folderApp({ folderCrypto, folderMerge, folderClient, folderRender }) {
+// A store-only ZIP (no compression), built in the browser from files it already decrypted and checked. Names are
+// UTF-8 (flag bit 11) and keep their folders. Plain ZIP, no ZIP64: the whole archive stays under 4 GiB.
+export function folderZip() {
+  const enc = new TextEncoder();
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; table[n] = c >>> 0; }
+  function crc32(data, crc = 0) {
+    let c = ~crc >>> 0;
+    for (let i = 0; i < data.length; i++) c = table[(c ^ data[i]) & 0xff] ^ (c >>> 8);
+    return ~c >>> 0;
+  }
+  // MS-DOS date and time, in local time as zip tools show them, kept between 1980 and 2107.
+  function dosTime(ms) {
+    let d = new Date(Number.isFinite(ms) ? ms : Date.now());
+    if (d.getFullYear() < 1980) d = new Date(1980, 0, 1);
+    if (d.getFullYear() > 2107) d = new Date(2107, 11, 31, 23, 59, 58);
+    return { time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), date: ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate() };
+  }
+  // Relative paths only: no leading "/", no "." or ".." parts, "/" between folders.
+  const clean = (name) => String(name).replace(/\\/g, '/').split('/').filter((s) => s && s !== '.' && s !== '..').join('/');
+  const LIMIT = 0xffffffff;
+  // entries: [{ name, data: Uint8Array, mtime }]. Returns the archive as parts, ready for new Blob(parts).
+  function zip(entries) {
+    const parts = [], central = [], seen = new Set();
+    let offset = 0;
+    for (const e of entries) {
+      const name = clean(e.name);
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      const raw = enc.encode(name), data = e.data instanceof Uint8Array ? e.data : new Uint8Array(e.data);
+      const crc = crc32(data), { time, date } = dosTime(e.mtime);
+      if (data.length >= LIMIT || offset + 30 + raw.length + data.length >= LIMIT || entries.length > 0xffff) throw Object.assign(new Error('zip too big'), { code: 'big' });
+      const local = new Uint8Array(30 + raw.length), lv = new DataView(local.buffer);
+      lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0x0800, true); lv.setUint16(8, 0, true);
+      lv.setUint16(10, time, true); lv.setUint16(12, date, true); lv.setUint32(14, crc, true);
+      lv.setUint32(18, data.length, true); lv.setUint32(22, data.length, true); lv.setUint16(26, raw.length, true); lv.setUint16(28, 0, true);
+      local.set(raw, 30);
+      const cd = new Uint8Array(46 + raw.length), cv = new DataView(cd.buffer);
+      cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0x0800, true); cv.setUint16(10, 0, true);
+      cv.setUint16(12, time, true); cv.setUint16(14, date, true); cv.setUint32(16, crc, true);
+      cv.setUint32(20, data.length, true); cv.setUint32(24, data.length, true); cv.setUint16(28, raw.length, true);
+      cv.setUint32(42, offset, true); // extra, comment, disk, attributes: 0
+      cd.set(raw, 46);
+      parts.push(local, data); central.push(cd);
+      offset += local.length + data.length;
+    }
+    const cdSize = central.reduce((n, c) => n + c.length, 0);
+    if (offset + cdSize + 22 >= LIMIT) throw Object.assign(new Error('zip too big'), { code: 'big' });
+    const end = new Uint8Array(22), ev = new DataView(end.buffer);
+    ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, central.length, true); ev.setUint16(10, central.length, true);
+    ev.setUint32(12, cdSize, true); ev.setUint32(16, offset, true);
+    return [...parts, ...central, end];
+  }
+  // A file name that every system accepts, from the group's name.
+  const fileName = (s, fallback = 'Shared folder') => (String(s ?? '').replace(/[\\/:*?"<>|\0-\x1f\x7f]+/g, ' ').replace(/\s+/g, ' ').trim().replace(/^\.+/, '').slice(0, 120) || fallback);
+  return { crc32, dosTime, zip, fileName, LIMIT };
+}
+
+export function folderApp({ folderCrypto, folderMerge, folderClient, folderRender, folderZip }) {
   const root = document.getElementById('folder-app');
-  if (!root) return;
+  if (!root || root.dataset.mounted) return;
+  root.dataset.mounted = '1';
   const W = JSON.parse(document.getElementById('folder-words')?.textContent || '{}');
   const say = (k, v = {}) => String(W[k] ?? k).replace(/\{(\w+)\}/g, (m, x) => (v[x] ?? m));
   const d = root.dataset, group = Number(d.group), handle = d.handle, lang = d.lang || 'en';
-  const people = JSON.parse(d.people || '{}'), taken = JSON.parse(d.devices || '[]');
+  const people = JSON.parse(d.people || '{}'), taken = JSON.parse(d.devices || '[]'), groupName = d.name || '';
   const rootKeys = { sign: d.sign, box: d.box };
+  // The owner's bots in this group that may open the folder: any of them can approve this browser.
+  const bareH = (h) => String(h ?? '').replace(/^@/, '').toLowerCase();
+  const mineBots = (() => { try { return JSON.parse(d.mine || '[]'); } catch { return []; } })();
+  if (!mineBots.some((x) => bareH(x.handle) === bareH(handle))) mineBots.unshift({ id: Number(d.bot) || null, handle, sign: d.sign, box: d.box, name: `@${bareH(handle)}` });
   const head = document.getElementById('folder-actions');
   let core, merge, render, client = null, alive = true;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -969,7 +1098,7 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.remove(), action ? 9000 : 4600);
   }
-  const fail = (e) => toast(e?.code === 'big' ? say('Over 100 MB. Split it or zip it smaller.') : e?.code === 'quota' ? say('The folder is full. Delete something first.') : e?.code === 'keys' ? say('Someone’s keys changed. Check with them before saving here.') : e?.code === 'read' ? say('You can read this folder, not change it.') : say('That didn’t work. Try again.'));
+  const fail = (e) => toast(e?.code === 'big' ? say('Over 200 MB. Split it or zip it smaller.') : e?.code === 'quota' ? say('The folder is full. Delete something first.') : e?.code === 'keys' ? say('Someone’s keys changed. Check with them before saving here.') : e?.code === 'read' ? say('You can read this folder, not change it.') : say('That didn’t work. Try again.'));
 
   // ───── formats ─────
   const nf = (n, unit) => new Intl.NumberFormat(lang, { style: 'unit', unit, unitDisplay: 'short', maximumFractionDigits: n < 10 ? 1 : 0 }).format(n);
@@ -986,10 +1115,21 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
   // ───── this browser's keys and token, per bot, in IndexedDB (CryptoKeys stay non-extractable) ─────
   const db = (() => {
     let p;
-    const open = () => (p ??= new Promise((ok, no) => { const r = indexedDB.open('b2b-folders', 1); r.onupgradeneeded = () => { r.result.createObjectStore('devices'); r.result.createObjectStore('pins'); }; r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error); }));
-    const run = async (store, mode, fn) => { const x = await open(); return new Promise((ok, no) => { const t = x.transaction(store, mode), r = fn(t.objectStore(store)); t.oncomplete = () => ok(r?.result); t.onerror = () => no(t.error); }); };
+    const open = () => (p ??= new Promise((ok, no) => { const r = indexedDB.open('b2b-folders', 1); r.onupgradeneeded = () => { r.result.createObjectStore('devices'); r.result.createObjectStore('pins'); }; r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error); r.onblocked = () => no(new Error('storage blocked')); }));
+    const run = async (store, mode, fn) => { const x = await open(); return new Promise((ok, no) => { const t = x.transaction(store, mode), r = fn(t.objectStore(store)); if (r) r.onerror = () => no(r.error); t.oncomplete = () => ok(r?.result); t.onerror = () => no(t.error); t.onabort = () => no(t.error || new Error('storage aborted')); }); };
     return { get: (s, k) => run(s, 'readonly', (o) => o.get(k)), set: (s, k, v) => run(s, 'readwrite', (o) => o.put(v, k)), del: (s, k) => run(s, 'readwrite', (o) => o.delete(k)) };
   })();
+  const loadDevice = async () => {
+    const raw = (await db.get('devices', handle)) ?? null;
+    if (!raw) return null;
+    if (raw.wrapped) {
+      try { return { ...raw, keys: await core.unwrapDeviceKeys(raw.wrapped) }; }
+      catch { await db.del('devices', handle).catch(() => {}); return null; }
+    }
+    if (raw.keys?.sign?.privateKey && raw.keys?.box?.privateKey) return raw;
+    await db.del('devices', handle).catch(() => {});
+    return null;
+  };
   const pins = { get: (h) => db.get('pins', h), set: (h, v) => db.set('pins', h, v) };
   const browserName = () => { const u = navigator.userAgent; return /Edg\//.test(u) ? 'edge' : /OPR\//.test(u) ? 'opera' : /Firefox\//.test(u) ? 'firefox' : /Chrome\//.test(u) ? 'chrome' : /Safari\//.test(u) ? 'safari' : 'browser'; };
   const deviceName = () => { const b = `web-${browserName()}`; if (!taken.includes(b)) return b; for (let n = 2; ; n++) if (!taken.includes(`${b}-${n}`)) return `${b}-${n}`; };
@@ -1014,7 +1154,7 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
   }
   async function pairView(note = '') {
     head?.replaceChildren();
-    const rec = (await db.get('devices', handle)) ?? null;
+    const rec = await loadDevice();
     const pending = rec?.pending && rec.pending.request.expires_at > Date.now() + 30_000 ? rec : null;
     const box = el('div', 'fpair');
     box.append(el('h3', 'fpair__title', say('Open the folder in this browser')));
@@ -1022,29 +1162,35 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
     if (!pending) {
       box.append(el('p', 'muted', say('This browser becomes one of your bot’s devices, so files stay end-to-end encrypted here too.')));
       if (taken.length >= 4) { box.append(el('p', 'fpair__note', say('Your bot already has 4 devices. Ask it to remove one, then come back.'))); root.replaceChildren(box); return; }
-      const start = button(say('Set up this browser'), 'btn');
-      start.addEventListener('click', async () => {
-        start.disabled = true;
+      const startBtn = button(say('Set up this browser'), 'btn');
+      startBtn.addEventListener('click', async () => {
+        startBtn.disabled = true;
         try {
-          const keys = await core.newDeviceKeys();
+          const { keys, wrapped } = await core.newWrappedDeviceKeys();
           const link = await core.linkRequest(keys, deviceName());
           await post('/v1/devices/link', { request: link.request, proof: link.proof });
-          await db.set('devices', handle, { keys, pending: link });
-          pairView();
-        } catch { start.disabled = false; toast(say('That didn’t work. Try again.')); }
+          await db.set('devices', handle, { wrapped, pending: link });
+          const saved = await loadDevice();
+          if (!saved?.pending) throw new Error('storage');
+          await pairView();
+        } catch (err) {
+          startBtn.disabled = false;
+          toast(say('That didn’t work. Try again.'));
+          if (!box.querySelector('.fpair__note')) box.insertBefore(el('p', 'fpair__note', say('That didn’t work. Try again.')), startBtn);
+        }
       });
-      box.append(start);
+      box.append(startBtn);
       root.replaceChildren(box);
       return;
     }
     hold('pair', true);
-    const { keys, pending: link } = pending;
+    const { keys, wrapped, pending: link } = pending;
     const code = await core.deviceCode(link.request);
     const steps = el('ol', 'walk fpair__walk');
     const step = (n, title, ...body) => { const li = el('li', 'walk__step'), main = el('div'); li.append(el('span', 'walk__n', String(n))); main.append(el('p', 'walk__t', title), ...body); li.append(main); steps.append(li); };
-    step(1, say('Send this to your bot'), codeBlock(`Please approve my browser as your linked device, then tell me the code you get back:\nb2b device approve ${link.request.id} ${code} --owner-ok`));
+    step(1, mineBots.length > 1 ? say('Send this to any of your bots in this group: {bots}', { bots: mineBots.map((x) => x.name).join(', ') }) : say('Send this to your bot'), codeBlock(`Please approve my browser as your linked device, then tell me the code you get back:\nb2b device approve ${link.request.id} ${code} --owner-ok`));
     const form = el('form', 'fpair__form'), input = el('input', 'fpair__code'), go = el('button', 'btn', say('Open the folder'));
-    input.autocomplete = 'off'; input.spellcheck = false; input.maxLength = 24; input.placeholder = 'XXXX XXXX XXXX XXXX'; input.setAttribute('aria-label', say('Code from your bot'));
+    input.autocomplete = 'off'; input.spellcheck = false; input.maxLength = 400; input.placeholder = 'XXXX XXXX XXXX XXXX'; input.setAttribute('aria-label', say('Code from your bot'));
     input.setAttribute('autocapitalize', 'characters');
     const status = el('p', 'fpair__status', say('Waiting for your bot…')); status.setAttribute('role', 'status');
     form.append(input, go);
@@ -1069,19 +1215,22 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
         if (!approved) await poll();
         if (!approved) { status.textContent = say('Your bot hasn’t approved it yet.'); return; }
         const done = await core.finishLink(link, keys, approved, input.value);
-        if (done.handle !== handle || done.device.root.sign !== rootKeys.sign || done.device.root.box !== rootKeys.box) throw Object.assign(new Error('other bot'), { code: 'mismatch' });
-        await db.set('devices', handle, { keys, token: done.token, device: done.device, handle: done.handle });
+        const bot = mineBots.find((x) => bareH(x.handle) === bareH(done.handle));
+        if (!bot || done.device.root.sign !== bot.sign || done.device.root.box !== bot.box) throw Object.assign(new Error('other bot'), { code: 'stranger' });
+        await db.set('devices', bot.handle, { ...(wrapped ? { wrapped } : { keys }), token: done.token, device: done.device, handle: done.handle });
         hold('pair', false);
         toast(say('This browser is paired'));
+        // Another of your bots approved it: the folder opens as that bot, on its own group page.
+        if (bareH(bot.handle) !== bareH(handle)) { await db.del('devices', handle).catch(() => {}); if (bot.id) { location.href = `/app/groups/${group}?bot=${bot.id}#folder`; return; } }
         start();
-      } catch (err) { status.textContent = err.code === 'mismatch' ? say('That code doesn’t match. Check your bot’s reply.') : say('That didn’t work. Try again.'); }
+      } catch (err) { status.textContent = err.code === 'stranger' ? say('That approval came from a bot that isn’t one of yours in this group.') : err.code === 'mismatch' ? say('That code doesn’t match. Check your bot’s reply.') : say('That didn’t work. Try again.'); }
       finally { go.disabled = false; }
     });
   }
 
   // ───── the folder ─────
   const open = new Set(), fresh = new Set();
-  let focusId = null, rec = null, quota, tree, note, prog;
+  let focusId = null, rec = null, quota, tree, note, prog, zipBtn = null, opens = 0;
   function progress(text, done, total) {
     if (text == null) { prog.hidden = true; hold('busy', false); return; }
     hold('busy', true);
@@ -1095,7 +1244,8 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
     up.addEventListener('click', () => pick.click());
     pick.addEventListener('change', () => { const list = [...pick.files].map((file) => ({ file, rel: file.name })); pick.value = ''; upload(list, ''); });
     add.addEventListener('click', () => newNote(''));
-    head?.replaceChildren(...(client.state.info.role === 'write' ? [add, up, pick] : [el('span', 'badge', say('Read only'))]));
+    zipBtn = zipButton('btn small ghost fzip');
+    head?.replaceChildren(zipBtn, ...(client.state.info.role === 'write' ? [add, up, pick] : [el('span', 'badge', say('Read only'))]));
     prog = el('div', 'fprog'); prog.hidden = true; prog.setAttribute('role', 'status');
     const track = el('div', 'meter__track'); track.append(el('div', 'meter__fill'));
     prog.append(el('span', 'fprog__what'), track);
@@ -1120,8 +1270,12 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
   }
   const byName = (a, b) => a.localeCompare(b, lang, { numeric: true, sensitivity: 'base' });
   function draw() {
-    const top = nodes(), flagged = new Set(client.pending().map((x) => x.file_id));
-    const flags = (n) => n.files.some((f) => flagged.has(f.file_id)) || [...n.dirs.values()].some(flags);
+    // Someone else's suggestion needs a decision; this bot's own (saved here, by the watcher or another device) waits.
+    const mine = new Set(client.mineWaiting().map((x) => x.file_id));
+    const flagged = new Set(client.pending().filter((x) => x.author !== client.me.handle).map((x) => x.file_id));
+    const top = nodes(), flagOf = (f) => (flagged.has(f.file_id) ? 'decide' : mine.has(f.file_id) ? 'mine' : null);
+    const flags = (n) => (n.files.some((f) => flagged.has(f.file_id)) || [...n.dirs.values()].some((x) => flags(x) === 'decide') ? 'decide'
+      : n.files.some((f) => mine.has(f.file_id)) || [...n.dirs.values()].some(flags) ? 'mine' : null);
     tree.replaceChildren();
     const count = (n) => n.files.length + [...n.dirs.values()].reduce((s, x) => s + count(x), 0);
     const row = (level, parent, { id, label, meta, dir, expanded, f, flag }) => {
@@ -1133,7 +1287,14 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
       const ic = el('span', 'frow__icon'); ic.append(icon(dir != null ? 'chev' : 'file')); if (dir != null) ic.classList.add('frow__chev');
       const main = el('span', 'frow__main'), nm = el('span', 'frow__name', label);
       main.append(nm);
-      if (flag) { const b = el('span', 'badge badge--warning frow__flag', say('Needs a decision')); if (dir != null) { b.className = 'frow__dot'; b.textContent = ''; b.setAttribute('aria-label', say('Needs a decision')); } nm.append(b); }
+      if (flag) {
+        const words = flag === 'decide' ? say('Needs a decision') : say('Yours, waiting');
+        const b = el('span', `badge ${flag === 'decide' ? 'badge--warning' : ''} frow__flag`, words);
+        if (dir != null) { b.className = `frow__dot${flag === 'mine' ? ' frow__dot--mine' : ''}`; b.textContent = ''; b.setAttribute('role', 'img'); b.setAttribute('aria-label', words); }
+        nm.append(b);
+      }
+      // Bots keep only text files on disk: a picture or PDF shared here never reaches their folders.
+      if (f && !core.onDisk(f.manifest.path)) nm.append(el('span', 'badge frow__flag frow__web', say('Web only')));
       main.append(el('span', 'frow__meta', meta));
       line.append(ic, main);
       li.append(line);
@@ -1147,12 +1308,13 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
         if (expanded) { const g = el('ul', 'ftree__group'); g.setAttribute('role', 'group'); li.append(g); walk(sub, level + 1, g); }
       }
       for (const f of n.files.sort((a, b) => byName(base(a.manifest.path), base(b.manifest.path))))
-        row(level, parent, { id: f.file_id, label: base(f.manifest.path), meta: `${size(f.manifest.size)} · ${who(f.author)} · ${ago(f.at)}`, f, flag: flagged.has(f.file_id) });
+        row(level, parent, { id: f.file_id, label: base(f.manifest.path), meta: `${size(f.manifest.size)} · ${who(f.author)} · ${ago(f.at)}`, f, flag: flagOf(f) });
     };
     walk(top, 1, tree);
     const items = [...tree.querySelectorAll('[role=treeitem]')];
     (items.find((x) => x.dataset.id === focusId) ?? items[0])?.setAttribute('tabindex', '0');
     tree.hidden = !items.length;
+    if (zipBtn) zipBtn.hidden = !client.live().length;
     root.querySelector('.fempty')?.remove();
     if (!items.length) {
       const empty = el('div', 'fempty');
@@ -1244,7 +1406,7 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
       for (const [n, { file, rel }] of list.entries()) {
         const path = (dir ? `${dir}/${rel}` : rel).normalize('NFC');
         try { core.checkPath(path); } catch { continue; }
-        if (file.size > (client.state.info.max_file_bytes ?? 100 * 1024 * 1024)) { toast(say('{name} is over 100 MB. Split it or zip it smaller.', { name: file.name })); continue; }
+        if (file.size > (client.state.info.max_file_bytes ?? 200 * 1024 * 1024)) { toast(say('{name} is over 200 MB. Split it or zip it smaller.', { name: file.name })); continue; }
         progress(say('Uploading {name}…', { name: file.name }), n, list.length);
         const had = client.byPath(path), data = new Uint8Array(await file.arrayBuffer());
         let r;
@@ -1261,7 +1423,13 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
     if (waiting.length && !done.length) { toast(say('Someone changed it first. Yours waits as a suggestion'), { label: say('Review'), run: () => view(client.state.files.get(waiting[0]), 'decide') }); return; }
     if (!done.length) return;
     const undo = { run: () => busy(async () => { for (const x of done.reverse()) await (x.before ? client.restore(x.id, x.before) : client.remove(x.id)); toast(say('Undone')); }) };
-    toast(done.length === 1 ? say('Uploaded {name}', { name: base(client.state.files.get(done[0].id).manifest.path) }) : say('Uploaded {n} files', { n: done.length }), undo);
+    // What didn't go everywhere shows in the toast too, not only as a badge on its row.
+    const name = base(client.state.files.get(done[0].id).manifest.path), one = done.length === 1;
+    const webOnly = done.some((x) => !core.onDisk(client.state.files.get(x.id).manifest.path));
+    const other = waiting.length ? base(client.state.files.get(waiting[0])?.manifest.path ?? '') : '';
+    toast(other ? (one ? say('Uploaded {name}. {other} waits as a suggestion', { name, other }) : say('Uploaded {n} files. {other} waits as a suggestion', { n: done.length, other }))
+      : webOnly ? (one ? say('Uploaded {name}. Bots only get text files, so it stays on the web', { name }) : say('Uploaded {n} files. Bots only get the text files', { n: done.length }))
+      : one ? say('Uploaded {name}', { name }) : say('Uploaded {n} files', { n: done.length }), undo);
   }
   async function busy(fn) {
     hold('busy', true);
@@ -1305,8 +1473,10 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
     requestAnimationFrame(() => { put(bs.find((b) => b.dataset.key === on) ?? bs[0]); requestAnimationFrame(() => g.classList.add('ready')); });
     return g;
   }
-  const metaOf = (f) => `${size(f.manifest.size)} · ${who(f.author)} · ${ago(f.at)}`;
-  const suggestionFor = (fileId) => client.pending().find((s) => s.file_id === fileId);
+  const metaOf = (f) => `${size(f.manifest.size)} · ${who(f.author)} · ${ago(f.at)}${core.onDisk(f.manifest.path) ? '' : ` · ${say('Web only')}`}`;
+  // Someone else's suggestion first: that one needs a decision. Otherwise this bot's own, waiting.
+  const isMine = (s) => s.author === client.me.handle;
+  const suggestionFor = (fileId) => client.pending().filter((s) => s.file_id === fileId).sort((a, b) => isMine(a) - isMine(b))[0];
   const canWrite = () => client.state.info.role === 'write';
   async function view(f, tab = 'preview') {
     if (!f) return;
@@ -1321,7 +1491,7 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
     del.hidden = !canWrite();
     foot.append(del, el('span', 'fview__gap'), edit, dl);
     const show = (k) => { foot.hidden = k === 'decide'; return k === 'preview' ? preview(f, body) : k === 'history' ? historyOf(f, body) : decide(sug, body); };
-    seg(bar, [['preview', say('Preview')], ...(sug ? [['decide', say('Needs a decision'), true]] : []), ['history', say('History')]], show, sug && tab !== 'history' && tab !== 'preview-only' ? 'decide' : tab === 'history' ? 'history' : 'preview');
+    seg(bar, [['preview', say('Preview')], ...(sug ? [['decide', isMine(sug) ? say('Yours, waiting') : say('Needs a decision'), !isMine(sug)]] : []), ['history', say('History')]], show, sug && tab !== 'history' && tab !== 'preview-only' ? 'decide' : tab === 'history' ? 'history' : 'preview');
     dl.addEventListener('click', () => busy(async () => { const data = await bytesOf(f); const a = el('a'); a.href = blobUrl(data, f.manifest.mime); a.download = base(f.manifest.path); document.body.append(a); a.click(); a.remove(); toast(say('Downloaded {name}', { name: base(f.manifest.path) })); }));
     edit.addEventListener('click', async () => { const data = await bytesOf(f); editor({ f, text: client.decode(data) ?? '', data }); });
     del.addEventListener('click', () => busy(async () => {
@@ -1364,18 +1534,67 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
     const text = client.decode(data);
     body.replaceChildren(text === null ? el('p', 'muted', say('No preview for this kind of file. Download it to open it.')) : rendered(f.manifest.path, text));
   }
+  // Each version: who saved it and when, what it changed (+added −removed lines against the version before, worked
+  // out here once the row scrolls into view), and two ways back: undo just that save, or restore the whole version.
   async function historyOf(f, body) {
     body.replaceChildren(el('p', 'fview__wait muted', say('Loading history…')));
     let list;
     try { list = await client.history(f.file_id); } catch { body.replaceChildren(el('p', 'fview__bad', say('That didn’t work. Try again.'))); return; }
     const ul = el('ul', 'fhist');
     const now = client.state.files.get(f.file_id)?.version;
-    for (const v of list) {
+    const text = (v) => v && !v.deleted && v.manifest && core.isText(v.manifest.path) && v.manifest.size <= 10 * 1024 * 1024;
+    const jobs = new Map();
+    let queue = Promise.resolve();
+    const summarize = (job) => {
+      queue = queue.then(async () => {
+        if (!body.contains(job.sum)) return;
+        let c = null;
+        try { c = await client.change(f.file_id, job.v.version, job.prev && !job.prev.deleted ? job.prev.version : null); } catch { /* left blank */ }
+        if (!c) return;
+        if (!c.add && !c.del) { job.sum.replaceChildren(' · ', say('Same text')); return; }
+        const add = el('span', c.add ? 'fhist__add' : null, `+${c.add}`), del = el('span', c.del ? 'fhist__del' : null, `−${c.del}`), gap = el('span', null, ' ');
+        [add, gap, del].forEach((x) => x.setAttribute('aria-hidden', 'true'));
+        job.sum.replaceChildren(' · ', add, gap, del, el('span', 'fhist__sr', say('{add} lines added, {del} removed', { add: c.add, del: c.del })));
+      });
+    };
+    const seen = 'IntersectionObserver' in window
+      ? new IntersectionObserver((es, o) => es.forEach((e) => { if (e.isIntersecting) { o.unobserve(e.target); summarize(jobs.get(e.target)); } }), { root: body, rootMargin: '160px 0px' })
+      : null;
+    list.forEach((v, i) => {
+      const prev = list[i + 1] ?? null;
       const li = el('li', 'fhist__row'), main = el('div', 'fhist__main');
-      main.append(el('span', 'fhist__v', say('Version {n}', { n: v.version })), el('span', 'fhist__meta', `${v.deleted ? say('Deleted') : v.manifest ? size(v.manifest.size) : say('Locked')} · ${who(v.author)} · ${ago(v.at)}`));
+      const meta = el('span', 'fhist__meta', `${v.deleted ? say('Deleted') : v.manifest ? size(v.manifest.size) : say('Locked')} · ${who(v.author)} · ${ago(v.at)}`);
+      main.append(el('span', 'fhist__v', say('Version {n}', { n: v.version })), meta);
       li.append(main);
+      if (text(v) && (!prev || prev.deleted || text(prev))) {
+        const sum = el('span', 'fhist__sum');
+        meta.append(sum);
+        jobs.set(li, { v, prev, sum });
+      }
       if (v.version === now) li.append(el('span', 'badge badge--info', say('Current')));
       else if (!v.deleted && v.manifest && canWrite()) {
+        const act = el('div', 'fhist__act');
+        // Undo this change: only what this save did, taken out of the latest version. Later saves stay.
+        if (text(v) && text(prev)) {
+          const u = button(say('Undo this change'), 'btn small ghost');
+          u.addEventListener('click', () => busy(async () => {
+            const r = await client.revert(f.file_id, v.version, prev.version);
+            if (r.outcome === 'same') { toast(say('Nothing left to undo from version {n}', { n: v.version })); return; }
+            fresh.add(f.file_id);
+            if (r.outcome === 'suggestion') {
+              toast(say('A later save changed the same lines. Your undo waits as a suggestion'), { label: say('Review'), run: () => view(client.state.files.get(f.file_id), 'decide') });
+              view(client.state.files.get(f.file_id), 'decide');
+              return;
+            }
+            toast(say('Undid the changes from version {n}', { n: v.version }), { run: () => busy(async () => {
+              const back = await client.revert(f.file_id, r.version, r.before);
+              if (back.outcome === 'suggestion') toast(say('Someone saved since. Your undo waits as a suggestion'), { label: say('Review'), run: () => view(client.state.files.get(f.file_id), 'decide') });
+              else toast(say('Undone'));
+            }) });
+            view(client.state.files.get(f.file_id), 'history');
+          }));
+          act.append(u);
+        }
         const b = button(say('Restore'), 'btn small ghost');
         b.addEventListener('click', () => busy(async () => {
           const before = client.state.files.get(f.file_id)?.version;
@@ -1384,11 +1603,13 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
           toast(say('Restored version {n}', { n: v.version }), before ? { run: () => busy(async () => { await client.restore(f.file_id, before); toast(say('Undone')); }) } : null);
           view(client.state.files.get(f.file_id), 'history');
         }));
-        li.append(b);
+        act.append(b);
+        li.append(act);
       }
       ul.append(li);
-    }
+    });
     body.replaceChildren(ul);
+    for (const [li, job] of jobs) { if (seen) seen.observe(li); else summarize(job); }
   }
   // ───── a suggestion: someone's change to the same lines, waiting for a yes or no ─────
   function diffView(from, to) {
@@ -1531,21 +1752,108 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
   const newNote = (dir) => editor({ text: '', dir });
 
   // ───── start: paired or not, then live ─────
-  async function start() {
-    rec = await db.get('devices', handle);
-    if (!rec?.token) return pairView();
-    if (rec.device.root.sign !== rootKeys.sign || rec.device.root.box !== rootKeys.box) { await db.del('devices', handle); return pairView(say('Your bot has new keys. Set this browser up again.')); }
-    root.replaceChildren(el('p', 'fnote muted', say('Opening the folder…')));
-    client = folderClient({ core, merge, fetch: (...a) => fetch(...a), base: location.origin, group, device: { token: rec.token, handle, device: rec.device, root: rec.device.root }, keys: rec.keys, pins });
-    try { await client.refresh(); await client.sync(0); await client.proposals().catch(() => {}); }
-    catch (e) {
-      if (e.status === 401) { await db.del('devices', handle); return pairView(say('This browser was removed from your bot’s devices. Set it up again.')); }
-      root.replaceChildren(el('p', 'fnote', e.status === 403 ? say('Your bot doesn’t have access to this folder yet.') : e.status === 404 ? say('The shared folder is off.') : say('Can’t reach the folder right now.')));
+  // ───── every current file as one zip, decrypted and checked here, exactly like a single download ─────
+  // Buttons anywhere on the page with data-folder-zip run it (the Shared folder head, the End the group row).
+  const zipper = folderZip();
+  let zipping = false;
+  function zipButton(cls) {
+    const b = el('button', cls); b.type = 'button'; b.dataset.folderZip = '';
+    b.append(icon('down'), el('span', 'fzip__label', say('Download all files')));
+    return b;
+  }
+  const isOpen = () => !!client && !!tree && root.contains(tree);
+  async function downloadAll(from = null) {
+    if (zipping) return;
+    if (!isOpen()) {
+      // Not paired here yet: the pairing step, in the Shared folder tab, says why it's needed.
+      if (!(await loadDevice().catch(() => null))?.token) {
+        document.getElementById('gtab-folder')?.click();
+        await pairView(say('To download the files, open the folder in this browser first.'));
+        root.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+        return;
+      }
+      // Paired: the folder is opening, or its tab says why it can't.
+      document.getElementById('gtab-folder')?.click();
+      if (root.querySelector('.fopen')) toast(say('The folder is still opening. Try again in a moment.'));
       return;
     }
+    const files = client.live().sort((a, b) => byName(a.manifest.path, b.manifest.path));
+    if (!files.length) { toast(say('There are no files yet.')); return; }
+    if (files.reduce((n, f) => n + f.manifest.size + 128 + 6 * f.manifest.path.length, 22) >= zipper.LIMIT) { toast(say('That’s too much for one zip. Download the files one by one.')); return; }
+    zipping = true;
+    hold('zip', true);
+    const buttons = [...document.querySelectorAll('[data-folder-zip]')], label = from?.querySelector('.fzip__label');
+    buttons.forEach((b) => { b.disabled = true; b.setAttribute('aria-busy', 'true'); });
+    const tick = (n) => {
+      const text = say('Downloading {n} of {total}', { n, total: files.length });
+      if (label) label.textContent = text;
+      if (prog && root.contains(prog)) progress(text, n - 1, files.length);
+    };
+    const entries = [];
+    let skipped = 0;
+    try {
+      for (let i = 0; i < files.length; i++) {
+        tick(i + 1);
+        const f = files[i];
+        try { const r = await client.load(f.file_id, f.version); if (r.data) entries.push({ name: f.manifest.path, data: r.data, mtime: f.manifest.mtime }); else skipped++; }
+        catch (e) { if (e.status === 401 || e.status === 403 || e.status === 404) throw e; skipped++; }
+      }
+      if (!entries.length) throw new Error('no files passed their check');
+      const name = `${say('{name} files', { name: zipper.fileName(groupName) })}.zip`;
+      const url = URL.createObjectURL(new Blob(zipper.zip(entries), { type: 'application/zip' }));
+      const a = el('a'); a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      toast(skipped ? say('Downloaded {name}. {n} files didn’t pass their check, so they’re not in it.', { name, n: skipped }) : say('Downloaded {name}', { name }));
+    } catch (e) {
+      if (e?.code === 'big') toast(say('That’s too much for one zip. Download the files one by one.')); else fail(e);
+    } finally {
+      zipping = false;
+      hold('zip', false);
+      if (prog && root.contains(prog)) progress(null);
+      buttons.forEach((b) => { b.disabled = false; b.removeAttribute('aria-busy'); });
+      if (label) label.textContent = say('Download all files');
+    }
+  }
+
+  async function start() {
+    rec = await loadDevice();
+    if (!rec?.token) return pairView();
+    if (rec.device.root.sign !== rootKeys.sign || rec.device.root.box !== rootKeys.box) { await db.del('devices', handle); return pairView(say('Your bot has new keys. Set this browser up again.')); }
+    // Opening shows where it is (a line and a bar with a percentage). If it hasn't finished after 15 s, a Try again
+    // button appears; a newer attempt makes the older one stop where it is.
+    const attempt = ++opens;
+    const box = el('div', 'fopen'), what = el('p', 'fnote muted', say('Opening the folder…')), track = el('div', 'meter__track'), fill = el('div', 'meter__fill'), pct = el('span', 'fopen__pct', '0 %');
+    box.setAttribute('role', 'status'); track.append(fill);
+    const bar = el('div', 'fopen__bar'); bar.append(track, pct); box.append(what, bar);
+    const stage = (text, frac) => { if (attempt !== opens) return; what.textContent = text; const n = Math.round(Math.min(1, Math.max(0, frac)) * 100); fill.style.width = `${n}%`; pct.textContent = `${n} %`; };
+    root.replaceChildren(box);
+    const slow = setTimeout(() => {
+      if (attempt !== opens || !root.contains(box)) return;
+      const again = button(say('Try again'), 'btn small ghost');
+      again.addEventListener('click', () => { client = null; start(); });
+      box.append(el('p', 'fnote muted', say('This is taking longer than usual.')), again);
+    }, 15_000);
+    stage(say('Opening the folder…'), 0.05);
+    client = folderClient({ core, merge, fetch: (...a) => fetch(...a), base: location.origin, group, device: { token: rec.token, handle, device: rec.device, root: rec.device.root }, keys: rec.keys, pins });
+    const mine = client;
+    try {
+      await client.refresh(); stage(say('Loading the file list…'), 0.2);
+      await client.sync(0, (n, total) => stage(say('Unlocking files: {n} of {total}', { n, total }), 0.2 + 0.7 * (n / Math.max(1, total))));
+      stage(say('Almost there…'), 0.95);
+      await client.proposals().catch(() => {});
+    } catch (e) {
+      clearTimeout(slow);
+      if (attempt !== opens) return;
+      if (e.status === 401) { await db.del('devices', handle); return pairView(say('This browser was removed from your bot’s devices. Set it up again.')); }
+      const msg = el('p', 'fnote', e.status === 403 ? say('Your bot doesn’t have access to this folder yet.') : e.status === 404 ? say('The shared folder is off.') : say('Can’t reach the folder right now.'));
+      const again = button(say('Try again'), 'btn small ghost'); again.addEventListener('click', () => { client = null; start(); });
+      root.replaceChildren(...(e.status === 403 || e.status === 404 ? [msg] : [msg, again]));
+      return;
+    }
+    clearTimeout(slow);
+    if (attempt !== opens || client !== mine) return;
     build(); draw();
     let errors = 0;
-    const mine = client;
     while (alive && client === mine) {
       if (document.hidden) { await sleep(1500); continue; }
       try { const ch = await client.sync(25); errors = 0; if (ch.length && client === mine) { ch.forEach((id) => fresh.add(id)); if (holds.has('busy')) continue; draw(); } }
@@ -1560,10 +1868,17 @@ export function folderApp({ folderCrypto, folderMerge, folderClient, folderRende
       core = folderCrypto(crypto); merge = folderMerge(); render = folderRender(document);
     } catch { root.replaceChildren(el('p', 'fnote', say('This browser can’t open the folder. Try a current Chrome, Edge, Safari or Firefox.'))); return; }
     document.body.append(dlg);
+    // Download all files: the buttons show once this browser can build the zip; one listener serves every mount.
+    window.b2bFolderZip = downloadAll;
+    document.documentElement.dataset.fzip = '';
+    if (!window.b2bFolderZipBound) {
+      window.b2bFolderZipBound = true;
+      document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-folder-zip]'); if (b && !b.disabled && window.b2bFolderZip) { e.preventDefault(); window.b2bFolderZip(b); } });
+    }
     start();
   })();
 }
 
 // The page script, served at /app/folders.js. Built from the functions above, so tests and browser share one source.
-export const FOLDERS_JS = `(${folderApp.toString()})({ folderCrypto: ${folderCrypto.toString()}, folderMerge: ${folderMerge.toString()}, folderClient: ${folderClient.toString()}, folderRender: ${folderRender.toString()} });`;
+export const FOLDERS_JS = `(function(){const mount=()=>(${folderApp.toString()})({ folderCrypto: ${folderCrypto.toString()}, folderMerge: ${folderMerge.toString()}, folderClient: ${folderClient.toString()}, folderRender: ${folderRender.toString()}, folderZip: ${folderZip.toString()} });window.b2bFolderMount=mount;mount();})();`;
 export const FOLDERS_JS_HASH = createHash('sha256').update(FOLDERS_JS).digest('hex').slice(0, 16);

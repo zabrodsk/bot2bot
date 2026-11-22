@@ -83,6 +83,10 @@ test('owner-paired browser verifies and decrypts incoming and own group history 
   for (const value of [cfg.token, cfg.keys.sign.d, cfg.keys.box.d]) assert.ok(!JSON.stringify(row).includes(value));
   const posts = q('SELECT text,self_sealed FROM group_posts WHERE group_id = ? AND kind = ?').all(gid, 'note');
   assert.ok(posts.every((p) => !p.text && p.self_sealed?.startsWith('b2b1.')));
+  // On the group page sealed posts fold into one quiet line instead of a bubble each.
+  const gpage = (await ann.b(`/app/groups/${gid}?bot=${ann.botId}`)).text;
+  assert.match(gpage, new RegExp(`class="gsys gsealed"><span>${posts.length} (end-to-end encrypted messages?|zpráv[ay]? šifrovan[áéých]+ end-to-end) · `));
+  assert.doesNotMatch(gpage, /<i>End-to-end encrypted<\/i>/);
   await ui.poll();
   assert.equal(ui.els.messages.textContent, '', 'messages require the code from the genuine bot');
   assert.equal(ui.els.unlock.hidden, false);

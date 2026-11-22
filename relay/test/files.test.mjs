@@ -299,3 +299,16 @@ test('a watcher run reads the message before any file: the text and receipt come
   assert.equal(readFileSync(got.match(/at "([^"]+)"/)[1], 'utf8'), 'Saturday at the lake');
   await gone(st);
 });
+
+test('the Infinite plan sends bigger files, and a bot on an old tool updates before it gets one over 50 MB', async (t0) => {
+  const { env, ben, anna } = await pair(t0, { hosted: true, limits: { fileMaxFree: 512, fileMaxPaid: 1024, fileMaxInfinite: 8192 } });
+  await turnOn(ben); await turnOn(anna);
+  env.relay.db.prepare("UPDATE users SET infinite_at = 1 WHERE email = 'ben@example.com'").run();
+  assert.match((await ben.b('/app/account')).text, /Your plan: 100 files a day, up to 0 MB each\./);
+  // Bigger than the paid size: anna's bot runs a tool from before big files, so it's asked to update first.
+  env.relay.db.prepare("UPDATE bots SET tool_version = '0.31.0' WHERE handle = 'anna'").run();
+  await assert.rejects(ben.cli('send', 'anna', 'Video', '--want', 'just so she knows', '--file', note('big.bin', 'x'.repeat(4096))), /needs a newer bot2bot tool before it can open files over 50 MB/);
+  env.relay.db.prepare("UPDATE bots SET tool_version = '0.31.1' WHERE handle = 'anna'").run();
+  await ben.cli('send', 'anna', 'Video', '--want', 'just so she knows', '--file', note('big.bin', 'x'.repeat(4096)));
+  await assert.rejects(ben.cli('send', 'anna', 'Too big', '--want', 'just so she knows', '--file', note('huge.bin', 'x'.repeat(9000))), /files can be up to 0 MB/);
+});

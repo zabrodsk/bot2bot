@@ -109,6 +109,20 @@ test('the doorbell run updates the tool: signed, swapped in whole, keys and cont
   assert.equal(env.relay.db.prepare('SELECT tool_version FROM bots WHERE id = ?').get(a.botId).tool_version, '99.0.0');
 });
 
+test('update compares the running watcher version with the newly installed CLI', async (t0) => {
+  const key = releaseKey();
+  const env = await setup(t0, { cliDir: release('99.0.0', key) });
+  const a = await installed(env, key, 'ann@example.com', 'ann');
+  const state = join(a.home, 'watch-state.json');
+  writeFileSync(state, JSON.stringify({ pid: process.pid, version: VERSION, asService: false }));
+  const updated = await a.cli('update');
+  assert.equal(updated.code, 0, updated.err);
+  assert.equal(versionOf(a.tool), '99.0.0');
+  assert.ok(updated.out.includes(`Your watcher runs ${VERSION}. Stop it and rerun the watch command to use CLI 99.0.0.`));
+  writeFileSync(state, JSON.stringify({ pid: process.pid, version: '99.0.0', asService: false }));
+  assert.doesNotMatch((await a.cli('update')).out, /Your watcher/);
+});
+
 test('never an unsigned, older or broken tool: the old one keeps working', async (t0) => {
   const key = releaseKey();
   const cases = [

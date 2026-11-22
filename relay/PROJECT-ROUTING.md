@@ -28,6 +28,19 @@ When a task finishes, the watcher replies to its original message. The owner see
 
 Group messages, replies to tracked questions, code reviews and scoped questions follow their own delivery rules.
 
+## Group tasks
+
+```sh
+b2b group folder 12 ~/code/acme
+b2b group send 12 "@anna Update the importer tests." --do
+```
+
+Set the code folder once on each bot's computer, in a session you opened. `group folder 12 --clear` removes the link. Inside a terminal, leaving out the path links the current folder. Outside a terminal, leaving it out prints the link.
+
+Only named bots get the task. Claude Code and Codex continue the latest chat in the linked folder, or start one there if it has no chats. If there's no link, they start a new chat in the bot's default folder. If the linked folder is gone, the task waits until you fix or clear the link.
+
+Tasks from other people wait for phone approval. Your own bots can start right away. The bot writes code in its own folder and uses the group's synced folder for plans, notes and summaries when it's available. The watcher replies in the group.
+
 ## Set up and manage projects
 
 ```sh

@@ -55,7 +55,14 @@ test('making a group on the dashboard: invited friends say yes from their overvi
   assert.match(made.page, /Anna<\/span><span class="line__sub">@anna · invited</);
   assert.match(made.page, /You<\/span><span class="line__sub">@ben · admin</);
   // The maker's invite link is ready from the start.
-  assert.match(made.page, /Invite link[^]*id="glink">http:[^<]*\/g\/[A-Z0-9]{4}-[A-Z0-9]{4}<[^]*Wake your bot for[^]*aria-pressed="true">Questions and mentions<[^]*Only admins can add people[^]*End group/);
+  assert.match(made.page, /Invite link[^]*id="glink">http:[^<]*\/g\/[A-Z0-9]{4}-[A-Z0-9]{4}<[^]*Wake your bot for[^]*aria-pressed="true">Questions and mentions<[^]*Only admins can add bots[^]*End group/);
+  // One view at a time: tabs for the conversation, the folder, people (with the count) and settings. Without
+  // JavaScript the bar stays hidden and every section shows; leaving and ending sit in their own card.
+  assert.match(made.page, new RegExp(`<div class="gtabs" data-gtabs="${gid}"><div class="gtabs__bar" role="tablist" aria-label="Group" hidden>`));
+  assert.match(made.page, /data-gtab="talk"[^]*>Conversation<[^]*data-gtab="folder"[^]*>Shared folder<[^]*data-gtab="people" data-also="invite"[^]*>Bots<\/span> <span class="count">3<\/span>[^]*data-gtab="settings"/);
+  assert.match(made.page, /<script nonce="[^"]+">\(function\(w\)[^<]*b2b-gtab-[^<]*\(document\.currentScript\.parentNode\);<\/script><div class="gtabs__panel" id="gp-talk" data-gpanel="talk">/);
+  assert.match(made.page, /id="gp-settings" data-gpanel="settings">[^]*Turn off invite links[^]*<\/div><div class="card card--rows card--leave">[^]*Leave the group[^]*End the group/);
+  assert.match(made.page, /<div class="gfoot"><p class="gtell">This group is end-to-end encrypted/);
 
   // Anna's overview: the invite first, with Join and No thanks.
   const home = groupsPart((await view(anna.b, '/app')));
@@ -64,7 +71,7 @@ test('making a group on the dashboard: invited friends say yes from their overvi
   // Her group page asks the same, and nothing of the conversation shows before she says yes.
   const invited = (await view(anna.b, `/app/groups/${gid}`));
   assert.match(invited, /Join Sunday lunch\?[^]*Ben invited you\./);
-  assert.doesNotMatch(invited, /Conversation|Wake your bot for/);
+  assert.doesNotMatch(invited, /Conversation|Wake your bot for|class="gtabs"/);
 
   // Someone who isn't in it can't open it, or act with another person's bot.
   assert.equal((await tom.b(`/app/groups/${gid}?bot=${ben.botId}`)).status, 404);
@@ -93,6 +100,8 @@ test('making a group on the dashboard: invited friends say yes from their overvi
   env.advance(24 * 3_600_000 + 60_000);
   // Ben adds Tom again; Tom joins. Anna isn't Tom's contact: one tap asks to connect, Tom says yes on his side.
   const added = await go(ben.b, `/app/groups/${gid}/add`, { bot: ben.botId, [`peer_${tom.botId}`]: '1' });
+  // Actions land back on their tab.
+  assert.equal(added.location, `/app/groups/${gid}?bot=${ben.botId}#people`);
   assert.match(added.page, /class="toast__what">1 person invited</);
   await go(tom.b, `/app/groups/${gid}/join`, { bot: tom.botId });
   const annaPage = (await view(anna.b, `/app/groups/${gid}?bot=${anna.botId}`));
@@ -111,11 +120,12 @@ test('making a group on the dashboard: invited friends say yes from their overvi
   await go(ben.b, `/app/groups/${gid}/admin`, { bot: ben.botId, member: anna.botId, undo: '1' });
   assert.equal(memberOf(env, gid, anna.botId).role, 'member');
   const rm = await go(ben.b, `/app/groups/${gid}/remove`, { bot: ben.botId, member: tom.botId });
+  assert.match(rm.location, /#people$/);
   assert.match(rm.page, /class="toast__what">Removed Tom from the group</);
   assert.equal(memberOf(env, gid, tom.botId).state, 'removed');
   // Anna isn't an admin: no admin menu or switches for her, and the relay says no if she tries.
   const plain = (await view(anna.b, `/app/groups/${gid}?bot=${anna.botId}`));
-  assert.doesNotMatch(plain, /Only admins can add people|End group|Remove from the group/);
+  assert.doesNotMatch(plain, /Only admins can add bots|End group|Remove from the group/);
   const denied = await anna.b(`/app/groups/${gid}/end`, { method: 'POST', form: { bot: anna.botId } });
   assert.equal(denied.status, 403);
   assert.match(denied.text, /Only admins can do that\./);
@@ -185,6 +195,7 @@ test("a group link: signed out it shows the group, a connected app joins it, and
   // Not encrypted: Mia can type here. Ben's bot has keys but Mia's doesn't, so nobody needs a sealed copy: he can too.
   assert.match(joined.page, /<textarea id="gmsg" name="text"/);
   const sent = await go(mia, `/app/groups/${gid}/send`, { bot: miaBot.id, text: 'Chapter 3 by Friday?', choices: 'Yes, No' });
+  assert.match(sent.location, /#talk$/);
   assert.match(sent.page, /class="toast__what">Sent to the group</);
   assert.match(sent.page, /class="bubble out"><div class="meta">You · just now · typed on the web · <b>question<\/b><\/div><div class="text">Chapter 3 by Friday\?<\/div><div class="choices--show"><span class="chip">Yes<\/span><span class="chip">No<\/span>/);
   const benPage = (await view(ben.b, `/app/groups/${gid}`));
@@ -193,7 +204,7 @@ test("a group link: signed out it shows the group, a connected app joins it, and
   assert.match(benPage, /class="bubble in"><div class="meta">Mia · just now · typed on the web · <b>question<\/b><\/div><div class="text">Chapter 3 by Friday\?</);
   assert.match(benPage, /<textarea id="gmsg" name="text"/);
   // The overview says so too.
-  assert.match(groupsPart((await view(ben.b, '/app'))), /Book club[^]*2 people · active just now · Not end-to-end encrypted/);
+  assert.match(groupsPart((await view(ben.b, '/app'))), /Book club[^]*2 bots · active just now · Not end-to-end encrypted/);
 });
 
 test('waking and hiding come with Undo; baskets fold away, hide from the overview, and a filter finds friends', async (t0) => {
@@ -204,6 +215,7 @@ test('waking and hiding come with Undo; baskets fold away, hide from the overvie
 
   // Muting, then Undo puts back what it was.
   const muted = await go(anna.b, `/app/groups/${gid}/wake`, { bot: anna.botId, wake: 'muted' });
+  assert.match(muted.location, /#settings$/);
   assert.equal(memberOf(env, gid, anna.botId).wake, 'muted');
   assert.match(muted.page, /Nothing wakes it[^]*aria-pressed="true">Muted</);
   assert.match(muted.page, new RegExp(`class="toast__what">Muted<\\/span><form method="post" action="/app/groups/${gid}/wake"><input type="hidden" name="bot" value="${anna.botId}"><input type="hidden" name="wake" value="mentions"><input type="hidden" name="undo" value="1">`));

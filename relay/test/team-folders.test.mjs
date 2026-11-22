@@ -56,8 +56,6 @@ async function team(t, opts = {}) {
     file,
     async enable() {
       await cmd(a, 'on');
-      await cmd(a, 'grant', '@ben', 'write');
-      await cmd(a, 'grant', '@anna', 'write');
       await sync(a);
       await sync(b);
     },
@@ -85,7 +83,11 @@ test('two homes exchange saves, merge Markdown, keep suggestions on the document
   writeFileSync(bf, 'theirs\n');
   writeFileSync(file(a, 'img.pdf'), Buffer.from([1, 2, 255]));
   await sync(a);
-  await sync(b);
+  const conflict = await sync(b);
+  const pendingId = conflict.match(/became suggestion (p_[a-f0-9]{32})/)[1];
+  const ownerNote = await b.cli('waiting');
+  assert.ok(ownerNote.includes(pendingId));
+  assert.match(ownerNote, /brief.md.*now shows the accepted version/);
   assert.deepEqual(readdirSync(file(b, '')), [name]);
   assert.equal(readFileSync(bf, 'utf8'), 'ours\n');
   const listing = await cmd(b, 'suggestions', name);
@@ -111,6 +113,149 @@ test('two homes exchange saves, merge Markdown, keep suggestions on the document
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM messages').get().n, messages);
 });
 
+test('a stale whole-file save keeps peer additions and tells both owners where to review it', async (t) => {
+  const { a, b, cmd, sync, file, enable } = await team(t);
+  await enable();
+  const name = 'timeline.md';
+  const original = 'My obsolete line\nTimeline\nEnd\n';
+  writeFileSync(file(a, name), original);
+  await sync(a);
+  await sync(b);
+  // Two revisions arrive together. The newest one doesn't introduce the line in danger.
+  const updated = original.replace('End', 'Anna was here\nEnd');
+  writeFileSync(file(b, name), updated);
+  await sync(b);
+  await cmd(b, 'edit', name, '--base', '2', '--old', 'End', '--new', 'Done');
+  await sync(a);
+  const accepted = updated.replace('End', 'Done');
+  assert.equal(readFileSync(file(a, name), 'utf8'), accepted);
+  writeFileSync(file(a, name), original + 'Ben was here\n');
+  const result = await sync(a);
+  assert.match(result, /1 line @anna added/);
+  assert.match(result, /1 line @anna changed/);
+  const id = result.match(/suggestion (p_[0-9a-f]{32})/)[1];
+  assert.equal(readFileSync(file(a, name), 'utf8'), accepted);
+  const waiting = await a.cli('waiting');
+  assert.ok(waiting.includes(id));
+  assert.match(waiting, /timeline.md.*now shows the accepted version/);
+  assert.match(await cmd(a, 'status'), new RegExp('Your pending suggestions:\n"timeline.md" ' + id));
+  assert.doesNotMatch(await cmd(b, 'status'), /Your pending suggestions/);
+  await sync(b);
+  assert.match(await b.cli('waiting'), new RegExp('proposed removing your lines.*timeline.md.*' + id));
+  await sync(b);
+  assert.doesNotMatch(await b.cli('waiting'), /proposed removing/);
+  const reviewed = await cmd(b, 'suggestions', name);
+  assert.ok(reviewed.includes('proposed\n' + original + 'Ben was here'));
+  // Removing one's own line while keeping the peer's addition is an ordinary save.
+  writeFileSync(file(a, name), accepted.replace('My obsolete line\n', ''));
+  assert.doesNotMatch(await sync(a), /suggestion/);
+  await sync(b);
+  assert.equal(readFileSync(file(b, name), 'utf8'), 'Timeline\nAnna was here\nDone\n');
+  await cmd(a, 'resolve', id, 'withdraw');
+  assert.doesNotMatch(await cmd(a, 'status'), /Your pending suggestions/);
+});
+
+test('read-only drafts survive pulls and write grants until explicitly uploaded', async (t) => {
+  const { a, b, cmd, sync, file, enable } = await team(t);
+  await enable();
+  writeFileSync(file(a, 'shared.md'), 'one\ntwo\n');
+  await sync(a);
+  await sync(b);
+  await cmd(a, 'grant', 'anna', 'read');
+  writeFileSync(file(b, 'shared.md'), 'mine\ntwo\n');
+  writeFileSync(file(b, 'local.md'), 'only here');
+  writeFileSync(file(a, 'shared.md'), 'one\ntheirs\n');
+  await sync(a);
+  writeFileSync(file(a, 'other.md'), 'arrived');
+  await sync(a);
+  await assert.rejects(sync(b), (err) => {
+    assert.notEqual(err.code, 0);
+    assert.doesNotMatch(err.stdout, /Synced/);
+    assert.match(err.stderr, /Not uploaded.*read access.*2 local edits/);
+    assert.ok(err.stderr.includes('shared.md') && err.stderr.includes('local.md'));
+    return true;
+  });
+  assert.equal(readFileSync(file(b, 'other.md'), 'utf8'), 'arrived');
+  assert.equal(readFileSync(file(b, 'shared.md'), 'utf8'), 'mine\ntwo\n');
+  // The next edit happens between the last read-only scan and the grant.
+  writeFileSync(file(b, 'another.md'), 'also held');
+  await cmd(a, 'grant', 'anna', 'write');
+  await assert.rejects(sync(b), /3 local edits.*--upload-drafts/);
+  await assert.rejects(sync(b), /3 local edits.*--upload-drafts/);
+  await sync(a);
+  assert.equal(existsSync(file(a, 'local.md')), false);
+  assert.equal(readFileSync(file(a, 'shared.md'), 'utf8'), 'one\ntheirs\n');
+  await cmd(b, 'sync', '--upload-drafts');
+  await sync(a);
+  assert.equal(readFileSync(file(a, 'shared.md'), 'utf8'), 'mine\ntheirs\n');
+  assert.equal(readFileSync(file(a, 'local.md'), 'utf8'), 'only here');
+  assert.equal(readFileSync(file(a, 'another.md'), 'utf8'), 'also held');
+  // Even an offline member who missed the entire read-only interval must consent.
+  await cmd(a, 'grant', 'anna', 'read');
+  writeFileSync(file(b, 'offline.md'), 'while offline');
+  await cmd(a, 'grant', 'anna', 'write');
+  await assert.rejects(sync(b), /1 local edit.*offline.md.*--upload-drafts/);
+  assert.doesNotMatch(await cmd(a, 'list'), /offline.md/);
+});
+
+test('CLI history shows who saved each change and revert preserves newer edits or leaves a suggestion', async (t) => {
+  const { a, b, root, cmd, sync, file, enable } = await team(t);
+  await enable();
+  const name = 'timeline.md';
+  const original = 'alpha\nbeta\ngamma\n';
+  writeFileSync(file(a, name), original);
+  await sync(a);
+  const edit = async (bot, base, old, value) => {
+    const out = await cmd(bot, 'edit', name, '--base', String(base), '--old', old, '--new=' + value);
+    assert.equal(JSON.parse(out).outcome, 'accepted');
+  };
+  await edit(b, 1, 'beta\n', '');
+  await edit(a, 2, 'gamma\n', 'gamma\ndelta\n');
+
+  const id = (await cmd(a, 'list')).match(/(f_[a-f0-9]+) v3/)[1];
+  const { versions } = (await a.api('GET', root + '/files/' + id + '/history')).json;
+  assert.deepEqual((await cmd(b, 'history', name)).trim().split('\n'), [
+    `${id} v3 "${name}"  @ben  ${new Date(versions[0].created_at).toISOString()} (current)  +1 −0 lines`,
+    `${id} v2 "${name}"  @anna  ${new Date(versions[1].created_at).toISOString()}  +0 −1 lines`,
+    `${id} v1 "${name}"  @ben  ${new Date(versions[2].created_at).toISOString()}  +3 −0 lines`,
+  ]);
+  await assert.rejects(cmd(a, 'revert', name, 'v1'), /Choose a saved version after v1/);
+  assert.equal((await cmd(a, 'revert', name, 'v2')).trim(), 'Undid v2 in timeline.md as v4.');
+  assert.match(await cmd(b, 'read', name), /v4[^]*alpha\nbeta\ngamma\ndelta\n/);
+  assert.match(await cmd(a, 'revert', name, 'v2'), /nothing left to undo/);
+  await edit(b, 4, 'beta\n', 'later\n');
+  const clash = await cmd(a, 'revert', name, 'v4');
+  const suggestion = clash.match(/That clashes with newer edits, so it's suggestion (p_[a-f0-9]{32})\./)[1];
+  assert.match(await cmd(b, 'read', name), /v5[^]*alpha\nlater\ngamma\ndelta\n/);
+  assert.match(await cmd(b, 'suggestions', name), new RegExp(`${suggestion} pending`));
+  assert.deepEqual(JSON.parse(await cmd(b, 'resolve', suggestion, 'accept')), {
+    outcome: 'accepted', proposal_id: suggestion, version: 6,
+  });
+  assert.match(await cmd(a, 'read', name), /v6[^]*alpha\ngamma\ndelta\n/);
+
+  await sync(a);
+  rmSync(file(a, name));
+  await sync(a);
+  assert.match(await cmd(b, 'history', name), /v7 "timeline.md"[^\n]+\(current\) \(deleted\)  \+0 −3 lines/);
+});
+
+test('CLI history keeps older saves visible and limits line counts to the latest 20', async (t) => {
+  const { a, cmd, sync, file, enable } = await team(t);
+  await enable();
+  const name = 'count.txt';
+  writeFileSync(file(a, name), 'count 1');
+  await sync(a);
+  for (let v = 2; v <= 22; v++) {
+    const out = await cmd(a, 'edit', name, '--base', String(v - 1), '--old', `count ${v - 1}`, '--new', `count ${v}`);
+    assert.equal(JSON.parse(out).version, v);
+  }
+  const history = await cmd(a, 'history', name);
+  assert.equal(history.match(/\+1 −1 lines/g)?.length, 20);
+  assert.match(history, /v3 "count.txt"[^\n]+\+1 −1 lines/);
+  assert.match(history, /v2 "count.txt"  @ben  [\d:T.Z-]+\n[^\n]+v1 "count.txt"  @ben  [\d:T.Z-]+\n/);
+  assert.match(history, /Line counts cover the latest 20 versions\./);
+});
+
 test('multipart ciphertext verifies order, length, digest and identity before publication; limits reserve concurrent uploads', async (t) => {
   const { env, db, dir, group, a, b, root, file, sync, enable } = await team(t);
   await enable();
@@ -134,11 +279,11 @@ test('multipart ciphertext verifies order, length, digest and identity before pu
   assert.ok(readFileSync(file(b, name)).equals(data));
   const id = 'f_' + 'a'.repeat(32),
     up = (size, chunks) => a.api('POST', root + '/uploads', { file_id: id, size, chunks });
-  assert.equal((await up(100 * 1024 ** 2 + 1, 26)).status, 413);
+  assert.equal((await up(200 * 1024 ** 2 + 1, 51)).status, 413);
   const tooLarge = file(a, 'over-limit.txt');
   writeFileSync(tooLarge, '');
-  truncateSync(tooLarge, 100 * 1024 ** 2 + 1);
-  await assert.rejects(sync(a), /100 MiB/);
+  truncateSync(tooLarge, 200 * 1024 ** 2 + 1);
+  await assert.rejects(sync(a), /200 MiB/);
   rmSync(tooLarge);
   const usage = (await a.api('GET', root)).json.quota.used;
   assert.equal(usage, data.length + 6 * 16);
@@ -162,7 +307,8 @@ test('folder access follows grants and signed device lists; retention and group 
   await cmd(a, 'on');
   await cmd(a, 'grant', '@ben', 'write');
   await sync(a);
-  assert.equal((await b.api('GET', root)).status, 403);
+  assert.equal((await b.api('GET', root)).json.role, 'write');
+  await cmd(a, 'revoke', '@anna');
   await assert.rejects(cmd(b, 'grant', '@anna', 'write'), /only group admins/);
   writeFileSync(file(a, 'draft.md'), 'first');
   await sync(a);
@@ -283,6 +429,7 @@ test('hosted: shared folders are an alpha for Infinite accounts, marked as alpha
   assert.match(await ben.cli(...args('grant', '@ben', 'write')), /read and write the shared folder \(alpha\)/);
   await assert.rejects(ben.cli(...args('grant', '@anna', 'read')), /@anna isn't on an Infinite account/);
   assert.equal((await infinite('anna@example.com')).status, 200);
+  assert.equal((await anna.api('GET', root)).json.role, 'write');
   await assert.rejects(anna.cli(...args('off')), /only group admins can turn the shared folder on or off/);
   await ben.cli(...args('grant', '@anna', 'read'));
   assert.match(await anna.cli(...args('list')), /^Shared folder \(alpha\)\. Access: @ben \(write\), @anna \(read\)/);
@@ -619,6 +766,9 @@ test('same-position insertions append in commit order, large text reconciles, no
   writeFileSync(file(a, 'invalid.txt'), Buffer.from([255]));
   const note = await sync(a);
   assert.equal(note.match(/Skipped non-text/g)?.length, 1);
+  assert.match(await a.cli('waiting'), /Skipped non-text files.*image.png/);
+  assert.doesNotMatch(await sync(a), /Skipped non-text/);
+  assert.doesNotMatch(await a.cli('waiting'), /Skipped non-text/);
   assert.doesNotMatch(await cmd(a, 'list'), /image.png|table.xlsx|note.pdf|letter.docx|invalid.txt/);
 });
 
@@ -671,6 +821,25 @@ async function interceptFolderCommit(t, env, bot, hook) {
   t.after(() => proxy.s.close());
   writeFileSync(path, JSON.stringify({ ...cfg, relay: proxy.url }));
 }
+
+test('revert rebases when a newer save lands during the commit', async (t) => {
+  const { a, b, env, cmd, sync, file, enable } = await team(t);
+  await enable();
+  const name = 'race.md';
+  writeFileSync(file(a, name), 'undo: original\nkeep: original\n');
+  await sync(a);
+  await cmd(a, 'edit', name, '--base', '1', '--old', 'undo: original', '--new', 'undo: changed');
+
+  const attemptedBases = [];
+  await interceptFolderCommit(t, env, a, async (body) => {
+    attemptedBases.push(body.base);
+    if (attemptedBases.length === 1)
+      await cmd(b, 'edit', name, '--base', '2', '--old', 'keep: original', '--new', 'keep: changed');
+  });
+  assert.match(await cmd(a, 'revert', name, 'v2'), /Undid v2 in race.md as v4\./);
+  assert.deepEqual(attemptedBases, [2, 3]);
+  assert.match(await cmd(b, 'read', name), /v4[^]*undo: original\nkeep: changed\n/);
+});
 
 test('a lost response retries the exact attempt once; repeated stale saves stop after three attempts and retain the edit', async (t) => {
   const { a, b, env, db, cmd, sync, file, enable } = await team(t);
@@ -752,7 +921,7 @@ test('proposal acceptance preserves unrelated text and rejects another change to
   assert.equal((await a.api('GET', root + '/suggestions/' + q.proposal_id)).json.state, 'pending');
 });
 
-test('pairing adds the current head and pending suggestions only to a device of the same identity', async (t) => {
+test('pairing adds the current head and pending suggestions to a new device', async (t) => {
   const { env, db, root, group, a, b, cmd, file, sync, enable } = await team(t);
   await enable();
   const name = 'research.md';
@@ -782,7 +951,7 @@ test('pairing adds the current head and pending suggestions only to a device of 
     { file_id: id, version: 2, missing: [device] },
     { file_id: id, proposal_id: pending, missing: [device] },
   ]);
-  assert.deepEqual((await b.api('GET', root + '/backfill')).json.items, []);
+  assert.deepEqual((await b.api('GET', root + '/backfill')).json.items.map((r) => r.missing_members), [[{ handle: 'ben', device }], [{ handle: 'ben', device }]]);
   const roster = (await a.api('GET', root)).json.roster;
   const request = { roster, file_id: id, version: 2, device, envelope: 'invalid' };
   assert.equal((await b.api('POST', root + '/backfill', request)).status, 403);
@@ -803,6 +972,7 @@ test('pairing adds the current head and pending suggestions only to a device of 
   );
   assert.ok(feed.changes[0].seq > cursor && feed.suggestion_events[0].seq > cursor);
   assert.equal((await get('/files/' + id + '/history')).versions.length, 1);
+  assert.match(await cmd(linked, 'history', name), /v2 "research.md"[^\n]+\(current\)  Change summary unavailable/);
   assert.deepEqual(
     (await get('/suggestions')).suggestions.map((s) => s.proposal_id),
     [pending],

@@ -89,7 +89,7 @@ export const LIMITS = {
   stableEveryMs: 24 * 3_600_000, // the stable tool moves on at most once a day
   stableSoakMs: 3_600_000,       // ...to a release that has been out on nightly for at least this long
   removedGraceMs: 3_600_000,     // a removed bot can be brought back for an hour, then it's gone
-  groupMax: 8,                   // people in a group chat, invited ones included
+  groupMax: 20,                  // people in a group chat, invited ones included
   groupsPerDay: 10,              // new groups one bot can make in a day
   groupPostsPer10Min: 10,        // one bot's messages to one group (bots don't chatter on their own; this only catches loops)
   groupPostsPerDay: 100,
@@ -1407,7 +1407,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         status: messageState(m, { replied: !!reply, quiet: !!(m.to_user && quietUntil(q('SELECT * FROM users WHERE id = ?').get(m.to_user), clock())), notAnsweringAfterRings: L.notAnsweringAfterRings }),
         choices: m.choices && !m.body_purged_at && (m.from_bot === me.id || m.status === 'delivered') ? JSON.parse(m.choices) : undefined,
         created_at: iso(m.created_at), first_rung_at: iso(m.first_rung_at), ring_count: m.ring_count,
-        first_claimed_at: iso(m.first_claimed_at), delivered_at: iso(m.delivered_at), note: ['key_check', 'watch_deferred'].includes(m.note) ? null : m.note,
+        first_claimed_at: iso(m.first_claimed_at), delivered_at: iso(m.delivered_at), note: ['key_check', 'watch_deferred', 'watch_group_deferred'].includes(m.note) ? null : m.note,
         reply: reply && m.from_bot === me.id ? { id: reply.id, text: reply.sealed ? undefined : reply.text, sealed: reply.sealed ?? undefined, auto: !!reply.auto, at: iso(reply.created_at) } : undefined,
       };
     },
@@ -1454,10 +1454,12 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
          OR (group_id IS NULL AND NOT EXISTS (SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = messages.from_bot))
          OR (group_id IS NOT NULL AND kind != 'group_event' AND NOT EXISTS (SELECT 1 FROM group_members g WHERE g.group_id = messages.group_id AND g.bot_id = messages.to_bot AND g.state = 'joined')))`, me.id, t - L.undeliveredExpiryMs, t, me.id, me.id, me.id);
       // Messages held because the sender's key changed stay put until the owner trusts the new key.
-      // Coding watchers inspect direct messages locally. Group delivery and the doorbell probe keep their existing path.
+      // Coding watchers open mentioned group posts locally to check for sealed task flags.
       const watchScan = body.watch_scan === true;
+      const watchGroupTasks = watchScan && body.watch_group_tasks === true;
       const watchFilter = watchScan
-        ? "AND m.group_id IS NULL AND m.kind != 'probe' AND coalesce(m.note, '') != 'watch_deferred'"
+        ? `AND ((m.group_id IS NULL AND m.kind != 'probe' AND coalesce(m.note, '') != 'watch_deferred')${watchGroupTasks
+          ? " OR (m.group_id IS NOT NULL AND m.kind IN ('note', 'ask') AND m.mentioned = 1 AND m.first_rung_at IS NOT NULL AND coalesce(m.note, '') != 'watch_group_deferred')" : ''})`
         : body.watch_groups === true ? "AND (m.group_id IS NOT NULL OR m.kind = 'probe')"
         : body.channel === true ? "AND coalesce(m.note, '') != 'watch_deferred'" : '';
       const rows = q(`SELECT m.*, b.handle AS from_handle, b.user_id AS from_user, b.vendor AS from_vendor, b.sign_pub AS from_sign, b.box_pub AS from_box, c.alias AS from_alias, c.can_ask AS allowed_topics, u.name AS from_person, u.email_verified_at AS from_verified, g.name AS group_name FROM messages m
@@ -1494,8 +1496,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
           ...(m.from_vendor === 'service' ? { from_service: true } : {}),
           from_person: m.kind === 'probe' ? null : (m.from_person ?? null), from_verified: !!m.from_verified,
           id: m.id, lease: m.lease, kind: m.kind, from: m.kind === 'probe' ? 'b2b relay' : (m.from_alias ?? `@${m.from_handle}`), from_handle: `@${m.from_handle}`,
-          ...(m.group_id ? { group: { id: m.group_id, name: m.group_name, post: m.group_post ?? undefined }, mentions_you: !!m.mentioned || undefined, contact: !!m.from_alias } : {}),
-          text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links), reply_to: m.reply_to, urgent: !!m.urgent,
+          ...(m.group_id ? { group: { id: m.group_id, name: m.group_name, post: m.group_post ?? undefined }, mentions_you: !!m.mentioned || undefined, contact: !!m.from_alias, re: m.reply_to ?? undefined } : {}),
+          text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links), reply_to: m.group_id ? null : m.reply_to, urgent: !!m.urgent,
           ...(!m.sealed && m.thread_id ? { thread: m.thread_id } : {}),
           sealed: m.sealed ?? undefined, from_keys: m.sealed && m.from_box ? { sign: m.from_sign, box: m.from_box } : undefined,
           files: m.sealed ? undefined : files.chatFor(m.id),
@@ -1539,6 +1541,10 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       if (m.status !== 'claimed' || !lease || lease !== m.lease_token || !(m.lease_until > clock())) throw new HttpError(409, 'this receipt is out of date; run inbox again');
       if (body.defer_wake === true && !m.group_id && m.kind !== 'probe') {
         q("UPDATE messages SET status = 'pending', lease_until = NULL, lease_token = NULL, next_ring_at = NULL, note = 'watch_deferred' WHERE id = ?").run(id);
+        return { id, status: 'pending' };
+      }
+      if (body.defer_group === true && m.group_id && m.mentioned && ['note', 'ask'].includes(m.kind)) {
+        q("UPDATE messages SET status = 'pending', lease_until = NULL, lease_token = NULL, next_ring_at = NULL, note = 'watch_group_deferred' WHERE id = ?").run(id);
         return { id, status: 'pending' };
       }
       q("UPDATE messages SET status = 'pending', lease_until = NULL, lease_token = NULL, next_ring_at = NULL, note = 'key_check' WHERE id = ?").run(id);
@@ -1848,7 +1854,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     return missing.length;
   }
   linkOwnBots();
-  const handleApp = createApp({ originFor, aliasUrls: aliases, analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, groupRuns, linkedDevices, groupBrowser, phone, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
+  const handleApp = createApp({ teamFolders, originFor, aliasUrls: aliases, analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, groupRuns, linkedDevices, groupBrowser, phone, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
     decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, status, files, toolInfo, channelFor, toolTooOld, privateDoorbell, renameBot, latestUpdate, board, feedbackTo, markActive, usage, hostedAdmin, payments, invites, hostedInvites: invites ? hostedInvites : null, adminEmails, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, watching, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   const probeHash = probeToken ? sha(probeToken) : null;
@@ -2009,6 +2015,12 @@ function makeMailer() {
 
 // ───── main ─────
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  // REQUIRE_SITE=1: refuse to start without the website, so a build without it (relay/Dockerfile) fails the health
+  // check and the platform keeps the previous deployment live instead of serving a site-less home page.
+  if (process.env.REQUIRE_SITE === '1' && !existsSync(join(process.env.SITE_DIR || '/nonexistent', 'index.html'))) {
+    console.error('REQUIRE_SITE=1 but SITE_DIR has no index.html: this build has no website. Deploy from the repo root.');
+    process.exit(1);
+  }
   const relay = createRelay({
     dbPath: process.env.DB_PATH || join(here, 'data', 'relay.db'),
     adminToken: process.env.ADMIN_TOKEN,

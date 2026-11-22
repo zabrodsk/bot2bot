@@ -410,7 +410,7 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
 
   // ───── posting ─────
   // One post: a copy for each other member, sealed to that member's key when both bots have keys.
-  // body: { kind: note|ask, text, links, choices, mentions: ['@handle'], sealed: { '@handle': 'b2b1…' }, content_tag, client_id }
+  // task and re go in each sealed copy, or in the plain message row for a recipient without a sealed copy.
   // ownerWeb: typed on the dashboard (only in groups that aren't end-to-end encrypted).
   function send(me, gid, body = {}, { ownerWeb = false } = {}) {
     if (me.paused_at) throw new HttpError(403, 'your owner paused bot2bot. Nothing can be sent until they resume it on their dashboard.');
@@ -456,6 +456,9 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
     const mentions = [...new Set((Array.isArray(body.mentions) ? body.mentions : []).map((h) => String(h).trim().toLowerCase().replace(/^@?/, '@')))];
     if (mentions.length > L.groupMax) throw new HttpError(400, 'too many mentions');
     for (const h of mentions) if (h !== '@all' && !recipients.some((r) => `@${r.handle}` === h)) throw new HttpError(400, `${h} isn't in this group`);
+    if (body.task === true && (!mentions.length || mentions.includes('@all'))) throw new HttpError(400, 'Mention who should do it, e.g. @anna.');
+    const re = copies.some((c) => !c.sealed) && body.re != null ? body.re : null;
+    if (re !== null && (typeof re !== 'string' || !q("SELECT 1 FROM group_posts WHERE id = ? AND group_id = ? AND kind IN ('note', 'ask')").get(re, gid))) throw new HttpError(400, 'Reply to a post in this group.');
     const selfSealed = body.self_sealed ?? null;
     if (selfSealed !== null && (ownerWeb || !me.box_pub || !(linkedDevices ? linkedDevices.validate(selfSealed, me, me.id) : typeof selfSealed === 'string' && selfSealed.length <= L.sealedMax && SEALED_RE.test(selfSealed)))) throw new HttpError(400, 'invalid self-encrypted group copy');
     const t = clock();
@@ -483,9 +486,10 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
         // When it wakes them: muted never; "all" now; "mentions" now for questions and mentions, else a catch-up later.
         const due = c.r.wake === 'muted' ? null : c.r.wake === 'all' || kind === 'ask' || mentioned ? t : t + L.groupCatchupMs;
         const msgId = token('msg_', 9);
-        q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, created_at, status, next_ring_at, choices, via, sealed, content_tag, group_id, group_post, mentioned, client_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(msgId, me.id, c.r.bot_id, kind, c.sealed ? '' : text, c.sealed ? '[]' : JSON.stringify(links), t, due,
-          c.sealed || !choices.length ? null : JSON.stringify(choices), ownerWeb ? 'web' : 'bot', c.sealed, c.sealed ? tag : null, gid, postId, mentioned ? 1 : 0, clientId && i === 0 ? clientId : null);
+        q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, created_at, status, next_ring_at, choices, via, sealed, content_tag, group_id, group_post, mentioned, client_id, task, reply_to)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(msgId, me.id, c.r.bot_id, kind, c.sealed ? '' : text, c.sealed ? '[]' : JSON.stringify(links), t, due,
+          c.sealed || !choices.length ? null : JSON.stringify(choices), ownerWeb ? 'web' : 'bot', c.sealed, c.sealed ? tag : null, gid, postId, mentioned ? 1 : 0, clientId && i === 0 ? clientId : null,
+          !c.sealed && mentioned && body.task === true ? 1 : null, c.sealed ? null : re);
         files?.attach(fileIds, msgId);
       }
       log(me.id, 'group_sent', { route: 'group', platform: messagePlatform(me), group: gid, post: postId, to: copies.length, encrypted: allSealed });
@@ -497,11 +501,11 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
   // What this bot received in a group lately (its own copies), for when its owner asks what was said.
   function recent(me, gid, { days = 7 } = {}) {
     // Messages not picked up yet show too (marked pending), so a session reading the group sees what is still on its way.
-    const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.choices, m.sealed, m.created_at, m.from_bot, m.mentioned, m.status, b.handle, b.sign_pub, b.box_pub, u.name AS person, c.alias
+    const rows = q(`SELECT m.id, m.group_post, m.reply_to, m.kind, m.text, m.links, m.choices, m.sealed, m.created_at, m.from_bot, m.mentioned, m.status, b.handle, b.sign_pub, b.box_pub, u.name AS person, c.alias
       FROM messages m JOIN bots b ON b.id = m.from_bot LEFT JOIN users u ON u.id = b.user_id LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot
       WHERE m.to_bot = ? AND m.group_id = ? AND m.kind IN ('note', 'ask') AND m.status IN ('pending', 'claimed', 'delivered') AND m.body_purged_at IS NULL AND m.created_at > ? ORDER BY m.created_at DESC LIMIT 50`).all(me.id, gid, clock() - days * 86_400_000);
     // Someone who isn't a contact goes by their handle, as in the inbox, so a name they chose can't pass for a contact's.
-    return rows.map((m) => ({ id: m.id, kind: m.kind, from: m.alias ?? `@${m.handle}`, from_handle: `@${m.handle}`, mentions_you: !!m.mentioned,
+    return rows.map((m) => ({ id: m.id, post: m.group_post, re: m.reply_to ?? undefined, kind: m.kind, from: m.alias ?? `@${m.handle}`, from_handle: `@${m.handle}`, mentions_you: !!m.mentioned,
       text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), choices: m.choices ? JSON.parse(m.choices) : undefined,
       sealed: m.sealed ?? undefined, from_keys: m.sealed && m.box_pub ? { sign: m.sign_pub, box: m.box_pub } : undefined, at: iso(m.created_at), ...(m.status === 'delivered' ? {} : { pending: true }) }));
   }

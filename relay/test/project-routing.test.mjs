@@ -4,11 +4,11 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomBytes } from 'node:crypto';
-import { writeFileSync, readFileSync, mkdtempSync, chmodSync, realpathSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, chmodSync, realpathSync, existsSync, mkdirSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setup, login, cliHome, waitFor, sleep, owner, connectHandled, listen, REDIRECT } from './helpers.mjs';
+import { setup, login, cliHome, waitFor, sleep, owner, connectHandled, connectApp, listen, REDIRECT } from './helpers.mjs';
 
 const run = promisify(execFile);
 const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'b2b.mjs');
@@ -138,6 +138,122 @@ function sameOwner(env, recipient, sender) {
   env.relay.db.prepare('UPDATE bots SET user_id = (SELECT user_id FROM bots WHERE id = ?) WHERE id = ?').run(recipient.botId, sender.botId);
 }
 const brief = (cara, id) => briefs(cara.home).find((b) => b.id === id);
+const groupPostId = (out) => out.match(/Sent (gp_[\w-]+)/)[1];
+const groupCopy = (env, post, bot) => env.relay.db.prepare('SELECT * FROM messages WHERE group_post = ? AND to_bot = ?').get(post, Number(bot.botId));
+async function taskGroup(env, cara, ...members) {
+  const made = await cara.cli('group', 'new', 'Importer', ...members.map((p) => '@' + env.relay.db.prepare('SELECT handle FROM bots WHERE id = ?').get(Number(p.botId)).handle));
+  const gid = made.out.match(/\(number (\d+)\)/)[1];
+  for (const p of members) env.relay.groups.join(env.relay.db.prepare('SELECT * FROM bots WHERE id = ?').get(Number(p.botId)), Number(gid), { byOwner: true });
+  return gid;
+}
+
+test('a sealed group task resumes the linked folder, waits for a busy thread and replies in the group', async (t) => {
+  const { env, cara, ben, dan, proj } = await world(t, 'codex');
+  const gid = await taskGroup(env, cara, ben, dan);
+  sameOwner(env, cara, ben);
+  assert.match((await cara.cli('group', 'folder', 'Importer', proj)).out, /Code folder for "Importer"/);
+  assert.equal((await cara.cli('group', 'folder', gid)).out.trim(), proj);
+  assert.match((await runIn(cara.home, { B2B_UNATTENDED: '1' })('group', 'folder', gid, '--clear')).out, /Only your owner/);
+  assert.match((await cara.cli('group', 'folder', gid, join(proj, 'missing'))).out, /isn't a folder on this computer/);
+  assert.equal((await cara.cli('group', 'folder', gid)).out.trim(), proj);
+  const cfg = JSON.parse(readFileSync(join(cara.home, 'config.json')));
+  const shared = folder('shared');
+  mkdirSync(join(cara.home, 'folder-state'));
+  writeFileSync(join(cara.home, 'folder-state', gid + '.json'), JSON.stringify({ root: shared, relay: cfg.relay, identity: cfg.keys.sign.x, files: {}, seq: 0 }));
+  const agent = fakeAgent('codex');
+  writeFileSync(agent.history, JSON.stringify([
+    { id: 'latest-importer', cwd: proj, updatedAt: 3, createdAt: 1, source: 'cli' },
+    { id: 'older-importer', cwd: proj, updatedAt: 2, createdAt: 2, source: 'cli' },
+  ]));
+  writeFileSync(agent.busy, '');
+  await runIn(cara.home, { B2B_SESSION: 'another-lead', B2B_SESSION_AGENT: 'codex' }, proj)('group', 'bind', gid);
+  const watcher = await startWatcher(t, cara, agent.bin, 'codex', { CODEX_HOME: join(cara.home, '.codex') });
+  await assert.rejects(ben.cli('group', 'send', gid, 'Update the importer.', '--do'), /Mention who should do it, e.g. @anna\./);
+  const post = groupPostId(await ben.cli('group', 'send', gid, '@cara-claude Update the importer.', '--do'));
+  const copy = groupCopy(env, post, cara), unmentioned = groupCopy(env, post, dan);
+  assert.ok(copy.sealed && copy.task === null && copy.text === '' && copy.mentioned === 1);
+  assert.equal(unmentioned.mentioned, 0);
+  // Even a changed relay mention bit cannot turn the other member's sealed copy into a task.
+  env.relay.db.prepare('UPDATE messages SET mentioned = 1 WHERE id = ?').run(unmentioned.id);
+  writeFileSync(join(dan.home, 'tool.json'), JSON.stringify({ agent: 'codex' }));
+  assert.match(await dan.cli('inbox'), /Update the importer/);
+  assert.equal(brief(dan, unmentioned.id), undefined);
+  await waitFor(() => /retrying task .* in 30 s/.test(watcher.log()), 20_000);
+  assert.equal(brief(cara, copy.id).session, 'latest-importer');
+  unlinkSync(agent.busy);
+  const saved = briefs(cara.home);
+  saved.find((b) => b.id === copy.id).resume_retry_at = Date.now() - 1;
+  writeFileSync(join(cara.home, 'briefs.json'), JSON.stringify({ items: saved }));
+  await waitFor(() => brief(cara, copy.id)?.state === 'done', 15_000);
+  assert.equal(groupCopy(env, post, cara).note, 'received');
+  assert.deepEqual(agent.runs().map((r) => r.resumed), ['latest-importer', 'latest-importer']);
+  assert.equal(agent.queries().length, 1);
+  const task = agent.runs().at(-1);
+  assert.equal(task.cwd, proj);
+  assert.equal(task.args[task.args.indexOf('--add-dir') + 1], shared);
+  assert.match(task.args.at(-1), /from the group "Importer", sent by "ben"[^]*Write code in the current folder\./);
+  assert.ok(task.args.at(-1).includes(`shared folder at "${shared}" for plans, notes and summaries`));
+  const result = env.relay.db.prepare("SELECT * FROM group_posts WHERE group_id = ? AND from_bot = ? AND kind = 'note'").get(Number(gid), cara.botId);
+  assert.ok(result.sealed && result.text === null);
+  const resultCopy = groupCopy(env, result.id, ben);
+  assert.equal(resultCopy.reply_to, null, 'the reply link stays sealed');
+  assert.match(resultCopy.client_id, /^g-[\w-]{12}$/);
+  assert.ok(groupCopy(env, result.id, dan), 'the result goes to the whole group');
+  assert.equal(env.relay.db.prepare("SELECT count(*) AS n FROM messages WHERE from_bot = ? AND kind = 'reply'").get(cara.botId).n, 0);
+  const reply = (await ben.cli('inbox', '--json')).trim().split('\n').map(JSON.parse).find((m) => m.group?.post === result.id);
+  assert.equal(reply.re, post);
+  assert.equal(reply.untrusted.text, 'Finished the test task.');
+});
+
+test('a missing code folder holds the group task, and clearing the link starts a fresh chat', async (t) => {
+  const { env, cara, ben, proj } = await world(t);
+  const gid = await taskGroup(env, cara, ben);
+  sameOwner(env, cara, ben);
+  const missing = join(proj, 'old-importer');
+  mkdirSync(missing);
+  await cara.cli('group', 'folder', gid, missing);
+  rmSync(missing, { recursive: true });
+  const agent = fakeAgent();
+  await startWatcher(t, cara, agent.bin);
+  const post = groupPostId(await ben.cli('group', 'send', gid, 'Check the importer.', '--mention', 'cara-claude', '--do'));
+  const { id } = groupCopy(env, post, cara);
+  await waitFor(() => forOwner(cara.home).some((line) => line.endsWith(`group folder ${gid} <folder>`)), 15_000);
+  assert.equal(brief(cara, id).state, 'held');
+  assert.deepEqual(agent.runs(), []);
+  assert.match((await cara.cli('group', 'folder', gid, '--clear')).out, /Cleared the code folder/);
+  assert.match((await cara.cli('group', 'folder', gid)).out, /No code folder linked here/);
+  await waitFor(() => brief(cara, id)?.state === 'done', 15_000);
+  const [task] = agent.runs();
+  assert.equal(task.cwd, realpathSync(cara.home));
+  assert.ok(!task.args.includes('--continue'));
+});
+
+test('the connected MCP sends a plain group task and gets a plain group reply', async (t) => {
+  const { env, cara, dan } = await world(t);
+  const gid = await taskGroup(env, cara, dan);
+  const owner = await login(env, 'mia@example.com');
+  const app = await connectApp(env, owner, 'mia');
+  const mia = env.relay.db.prepare("SELECT * FROM bots WHERE handle = 'mia'").get();
+  const link = (await cara.cli('group', 'link', gid)).out.match(/\/g\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  env.relay.groups.join(mia, Number(gid), { linkCode: link, byOwner: true });
+  sameOwner(env, cara, { botId: mia.id });
+  const agent = fakeAgent();
+  await startWatcher(t, cara, agent.bin);
+  const missing = await app.tool('send_to_group', { group: gid, text: 'Check the importer.', task: true });
+  assert.equal(missing.isError, true);
+  assert.match(missing.content[0].text, /Mention who should do it, e.g. @anna\./);
+  const sent = await app.tool('send_to_group', { group: gid, text: '@cara-claude Check the importer.', task: true });
+  assert.match(sent.content[0].text, /Sent to 2 people/);
+  const post = env.relay.db.prepare("SELECT id FROM group_posts WHERE from_bot = ? AND group_id = ? AND kind = 'note'").get(mia.id, Number(gid)).id;
+  const task = groupCopy(env, post, cara);
+  assert.equal(task.task, 1);
+  assert.equal(task.sealed, null);
+  assert.equal(groupCopy(env, post, dan).task, null);
+  await waitFor(() => brief(cara, task.id)?.state === 'done', 15_000);
+  const result = (await app.tool('group_messages', { group: gid })).content[0].text;
+  assert.ok(result.includes(`reply to ${post}`));
+  assert.match(result, /Finished the test task/);
+});
 
 test('an own-bot task without a project starts fresh in the default folder and replies to the original', async (t) => {
   const { env, cara, ben } = await world(t);

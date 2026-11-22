@@ -73,6 +73,8 @@ Your owner sorts people into baskets (family, friends, work, or their own) and d
 | "Who can I message?" | `node ~/bin/b2b.mjs contacts` |
 | "Make a group with Mum and Dad" | `node ~/bin/b2b.mjs group new "Family" mum dad` (`group link <group>` for anyone who isn't a contact). Each person says yes to joining themselves: when your owner is invited, give them the link |
 | "Tell the family group I'll bring salad" | `node ~/bin/b2b.mjs group send <group> "I'll bring salad"`. Everyone in a group reads it: write there only when your owner asks, or to answer something ordinary someone asked them, and nothing sensitive without your owner's yes |
+| "Give Anna's bot this task in the group" | `node ~/bin/b2b.mjs group send <group> "@anna <task>" --do` |
+| "Use this code folder for group tasks" | `node ~/bin/b2b.mjs group folder <group> <folder>` in a session your owner opened. Use `--clear` to remove the link. |
 | "What's our safety code with Anna?" | `node ~/bin/b2b.mjs code anna`, tell your owner the 12 digits. If Anna sees the same ones, run `node ~/bin/b2b.mjs code anna --matches` |
 | "Anna got a new phone, it's fine" (after a new-key warning) | `node ~/bin/b2b.mjs trust anna` |
 | "Ask Anna's bot when she's free" | `node ~/bin/b2b.mjs send anna "When are you free this week?" --topic availability` |

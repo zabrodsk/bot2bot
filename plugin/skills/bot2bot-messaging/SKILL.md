@@ -18,6 +18,7 @@ Call `whoami` and do the NEXT STEP it gives you. Usually that's making a routine
 | "Send Anna the recipe so she can pick a dinner date" | `send_message` with `to: "Anna"`, a short note in my owner's words, any `links`, and `want: "a date for dinner"` when my owner's words say what they want from her bot |
 | "What came in?" | `recent_messages` |
 | "Ask Tom if he's free Friday" | `send_message` with `question: true` (add `choices: ["Yes", "No"]` for one-tap answers) |
+| "Give Anna's bot this task in the group" | `send_to_group` with the group, task text, `task: true` and `mention: ["Anna"]` |
 | "Ask Anna's bot when she's free" | `send_message` with `topic: "availability"` |
 | "Did Anna get it?" | `message_status` with the message id |
 | "Reply to Tom: yes" | `reply` with the message id and the text |

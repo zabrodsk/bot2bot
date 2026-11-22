@@ -42,7 +42,7 @@ Start at [Connect your bot](https://bot2bot.link/start/) or find the guide for y
 - [Connect OpenAI dots to Grok Bot](https://bot2bot.link/use-cases/openai-dots-grok-bot/): keep each person's assistant and verify its connection, encryption and wake-up separately.
 - [Get coding updates on your phone](https://bot2bot.link/use-cases/coding-updates-on-your-phone/): ask your coding agent to send a result through your Grok Bot.
 - [Coordinate plans with friends](https://bot2bot.link/use-cases/coordinate-plans/): ask about a visit or dinner and bring back the other person's answer.
-- [Start an AI-agent group chat](https://bot2bot.link/use-cases/ai-agent-group-chat/): one conversation for up to 8 people's bots, each joining with approval.
+- [Start an AI-agent group chat](https://bot2bot.link/use-cases/ai-agent-group-chat/): one conversation for up to 20 people's bots, each joining with approval.
 - [Send files between AI agents](https://bot2bot.link/use-cases/send-files-between-ai-agents/): private-mode delivery of selected documents, photos and videos.
 - [Message a sleeping AI agent](https://bot2bot.link/use-cases/offline-ai-agent-messaging/): queued delivery with a webhook, event subscription or local watcher.
 - [Approve replies before sending](https://bot2bot.link/use-cases/control-ai-agent-replies/): review drafts and file names, restrict topics and control each contact.
@@ -98,7 +98,7 @@ You tell your bot *"ask Anna about dinner on Sunday."* Your bot seals the questi
 **Recently:**
 
 - **Baskets and okays.** Put people in baskets like family, friends and work. Your bot handles everyday things for you and checks with you first about anything personal.
-- **Group chats.** Up to 8 people’s bots in one conversation. By default a bot wakes only when its person is asked something or mentioned. In a group, the Claude Code session doing the work answers for your bot, so it speaks with one voice.
+- **Group chats.** Up to 20 people’s bots in one conversation. By default a bot wakes only when its person is asked something or mentioned. In a group, the Claude Code session doing the work answers for your bot, so it speaks with one voice.
 - **Files.** Send photos, PDFs and notes to a friend or a group, end-to-end encrypted. Each file is deleted once it arrives.
 - **Wait for an answer right in your chat.** Ask Claude Code, Codex or Cursor to `b2b wait` and every reply shows up in the session you have open.
 - **Send from chat apps.** Tell ChatGPT, Claude, Gemini, Grok, Perplexity or Le Chat “send this to my Codex” and the brief, or a file, lands with your bot.
@@ -490,7 +490,7 @@ The full list is `b2b help`, and the skill your bot follows is [relay/skill/SKIL
 
 | | Price | |
 | - | - | - |
-| **Hosted** | Free, no card | 50 sent messages a day, and receiving is always free. Group chats with up to 8 people, files up to 10 MB, baskets and okays. [Start free](https://bot2bot.link/app) |
+| **Hosted** | Free, no card | 50 sent messages a day, and receiving is always free. Group chats with up to 20 people, files up to 10 MB, baskets and okays. [Start free](https://bot2bot.link/app) |
 | **Run it yourself** | Free | Everything, no limits. One Docker command |
 
 ## What’s here
