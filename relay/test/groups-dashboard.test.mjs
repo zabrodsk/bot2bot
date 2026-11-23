@@ -315,3 +315,75 @@ test('your own other bots can go in a group: they show under Your bots and join 
   assert.equal(memberOf(env, gid, workId).hidden, 1);
   assert.doesNotMatch(groupsPart(await view(ben.b, '/app')), />Planning</);
 });
+
+test('an owner with several bots can join or decline each pending invite even when one of them already made the group', async (t0) => {
+  const { env, ben, anna } = await trio(t0);
+  const extra = async (handle) => {
+    await ben.b('/app/bots', { method: 'POST', form: { handle } });
+    const work = cliHome();
+    await work.cli('enroll', env.url, (await ben.b('/app/bots/add/grok/steps')).text.match(/join with code ([A-Z0-9]{4}-[A-Z0-9]{4})/)[1]);
+    const id = botOf(env, handle).id;
+    await waitFor(() => db(env).prepare('SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = ? AND approved_at IS NOT NULL').get(Number(ben.botId), id));
+    const token = JSON.parse((await import('node:fs')).readFileSync(`${work.home}/config.json`, 'utf8')).token;
+    const api = async (method, path, body) => {
+      const r = await fetch(env.url + path, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+      return { status: r.status, json: await r.json() };
+    };
+    return { id, handle, api };
+  };
+  const gpt = await extra('bengpt');
+  const claude = await extra('benclaude');
+
+  const made = await ben.api('POST', '/v1/groups', { name: 'Kwon', members: ['@bengpt', '@benclaude'] });
+  assert.equal(made.status, 200, JSON.stringify(made.json));
+  const gid = made.json.group.id;
+  assert.equal(memberOf(env, gid, ben.botId).state, 'joined');
+  assert.equal(memberOf(env, gid, gpt.id).state, 'invited');
+  assert.equal(memberOf(env, gid, claude.id).state, 'invited');
+
+  const refused = await gpt.api('POST', `/v1/groups/${gid}/join`, {});
+  assert.equal(refused.status, 403);
+  assert.match(refused.json.error, /only your owner can say yes/);
+  assert.equal(memberOf(env, gid, gpt.id).state, 'invited');
+
+  const home = groupsPart(await view(ben.b, '/app'));
+  assert.equal(home.match(/>Kwon</g).length, 1, home);
+  assert.match(home, new RegExp(`action="/app/groups/${gid}/join"><input type="hidden" name="bot" value="${gpt.id}"><button class="btn small">Join @bengpt<`));
+  assert.match(home, new RegExp(`action="/app/groups/${gid}/join"><input type="hidden" name="bot" value="${claude.id}"><button class="btn small">Join @benclaude<`));
+  assert.match(home, new RegExp(`action="/app/groups/${gid}/decline"><input type="hidden" name="bot" value="${gpt.id}"`));
+  assert.match(home, new RegExp(`action="/app/groups/${gid}/decline"><input type="hidden" name="bot" value="${claude.id}"`));
+
+  const page = await view(ben.b, `/app/groups/${gid}`);
+  assert.match(page, /Join as @bengpt\?/);
+  assert.match(page, /Join as @benclaude\?/);
+  assert.match(page, new RegExp(`action="/app/groups/${gid}/join"><input type="hidden" name="bot" value="${gpt.id}"><button class="btn">Join<`));
+  assert.match(page, /Conversation/, 'the bot that made it is already in, so the group is open');
+  assert.doesNotMatch(page, /You&#39;re in this group|You're in this group/);
+
+  const code = page.match(/\/g\/([A-Z0-9]{4}-[A-Z0-9]{4})/)[1];
+  const invite = await view(ben.b, `/g/${code}`);
+  assert.match(invite, /You&#39;re in this group|You're in this group/);
+  assert.match(invite, /Open the group/);
+  assert.match(invite, new RegExp(`action="/g/${code}"[^]*name="bot" value="${gpt.id}"[^]*>Join @bengpt<`));
+  assert.match(invite, new RegExp(`action="/g/${code}"[^]*name="bot" value="${claude.id}"[^]*>Join @benclaude<`));
+  assert.match(invite, new RegExp(`action="/app/groups/${gid}/decline"[^]*name="bot" value="${gpt.id}"[^]*>No thanks<`));
+
+  const joined = await go(ben.b, `/app/groups/${gid}/join`, { bot: gpt.id });
+  assert.equal(joined.location, `/app/groups/${gid}?bot=${gpt.id}`);
+  assert.equal(memberOf(env, gid, gpt.id).state, 'joined');
+  assert.equal(memberOf(env, gid, claude.id).state, 'invited');
+  assert.match(joined.page, /class="toast__what">You joined Kwon</);
+  assert.doesNotMatch(joined.page, /Join as @bengpt\?/);
+  assert.match(joined.page, /Join as @benclaude\?/);
+
+  const no = await go(ben.b, `/app/groups/${gid}/decline`, { bot: claude.id });
+  assert.equal(no.location, '/app');
+  assert.equal(memberOf(env, gid, claude.id).state, 'left');
+  assert.match(no.page, /class="toast__what">You said no to Kwon</);
+  assert.doesNotMatch(groupsPart(no.page), /Join @benclaude|Join @bengpt/);
+
+  assert.equal(memberOf(env, gid, anna.botId), undefined);
+  const fromLink = await view(anna.b, `/g/${code}`);
+  assert.match(fromLink, new RegExp(`action="/g/${code}"[^]*name="bot" value="${anna.botId}"[^]*Join the group`));
+  assert.doesNotMatch(fromLink, /You&#39;re in this group|You're in this group|Join @/);
+});

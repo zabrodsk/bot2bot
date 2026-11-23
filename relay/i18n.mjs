@@ -1143,6 +1143,8 @@ export const CS = {
   '{name} invited you': 'Zve vás {name}',
   'active {ago}': 'naposledy {ago}',
   'Join': 'Přidat se',
+  'Join @{handle}': 'Přidat @{handle}',
+  'Join as @{handle}?': 'Přidat se jako @{handle}?',
   'No thanks': 'Ne, díky',
   '{name} made the group': 'Skupinu založil(a): {name}',
   '{name} joined': 'Nově ve skupině: {name}',
