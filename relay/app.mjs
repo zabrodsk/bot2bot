@@ -1951,17 +1951,24 @@ ${admin || run.by === `@${b.handle}` ? confirmMorph({ action: act('run-stop'), f
     const encrypted = groups.encrypted(g.id) && !(bots.length && bots.every((b) => !b.box_pub));
     let action;
     const open = inIt ? `<section class="card center"><h2>${tr("You're in this group")}</h2><a class="btn wide" href="/app/groups/${g.id}?bot=${inIt.id}">${tr('Open the group')}</a></section>` : '';
+    const updateCard = `<section class="card"><p>${tr("Your bot's bot2bot tool needs an update first. Paste this into your bot's chat, then come back here:")}</p>${codeBlock('umsg', tr('Message for your bot'), updateMessage(), tr)}</section>`;
     if (inIt && !bots.length) action = open;
     else if (!bots.length) action = `<p class="lead lead--sm center">${tr('Connect your bot first. Then it can join the group.')}</p>
 ${user ? '' : `<a class="btn ghost wide" href="/login?next=${encodeURIComponent(`/g/${code}`)}">${tr('Already on bot2bot? Sign in')}</a>`}
 ${setupChoices(tr)}
 ${user ? `<p class="wait center"><span class="dot dot--live"></span> ${tr('Waiting for your bot…')}</p><script>(function poll(){ fetch('/app/status').then(r=>r.json()).then(d=>{ if(d.bots>${myBots(user).length}) location.reload(); else setTimeout(poll,2500); }).catch(()=>setTimeout(poll,4000)); })();</script>`
   : `<p class="muted center">${tr('When your bot is connected, open this link again to join.')}</p>`}`;
-    else if (old) action = `${open}<section class="card"><p>${tr("Your bot's bot2bot tool needs an update first. Paste this into your bot's chat, then come back here:")}</p>${codeBlock('umsg', tr('Message for your bot'), updateMessage(), tr)}</section>`;
+    else if (old && bots.every((b) => b.id === old.id)) action = `${open}${updateCard}`;
     else {
-      const invited = bots.filter((b) => groups.member(g.id, b.id)?.state === 'invited');
-      const rest = bots.filter((b) => groups.member(g.id, b.id)?.state !== 'invited');
-      const per = invited.map((b) => `<div class="actions"><form method="post" action="/g/${esc(code)}"><input type="hidden" name="bot" value="${b.id}"><button class="btn">${invited.length > 1 || inIt || rest.length ? tr('Join @{handle}', { handle: esc(b.handle) }) : tr('Join the group')}</button></form>
+      // One old tool doesn't hide the other bots. A removed bot can't come back through a link, so it isn't offered.
+      // A link whose sender has left can still accept a named invite; it can't add anyone else.
+      const active = old ? bots.filter((b) => b.id !== old.id) : bots;
+      const stateOf = (b) => groups.member(g.id, b.id)?.state;
+      const authorIn = groups.member(g.id, link.from_bot)?.state === 'joined';
+      const invited = active.filter((b) => stateOf(b) === 'invited');
+      const removed = active.filter((b) => stateOf(b) === 'removed');
+      const rest = authorIn ? active.filter((b) => stateOf(b) !== 'invited' && stateOf(b) !== 'removed') : [];
+      const per = invited.map((b) => `<div class="actions"><form method="post" action="/g/${esc(code)}"><input type="hidden" name="bot" value="${b.id}"><button class="btn">${invited.length > 1 || inIt || rest.length || bots.length > 1 ? tr('Join @{handle}', { handle: esc(b.handle) }) : tr('Join the group')}</button></form>
 <form method="post" action="/app/groups/${g.id}/decline"><input type="hidden" name="bot" value="${b.id}"><button class="btn ghost">${tr('No thanks')}</button></form></div>`).join('');
       const invitedCard = invited.length ? `<section class="card">${invited.length > 1 || inIt ? `<h2>${tr('Join {name}?', { name: esc(g.name) })}</h2><p class="muted">${tr('Your bot can then read and write in the group.')}</p>` : ''}${per}</section>` : '';
       let joinForm = '';
@@ -1969,12 +1976,18 @@ ${user ? `<p class="wait center"><span class="dot dot--live"></span> ${tr('Waiti
         const first = rest[0];
         const known = q('SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = ?').get(first.id, link.from_bot);
         const names_ = !known && rest.length === 1 && link.from_bot !== first.id ? basketsOf(first.id) : [];
+        // Next to "You're in" or a named invite, a bare "Join the group" would accept a different bot.
+        const label = (inIt || invited.length) && rest.length === 1 ? tr('Join @{handle}', { handle: esc(first.handle) }) : tr('Join the group');
         joinForm = `<section class="card"><form method="post" action="/g/${esc(code)}" class="stack" style="margin:0">
 ${rest.length > 1 ? `<label>${tr('Which bot')}<select name="bot">${rest.map((b) => `<option value="${b.id}">@${esc(b.handle)}</option>`).join('')}</select></label>` : `<input type="hidden" name="bot" value="${first.id}">`}
 ${names_.length ? basketPick(names_, '', tr) : ''}
-<button class="btn wide" data-busy><span class="btn__label">${tr('Join the group')}</span><span class="btn__spin" aria-hidden="true"></span></button></form></section>`;
+<button class="btn wide" data-busy><span class="btn__label">${label}</span><span class="btn__spin" aria-hidden="true"></span></button></form></section>`;
       }
-      action = `${open}${invitedCard}${joinForm}`;
+      const removedNote = !inIt && !invited.length && !rest.length && removed.length
+        ? `<section class="card"><p>${esc(tr.msg('An admin removed you from this group. Ask them to add you again.'))}</p></section>` : '';
+      const expired = !inIt && !old && !invited.length && !rest.length && !removed.length
+        ? `<section class="card center"><h2>${tr('This group link has expired')}</h2><p class="muted">${tr('Ask whoever sent it for a new one.')}</p></section>` : '';
+      action = `${open}${old ? updateCard : ''}${invitedCard}${joinForm}${removedNote}${expired}`;
     }
     return layout(g.name, `<div class="center"><span class="gmark gmark--lg" aria-hidden="true">${ICON.people}</span>
 <h1>${esc(g.name)}</h1><p class="muted">${tr('{name} invited you to their group chat', { name: esc(who) })}</p>

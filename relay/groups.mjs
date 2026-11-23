@@ -246,14 +246,19 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
   function joinInTx(b, gid, { linkCode = null, basket = null } = {}) {
     const g = group(gid);
     if (!g || g.ended_at) throw new HttpError(410, 'this group was ended');
-    const l = linkCode ? linkByCode(linkCode) : null;
+    let l = linkCode ? linkByCode(linkCode) : null;
     if (linkCode && (!l || l.group_id !== g.id)) throw new HttpError(410, 'this group link has expired');
     const was = member(g.id, b.id);
     if (was?.state === 'joined') return { group: g, already: true };
     if (!l && was?.state !== 'invited') throw new HttpError(403, 'you need an invite to join this group');
     // Removed by an admin: a link doesn't bring them back; an admin can invite them again by name.
     if (l && was?.state === 'removed') throw new HttpError(403, 'an admin removed you from this group. Ask them to add you again');
-    if (l && member(g.id, l.from_bot)?.state !== 'joined') throw new HttpError(410, 'this group link has expired');
+    // A named invite is already a yes waiting on the owner. The link page still opens after the member who
+    // shared it has left, and that must not block the invite or connect anyone to the person who left.
+    if (l && member(g.id, l.from_bot)?.state !== 'joined') {
+      if (was?.state === 'invited') l = null;
+      else throw new HttpError(410, 'this group link has expired');
+    }
     if (was?.state !== 'invited' && seats(g.id) >= L.groupMax) throw new HttpError(409, `the group is full (${L.groupMax} people)`);
     if (l && blockedBetween(b.id, l.from_bot)) throw new HttpError(403, "you can't join with this link");
     const t = clock();
