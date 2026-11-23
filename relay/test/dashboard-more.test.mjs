@@ -152,7 +152,7 @@ test('a group run shows who holds which role and when, and whoever started it ca
 test("a group's shared folder: admins turn it on and pick who reads or writes, with Undo; members see their access", async (t0) => {
   const { env, ben, anna, tom, gid } = await trio(t0);
   const page = await view(ben.b, `/app/groups/${gid}`);
-  assert.match(page, /id="folder-h">Shared folder <span class="badge badge--info">Alpha<[^]*action="\/app\/groups\/\d+\/folder"[^]*Turn on the shared folder/);
+  assert.match(page, /id="folder-h">Shared folder<\/h2>[^]*action="\/app\/groups\/\d+\/folder"[^]*Turn on the shared folder/);
   assert.match(await view(anna.b, `/app/groups/${gid}`), /The shared folder is off\. A group admin can turn it on\./, 'off: a member only sees that it is off');
 
   const on = await go(ben.b, `/app/groups/${gid}/folder`, { bot: ben.botId, on: '1' });
@@ -189,8 +189,8 @@ test("a group's shared folder: admins turn it on and pick who reads or writes, w
   assert.doesNotMatch(off, /id="fperm-/);
 });
 
-test('on the hosted relay the shared folder shows only to Infinite owners', async (t0) => {
-  const env = await setup(t0, { autoTick: false, hosted: true });
+test('with FOLDERS_OPEN=0 the hosted relay shows the shared folder only to Infinite owners', async (t0) => {
+  const env = await setup(t0, { autoTick: false, hosted: true, foldersOpen: false });
   const ben = await owner(env, t0, 'ben@example.com', 'ben', { status: 503 });
   const gid = Number((await ben.cli('group', 'new', 'Research')).match(/number (\d+)/)[1]);
   assert.doesNotMatch(await view(ben.b, `/app/groups/${gid}`), /id="folder-h"/);

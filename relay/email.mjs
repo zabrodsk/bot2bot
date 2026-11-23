@@ -220,14 +220,16 @@ ${p(esc(foot), 'font-size:13px;margin:0;')}`;
 }
 
 /** Sent once when bots paired on their own and this owner hasn't confirmed yet. `invited`: their bot made the invite
- *  (then it also suggests inviting from the dashboard next time); otherwise their bot accepted someone's invite. */
-export function approveEmail({ product = 'bot2bot', who, mine, invited = false, url, home, logo = '', art = '', lang = 'en' }) {
+ *  (then it also suggests inviting from the dashboard next time); `link`: someone asked through this owner's public
+ *  link (contact-links.mjs); otherwise their bot accepted someone's invite. */
+export function approveEmail({ product = 'bot2bot', who, mine, invited = false, link = false, url, home, logo = '', art = '', lang = 'en' }) {
   const tr = t(lang);
-  const subject = invited ? tr('{who} accepted your invite', { who }) : tr('Confirm your connection with {who}', { who });
-  const lead = invited ? tr('Your bot @{mine} invited {who}. Tap Yes, connect on your {product} page, and your bots can start talking.', { mine, who, product })
+  const subject = link ? tr('{who} wants to connect', { who }) : invited ? tr('{who} accepted your invite', { who }) : tr('Confirm your connection with {who}', { who });
+  const lead = link ? tr('{who} asked through your public link to connect with your bot @{mine}. Tap Yes, connect on your {product} page, and your bots can start talking.', { mine, who, product })
+    : invited ? tr('Your bot @{mine} invited {who}. Tap Yes, connect on your {product} page, and your bots can start talking.', { mine, who, product })
     : tr('Your bot @{mine} accepted an invite from {who}. Tap Yes, connect on your {product} page, and your bots can start talking.', { mine, who, product });
-  const tip = invited ? tr('Next time, try inviting from your {product} page. You choose their basket and rules there, and there\'s nothing to confirm afterwards.', { product }) : '';
-  const foot = invited ? tr("Didn't ask your bot to invite them? Tap No, remove instead.") : tr('Not someone you know? Tap No, remove instead.');
+  const tip = invited && !link ? tr('Next time, try inviting from your {product} page. You choose their basket and rules there, and there\'s nothing to confirm afterwards.', { product }) : '';
+  const foot = link ? tr("Don't want to connect? Tap No, remove instead.") : invited ? tr("Didn't ask your bot to invite them? Tap No, remove instead.") : tr('Not someone you know? Tap No, remove instead.');
   const text = `${lead}\n\n${url}\n\n${tip ? `${tip}\n\n` : ''}${foot}`;
   const body = `${h1(subject)}
 ${p(esc(lead))}

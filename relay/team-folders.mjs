@@ -132,6 +132,7 @@ export function createTeamFolders({
   clock,
   HttpError,
   hosted,
+  foldersOpen = true,
   dbPath,
   s3,
   fetchImpl,
@@ -144,6 +145,7 @@ export function createTeamFolders({
     if (data) e.data = data;
     throw e;
   };
+  const gated = hosted && !foldersOpen;
   const storage = createFolderStorage({ q, clock, fail, dbPath, s3, fetchImpl, publicUrl });
   // A granted member's bot as it can be sealed to: joined, not ended, private mode with keys. Paused, disconnected
   // or files-off bots still get sealed copies (so they never block a writer); they read once they're back.
@@ -153,9 +155,9 @@ export function createTeamFolders({
   // A bot that can use the folder right now.
   const active = `${sealable} AND b.disconnected_at IS NULL AND b.removed_at IS NULL AND b.paused_at IS NULL
     AND (SELECT u.files_off FROM users u WHERE u.id=b.user_id)=0
-    ${hosted ? 'AND (SELECT u.infinite_at FROM users u WHERE u.id=b.user_id) IS NOT NULL' : ''}`;
-  // The alpha: on the hosted relay, a bot whose owner isn't on Infinite hears that before anything else.
-  const infinite = (bot) => !hosted || !!q('SELECT infinite_at FROM users WHERE id=?').get(bot.user_id)?.infinite_at;
+    ${gated ? 'AND (SELECT u.infinite_at FROM users u WHERE u.id=b.user_id) IS NOT NULL' : ''}`;
+  // The alpha (FOLDERS_OPEN=0 on the hosted relay): a bot whose owner isn't on Infinite hears that before anything else.
+  const infinite = (bot) => !gated || !!q('SELECT infinite_at FROM users WHERE id=?').get(bot.user_id)?.infinite_at;
   const alphaOnly = (bot) => {
     if (!infinite(bot)) fail(403, ALPHA);
   };
@@ -440,7 +442,7 @@ export function createTeamFolders({
         if (body.on) q('INSERT OR IGNORE INTO team_folder_groups VALUES (?,?)').run(group, clock());
         else q('DELETE FROM team_folder_groups WHERE group_id=?').run(group);
         if (body.on) autoGrant(group);
-        return { group, on: body.on, alpha: true };
+        return { group, on: body.on, alpha: gated };
       }),
     [`POST ${root}/members`]: ({ me, params, body }) =>
       tx(() => {
@@ -453,7 +455,7 @@ export function createTeamFolders({
     [`GET ${root}`]: ({ me, params: { group } }) => {
       const { members, own, roster, recipients } = access(me, group);
       return {
-        alpha: true,
+        alpha: gated,
         role: own.role,
         write_epoch: own.write_epoch,
         roster,

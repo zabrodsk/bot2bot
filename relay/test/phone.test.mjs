@@ -105,7 +105,7 @@ test('the phone page: its own keys, a code to read to your agent, and nothing fr
   const page = await fetch(`${env.url}/app/phone`, { headers: { cookie: (await (async () => { const r = await cara.b('/app/phone'); assert.equal(r.status, 200); return ''; })()) } }).catch(() => null);
   void page;
   const html = (await cara.b('/app/phone')).text;
-  assert.match(html, /<h1>Approve from your phone<\/h1>/);
+  assert.match(html, /<h1>Your phone<\/h1>/);
   assert.ok(html.includes(PHONE_SCRIPT), 'the page runs exactly the script tested here');
   assert.match(PHONE_CSP, /^default-src 'none'; script-src 'sha256-[A-Za-z0-9+/=]+'; style-src 'unsafe-inline'; connect-src 'self'/);
   assert.doesNotMatch(html, /https?:\/\/(?!127\.0\.0\.1)/, 'nothing is loaded from another site');

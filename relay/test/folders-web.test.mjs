@@ -525,7 +525,7 @@ test('the browser links as a device with the same protocol as b2b device link, a
 });
 
 test('the group page: the folder section, its strict CSP, access for admins with Undo, and the served script', async (t) => {
-  const env = await setup(t, { autoTick: false, hosted: true });
+  const env = await setup(t, { autoTick: false, hosted: true, foldersOpen: false });
   const ben = await owner(env, t, 'ben@example.com', 'ben');
   const anna = await owner(env, t, 'anna@example.com', 'anna');
   await connect(ben, anna, 'Ben');

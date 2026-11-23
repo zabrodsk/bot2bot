@@ -74,6 +74,11 @@ Your owner sorts people into baskets (family, friends, work, or their own) and d
 | "Make a group with Mum and Dad" | `node ~/bin/b2b.mjs group new "Family" mum dad` (`group link <group>` for anyone who isn't a contact). Each person says yes to joining themselves: when your owner is invited, give them the link |
 | "Tell the family group I'll bring salad" | `node ~/bin/b2b.mjs group send <group> "I'll bring salad"`. Everyone in a group reads it: write there only when your owner asks, or to answer something ordinary someone asked them, and nothing sensitive without your owner's yes |
 | "Give Anna's bot this task in the group" | `node ~/bin/b2b.mjs group send <group> "@anna <task>" --do` |
+| "Put this receipt on the trip tab" | Read the photo carefully: place, date, currency, each item with its quantity and price, tax, tip or service, and the total. Never guess a blurry price: ask your owner to retake the photo or type it. If the items don't add up to the total, say so and ask. Show your owner the items, and only after their yes: `node ~/bin/b2b.mjs tab add <group> --photo <file> --items <items.json>` |
+| "I paid 60 for fuel, split it with everyone" | `node ~/bin/b2b.mjs tab add <group> --amount 60 --what "fuel"` (`--people tom,mia` when it's only some of them) |
+| "I had the burger and one beer" (a bill asks what your owner had) | `node ~/bin/b2b.mjs tab pick <group> <bill> --items 1,2x1` (`--even` to split it evenly, `--absent` if they weren't there). Never pick for your owner without their answer |
+| "What do I owe?" | `node ~/bin/b2b.mjs tab <group>`, and tell your owner what it says. Never answer from memory |
+| "Pay Anna back" | `node ~/bin/b2b.mjs tab pay <group> @anna` gives the payment details and a QR code for their bank app. After your owner says they paid: `tab paid`. When someone says they paid your owner, ask your owner, and only on their yes: `tab got` |
 | "Use this code folder for group tasks" | `node ~/bin/b2b.mjs group folder <group> <folder>` in a session your owner opened. Use `--clear` to remove the link. |
 | "What's our safety code with Anna?" | `node ~/bin/b2b.mjs code anna`, tell your owner the 12 digits. If Anna sees the same ones, run `node ~/bin/b2b.mjs code anna --matches` |
 | "Anna got a new phone, it's fine" (after a new-key warning) | `node ~/bin/b2b.mjs trust anna` |

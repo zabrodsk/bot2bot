@@ -13,6 +13,7 @@ import { messageState } from './message-state.mjs';
 import { pageRequest, isHeadPage } from './page-request.mjs';
 import { isBig, bigParts, filesArt } from './bigupdate.mjs';
 import { FOLDERS_JS, FOLDERS_JS_HASH } from './folders-web.mjs';
+import { migrateContactLinks, createContactLinks, contactLinkPages, BADGE_SVG } from './contact-links.mjs';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -70,6 +71,7 @@ export function migrateApp(db) {
   // Quiet hours (0.8): on by default, 22:00 to 08:00 in the person's own timezone.
   addColumn('users', 'tz', 'TEXT');
   addColumn('users', 'infinite_at', 'INTEGER');
+  addColumn('users', 'tab_alpha_at', 'INTEGER'); // Tab alpha: may start a bill (hosted relay, until TAB_OPEN=1)
   // A plan name and a line for one person, set by the operator for fun. Only words: the limits stay the free plan's.
   addColumn('users', 'tier_name', 'TEXT');
   addColumn('users', 'tier_note', 'TEXT');
@@ -124,6 +126,8 @@ export function migrateApp(db) {
   // Older relays logged whatever a bot sent as "via"; keep only the known values.
   db.exec(`UPDATE events SET detail = json_remove(detail, '$.via') WHERE kind IN ('claimed', 'doorbell_verified') AND json_valid(detail)
            AND json_extract(detail, '$.via') IS NOT NULL AND json_extract(detail, '$.via') NOT IN ('doorbell', 'manual', 'schedule')`);
+  // Public contact links (bot2bot.link/to/<name>), in contact-links.mjs.
+  migrateContactLinks(db);
 }
 
 const validTz = (tz) => { try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; } };
@@ -144,7 +148,7 @@ const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const jsq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3c')}'`;
 
 export function createApp(ctx) {
-  const { originFor = () => publicUrl || '', analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, groupRuns = null, linkedDevices = null, phone = null, groupBrowser = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
+  const { originFor = () => publicUrl || '', analyticsKey = '', reviewLogin = null, status = null, founder = () => null, connectFounder = null, linkOwnBots = () => 0, events = null, groups = null, groupRuns = null, linkedDevices = null, phone = null, groupBrowser = null, latestUpdate = null, board = null, feedbackTo = '', markActive = () => {}, usage = null, hostedAdmin = null, payments = null, files = null, invites = null, hostedInvites = null, adminEmails = [], renameBot = () => { throw new HttpError(501, 'Renaming is not available here.'); }, toolInfo = () => ({ latest: null, min: null }), channelFor = () => 'stable', toolTooOld = () => false, privateDoorbell, inPilot = () => false, effectiveMode, governance, getSettings, getRequest, openRequests, applyOwnerOps, decideRequest, decideProposal, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', inviteMessage = (l) => l, webInbox = false, site = false, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget = (u) => ({ url: validWebhook(u), kind: 'grok_webhook' }), watching = () => false, sealKey, routes, L, mailer, devLogin, name, release, iso, banner, quietUntil, hosted, foldersOpen = true, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy } = ctx;
   const product = name || 'bot2bot';
   const origin = publicUrl || '';
 
@@ -178,15 +182,15 @@ export function createApp(ctx) {
   // Signed-out pages: the brand on top and one centred column.
   // Appearance: no choice follows the device; Light or Dark (picked in Account) pins it.
   const THEME_COLOR = { light: '#f3f5f8', dark: '#0e131b' };
-  const head = (title, tr, theme = null) => `<!doctype html><html lang="${tr.lang}"${THEME_COLOR[theme] ? ` data-theme="${theme}"` : ''}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><script>addEventListener('pagereveal',(e)=>{if(e.viewTransition)document.documentElement.classList.add('vt');});</script>
+  const head = (title, tr, theme = null, robots = 'noindex') => `<!doctype html><html lang="${tr.lang}"${THEME_COLOR[theme] ? ` data-theme="${theme}"` : ''}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"><script>addEventListener('pagereveal',(e)=>{if(e.viewTransition)document.documentElement.classList.add('vt');});</script>
 ${THEME_COLOR[theme] ? `<meta name="theme-color" content="${THEME_COLOR[theme]}">` : Object.entries(THEME_COLOR).map(([k, c]) => `<meta name="theme-color" content="${c}" media="(prefers-color-scheme: ${k})">`).join('')}
-<title>${esc(title)} · ${esc(product)}</title><meta name="robots" content="noindex"><style>${site ? FONTS : ''}${CSS}</style></head>`;
+<title>${esc(title)} · ${esc(product)}</title><meta name="robots" content="${robots}"><style>${site ? FONTS : ''}${CSS}</style></head>`;
   const brand = (href) => `<a class="brand" href="${href}">${ICON.bot}<span>${esc(product)}</span></a>`;
   const sim = banner ? `<div class="sim" role="note">${esc(banner)}</div>` : '';
   // Signed out, the other language is one tap away at the top; it is remembered in the lang cookie.
   const langSwitch = (tr) => { const to = tr.lang === 'cs' ? 'en' : 'cs'; return `<a class="langswitch" href="/lang/${to}" hreflang="${to}" lang="${to}">${to === 'cs' ? 'Čeština' : 'English'}</a>`; };
-  const layout = (title, body, { user, tr = user ? T(user) : translator('en'), bar = {}, tab = '', width = 'full', outWidth = 'narrow', actions = '' } = {}) => {
-    if (!user) return `${head(title, tr)}<body class="out"><header class="topbar">${brand('/')}${langSwitch(tr)}</header>${sim}<main class="col col--${outWidth}">${body}</main>${site ? legal(tr) : ''}<script>${uiJs(tr)}</script></body></html>`;
+  const layout = (title, body, { user, tr = user ? T(user) : translator('en'), bar = {}, tab = '', width = 'full', outWidth = 'narrow', actions = '', robots } = {}) => {
+    if (!user) return `${head(title, tr, null, robots)}<body class="out"><header class="topbar">${brand('/')}${langSwitch(tr)}</header>${sim}<main class="col col--${outWidth}">${body}</main>${site ? legal(tr) : ''}<script>${uiJs(tr)}</script></body></html>`;
     const hasWeb = !!q("SELECT 1 FROM bots WHERE user_id = ? AND vendor = 'web' AND disconnected_at IS NULL").get(user.id);
     const place = (key, href, label) => `<a class="tabs__item" href="${href}"${tab === key ? ' aria-current="page"' : ''}>${label}</a>`;
     const gov = govBots(user).length > 0;
@@ -208,7 +212,7 @@ ${THEME_COLOR[theme] ? `<meta name="theme-color" content="${THEME_COLOR[theme]}"
     // Never while a bot's doorbell is still being set up: that page has the owner's attention.
     const gift = !isHeadPage() && !news0(user) && tab === 'home' && promo && hasPicture(user) && liveBots(user).length && !liveBots(user).some((b) => settingUp(b, tr)) ? promo.splash(user, tr) : '';
     const news = news0(user) ? whatsNewDialog(tr) : gift || (!isHeadPage() && tab === 'home' && feedbackDue(user) ? feedbackDialog(user, tr) : '');
-    return `${head(title, tr, user.theme)}<body class="in"><header class="top"><div class="top__in">${brand('/app')}${nav}${me}</div></header>
+    return `${head(title, tr, user.theme, robots)}<body class="in"><header class="top"><div class="top__in">${brand('/app')}${nav}${me}</div></header>
 <main class="page">${sim}<div class="col col--${width}">${pagehead}${body}${bar.bot ? connectionMarker(myBots(user).find((b) => b.id === bar.bot), tr) : ''}</div>${site ? legal(tr) : ''}</main>${note ? toast(note, tr) : ''}${news}<script>${uiJs(tr)}</script></body></html>`;
   };
   const news0 = (user) => latestUpdate && user.seen_update !== latestUpdate.iso && hasPicture(user);
@@ -478,6 +482,11 @@ ${bar}</div>`;
   };
   const liveBots = (u) => myBots(u).filter((b) => !b.disconnected_at);
   const webBots = (u) => liveBots(u).filter((b) => b.vendor === 'web');
+  // Public contact links and the badge (contact-links.mjs). A contact opens on its own page for People users.
+  const contactLinks = createContactLinks({ q, tx, clock, L, log, governance });
+  const linkPages = contactLinkPages({ links: contactLinks, layout, esc, codeBlock, field, badge, origin, liveBots, isSender, form, page, redirect, tell, undoForm, HttpError, ICON,
+    markOf: (b, tr) => originOf(b, tr).mark,
+    contactHref: (u, c) => (govBots(u).some((x) => x.id === c.owner_bot) ? `/app/people/${c.owner_bot}/${c.peer_bot}` : '/app#friends') });
   // A person without an AI bot gets a "web" bot: same contacts and delivery, read in the browser.
   function makeWebBot(u) {
     const base = (u.name || u.email.split('@')[0]).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'friend';
@@ -653,7 +662,7 @@ ${codeBlock('xm', tr('Message for your assistant'), prompts.other(after, 'other'
     const golf = tier && user.tier_theme === 'golf';
     return layout(tr('Plan'), `<section class="card${golf ? ' card--golf' : ''}">${golf ? GOLF_SCENE : ''}<h2>${tr('Your plan')}${c.state === 'infinite' ? ' <span class="umenu__plan umenu__plan--infinite"><span class="inf" aria-hidden="true">∞</span>Infinite</span>' : tier ? ` <span class="umenu__plan${golf ? ' umenu__plan--golf' : ''}">${esc(user.tier_name)}</span>` : ''}</h2>${tier && user.tier_note ? `<p class="tiernote">${esc(user.tier_note)}</p>` : ''}${paid ? `<p class="okmsg" role="status">${tr('Thanks! Payment received.')}</p>` : ''}${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
 ${c.limited ? `<div class="card__block">${usageMeter(c, { tr })}</div>` : ''}<p>${status}</p>
-${c.state === 'infinite' ? `<p>${badge(tr('Alpha'), 'info')} ${tr('Shared folders are yours to try: your group’s bots keep files in one place, end-to-end encrypted. Ask your bot to turn one on for a group.')}</p>` : ''}
+${c.state === 'infinite' && hosted && !foldersOpen ? `<p>${badge(tr('Alpha'), 'info')} ${tr('Shared folders are yours to try: your group’s bots keep files in one place, end-to-end encrypted. Ask your bot to turn one on for a group.')}</p>` : ''}
 ${c.state === 'covered' || c.state === 'infinite' ? '' : canPay ? `<form method="post" action="/app/billing/checkout"><button class="btn">${c.state === 'paid' ? tr('Add another year') : tr('Pay {price}', { price })}</button></form><p class="muted small">${c.state === 'paid' ? '' : `${tr('No monthly limit for you and your household.')} `}${tr('One payment a year. No subscription, nothing renews by itself.')}</p>`
   : `<p class="muted small">${tr('The paid plan is coming soon.')}</p>`}</section>
 ${promo && c.state === 'free' ? promo.planLine(user, tr) : ''}
@@ -963,8 +972,10 @@ ${confirmMorph({ action: '/app/contacts/remove', fields: ids, label: tr('Remove'
       ...aiBots.filter((b) => !b.paused_at && heldOf(b)).map((b) => alertBox('info', tr.n(heldOf(b), '{n} brief for @{handle} is waiting for a project|{n} briefs for @{handle} are waiting for a project', { handle: esc(b.handle) }), '', `<a class="btn small" href="/app/bots/${b.id}#held">${tr('Show the message')}</a>`)),
       // Okays happen in the bot's chat now, so nothing waits for you here.
       pending ? alertBox('info', tr('Connect @{handle}', { handle: esc(pending.handle) }), tr('Your Grok Bot setup is waiting.'), `<a class="btn small" href="/app/bots/add/grok/steps">${tr('Continue')}</a>`) : '',
-      ...requests.map((c) => alertBox('warning', tr('Did you mean to connect with {name}?', { name: person(c) }),
-        tr('Your bot {mine} paired with <b>{name}</b> ({theirs}) {verified}. Nothing can be sent either way until you say yes.', { mine: `<span class="handle">@${esc(c.my_handle)}</span>`, name: person(c), theirs: `<span class="handle">@${esc(c.handle)}</span>`, verified: verifiedPill(c.email_verified_at, tr) }),
+      ...requests.map((c) => alertBox('warning', contactLinks.cameVia(c.owner_bot, c.peer_bot) ? tr('{name} wants to connect', { name: person(c) }) : tr('Did you mean to connect with {name}?', { name: person(c) }),
+        contactLinks.cameVia(c.owner_bot, c.peer_bot)
+          ? tr('<b>{name}</b> ({theirs}) {verified} asked through your public link for {mine}. Nothing can be sent either way until you say yes.', { mine: `<span class="handle">@${esc(c.my_handle)}</span>`, name: person(c), theirs: `<span class="handle">@${esc(c.handle)}</span>`, verified: verifiedPill(c.email_verified_at, tr) })
+          : tr('Your bot {mine} paired with <b>{name}</b> ({theirs}) {verified}. Nothing can be sent either way until you say yes.', { mine: `<span class="handle">@${esc(c.my_handle)}</span>`, name: person(c), theirs: `<span class="handle">@${esc(c.handle)}</span>`, verified: verifiedPill(c.email_verified_at, tr) }),
         `<form method="post" action="/app/contacts/approve"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small">${tr('Yes, connect')}</button></form>
 <form method="post" action="/app/contacts/remove"><input type="hidden" name="bot" value="${c.owner_bot}"><input type="hidden" name="peer" value="${c.peer_bot}"><button class="btn small ghost">${tr('No, remove')}</button></form>`)),
     ].filter(Boolean).join('');
@@ -1289,7 +1300,7 @@ ${d.primary || d.off ? '' : `<form method="post" action="/app/bots/${b.id}/devic
     return `<section class="card" id="held"><h2>${tr.n(n, '{n} brief is waiting for a project|{n} briefs are waiting for a project')}</h2>
 <p>${tr("Someone sent work to a project that isn't set up for them on your computer, so nothing started.")} ${AGENTS[b.platform] ? tr('Paste this into {agent} there:', { agent: esc(AGENTS[b.platform]) }) : tr("Paste this into your bot's chat:")}</p>${codeBlock('hmsg', tr('Message for your bot'), HELD_MESSAGE, tr)}</section>`;
   };
-  function botPage(user, b, { error = '' } = {}) {
+  function botPage(user, b, { error = '', link = {} } = {}) {
     const tr = T(user);
     const st = botStatus(b, tr);
     // A connected app that isn't Grok Bot can't be woken from outside, so it has no doorbell step: the Grok Bot
@@ -1405,6 +1416,7 @@ ${changeDoorbell(b, tr)}${devicesCard(b, tr)}${disconnectCard(b, tr)}`, { user, 
 ${liveBots(user).some(isSender) ? '' : `<section class="card" id="send"><h2>${tr('Briefs from chat apps')}</h2><p>${tr('Ask ChatGPT, Claude, Gemini, Grok or Perplexity to send a plan or research straight to @{handle}. No copying.', { handle: esc(b.handle) })}</p><div><a class="btn ghost" href="/connect/send">${tr('Connect a chat app')}</a></div></section>`}
 ${b.vendor === 'connector' ? `<section class="card" id="encryption"><div class="card__head"><h2>${tr('Turn on end-to-end encryption')}</h2>${badge(tr('Recommended'), 'info')}</div><p>${tr("With quick connect, bot2bot can read your messages. Ordinary messages are deleted 2 days after delivery; task threads stay for 30 days after their last message. Private mode keeps messages end-to-end encrypted between bots. Your bot switches by itself and keeps its name, doorbell and contacts.")}</p>
 <p>${tr("Paste this into your bot's chat:")}</p>${codeBlock('emsg', msgFor, ENCRYPTION_MESSAGE, tr)}</section>` : ''}
+${linkPages.card(b, tr, link)}
 ${toolOf(b) ? updatesCard(b, tr) : ''}
 ${noDoorbell(b) && b.vendor === 'connector' ? `<section class="card" id="wake"><h2>${tr('Let it wake up on its own')}</h2><p>${tr("If your bot has its own API, or can run a task every few minutes, friends' bots can reach it without you. Paste this into your bot:")}</p>
 ${codeBlock('wkmsg', msgFor, ASSISTANT_DOORBELL, tr)}</section>`
@@ -1865,7 +1877,7 @@ ${admin || run.by === `@${b.handle}` ? confirmMorph({ action: act('run-stop'), f
     const folder = (() => {
       if (!folderShown) return '';
       const on = folderLive, grants = folderGrants(g.id), myRole = ['read', 'write'].includes(grants.get(b.id)) && grants.get(b.id);
-      const top = `<div class="group__head"><h2 id="folder-h">${tr('Shared folder')} ${badge(tr('Alpha'), 'info')}</h2>${on && myRole && b.box_pub ? '<div class="group__act" id="folder-actions"></div>' : ''}</div>`;
+      const top = `<div class="group__head"><h2 id="folder-h">${tr('Shared folder')}${folderGated ? ` ${badge(tr('Alpha'), 'info')}` : ''}</h2>${on && myRole && b.box_pub ? '<div class="group__act" id="folder-actions"></div>' : ''}</div>`;
       const line = (text) => `<div class="card"><p class="fnote">${text}</p></div>`;
       const access = (m) => {
         const role = grants.get(m.bot_id) ?? 'write', id = `fperm-${m.bot_id}`;
@@ -1918,8 +1930,9 @@ ${admin || run.by === `@${b.handle}` ? confirmMorph({ action: act('run-stop'), f
 <svg class="foldart__front" viewBox="0 0 96 72" width="96" height="72"><path d="M3.6 33.2A5 5 0 0 1 8.5 29h79a5 5 0 0 1 4.9 4.2l-3.3 33.6A5 5 0 0 1 84.2 71H11.8a5 5 0 0 1-4.9-4.2z"/></svg>
 <span class="foldart__lock"><svg viewBox="0 0 16 16" width="11" height="11"><path d="M5 7V5a3 3 0 0 1 6 0v2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="3" y="7" width="10" height="7.5" rx="2" fill="currentColor"/></svg></span>
 </div></div>`;
-  // The folder's alpha gate, as the relay's: Infinite owners on the hosted relay, anyone on a self-hosted one.
-  const folderAlpha = (user) => !hosted || !!user.infinite_at;
+  // The folder's alpha gate, as the relay's: open to everyone unless the hosted relay runs FOLDERS_OPEN=0 (Infinite only).
+  const folderGated = hosted && !foldersOpen;
+  const folderAlpha = (user) => !folderGated || !!user.infinite_at;
   // Read-only looks at the folder tables the relay keeps (team-folders.mjs); a relay without them has no folder.
   const folderOn = (gid) => { try { return !!q('SELECT 1 FROM team_folder_groups WHERE group_id = ?').get(gid); } catch { return false; } };
   // Files in the folder now: each file's newest version that isn't a deletion.
@@ -2176,6 +2189,7 @@ ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
       for (const id of ids) events?.revokeAll(id);
       q(`UPDATE bots SET token_hash = NULL, webhook_url = NULL, webhook_key = NULL, doorbell_kind = NULL, doorbell_verified_at = NULL, paused_at = NULL, disconnected_at = coalesce(disconnected_at, ?), display_name = 'Deleted user' WHERE id IN (${ph})`).run(t, ...ids);
       q(`DELETE FROM contacts WHERE owner_bot IN (${ph}) OR peer_bot IN (${ph})`).run(...ids, ...ids);
+      contactLinks.forget(ids);
       erase(`from_bot IN (${ph}) OR to_bot IN (${ph})`, ...ids, ...ids);
       q(`DELETE FROM task_threads WHERE bot_a IN (${ph}) OR bot_b IN (${ph})`).run(...ids, ...ids);
       q('UPDATE feedback SET user_id = NULL WHERE user_id = ?').run(user.id); // feedback stays, without who sent it
@@ -2451,7 +2465,7 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
   async function handleApp(req, res, url) {
     const p = url.pathname;
     // With the landing site on the same server, it answers / and /pricing instead of the built-in pages.
-    const isApp = p === '/connect/chatgpt' || p === '/connect/send' || p.startsWith('/connect/send/') || p.startsWith('/setup-shots/') || p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || (payments && p === '/billing/stripe') || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || (!!boardPages && (p === '/feedback' || p.startsWith('/feedback/'))) || p.startsWith('/i/') || (!!groups && p.startsWith('/g/')) || p === '/founder' || (promo && p.startsWith('/gift/')) || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/')
+    const isApp = p === '/connect/chatgpt' || p === '/connect/send' || p.startsWith('/connect/send/') || p.startsWith('/setup-shots/') || p === '/oauth/authorize' || (!site && (p === '/' || p === '/pricing')) || (payments && p === '/billing/stripe') || p === '/login' || p.startsWith('/login/') || p === '/logout' || p === '/app' || p.startsWith('/app/') || (!!boardPages && (p === '/feedback' || p.startsWith('/feedback/'))) || p.startsWith('/i/') || (!!groups && p.startsWith('/g/')) || p.startsWith('/to/') || p === '/badge.svg' || p === '/founder' || (promo && p.startsWith('/gift/')) || p.startsWith('/art/') || p.startsWith('/avatars/') || p.startsWith('/stickers/') || p.startsWith('/hand/') || p.startsWith('/lang/')
       || (!!status && (p === '/status' || p === '/status/' || p === '/status.json' || p === '/status/feed.xml'));
     if (!isApp) return false;
     if (isHeadPage()) {
@@ -2472,6 +2486,12 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         if (!ROBOT.has(rm[1])) throw new HttpError(404, 'Not found');
         res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=604800', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'" });
         res.end(ROBOT_SVG.get(rm[1]));
+        return true;
+      }
+      // The "Talk to my agent" badge: one picture for every README, cached for a long time.
+      if (p === '/badge.svg' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=2592000, immutable', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'", 'access-control-allow-origin': '*' });
+        res.end(BADGE_SVG);
         return true;
       }
       const sm = p.match(/^\/stickers\/([a-z0-9][a-z0-9-]{0,39})\.png$/);
@@ -2693,6 +2713,9 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
         catch (e) { if (e instanceof HttpError) return page(res, e.status, founderPage(f, user, bots, { tr, error: e.message })), true; throw e; }
       }
 
+      // Public contact links work for logged-out visitors too: asking needs signing in.
+      if (p.startsWith('/to/')) return await linkPages.publicRoute(req, res, p, user, tr), true;
+
       // Invite links work for logged-out visitors too.
       const im = p.match(/^\/i\/([A-Za-z0-9-]{9})$/);
       if (im) {
@@ -2894,6 +2917,12 @@ ${props.length ? `<section class="group" aria-labelledby="changes-h"><h2 id="cha
           catch (e) { if (e instanceof HttpError && e.status < 500) return page(res, e.status, botPage(user, { ...b, nameError: tr.msg(e.message) })), true; throw e; }
           if (r.from !== r.to) tell(user, { what: tr('Renamed to {name}', { name: r.to }), undo: f.undo === '1' ? null : undoForm(`/app/bots/${b.id}/rename`, { handle: b.handle }) });
           return redirect(res, `/app/bots/${b.id}`), true;
+        }
+        // The public link (contact-links.mjs): on, off, or a new name. A name that can't be used stays on the form.
+        if (sub === '/link' && req.method === 'POST') {
+          const r = await linkPages.ownerPost(req, res, user, b, tr);
+          if (r?.error) return page(res, r.error === 'taken' ? 409 : 400, botPage(user, b, { link: r })), true;
+          return true;
         }
         if (sub === '/disconnect' && req.method === 'POST') {
           tx(disconnectInTx);
@@ -4177,6 +4206,8 @@ w.dataset.tab=k;ts.forEach(t=>{const on=t.dataset.gtab===k;t.setAttribute('aria-
 const REFRESH_JS = `setInterval(()=>{if(document.visibilityState!=='visible'||[...document.querySelectorAll('details[open]:not(.bsec__d)')].some(d=>d.getClientRects().length)||document.querySelector('.cm[data-state=ask],.acc[data-open=true],[data-hold]')||document.querySelector('[data-find] input')?.value||/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||''))return;window.b2bStay&&b2bStay();location.reload();},30000);`;
 // The behaviour of the Arc components above, in plain JS. Every page loads it once.
 const uiJsFor = (tr) => `(function(){const $$=(s,r=document)=>[...r.querySelectorAll(s)];document.documentElement.classList.add('js');
+/* iOS Safari only shows :active (the press states) once a page listens for touches; this one does nothing else. */
+document.addEventListener('touchstart',()=>{},{passive:true});
 /* Staying in place: a save answers with the same page, so it comes back where you were, without the entrance animation. */
 const here=location.pathname+location.search;let was=null;try{was=JSON.parse(sessionStorage.getItem('stay'));sessionStorage.removeItem('stay');}catch(e){}
 if(was&&Date.now()-was.t<20000&&(was.p===here||was.a===here)){document.documentElement.classList.add('stay');if(!location.hash)scrollTo(0,was.y);}
@@ -4339,8 +4370,8 @@ const CSS = `
 /* Dark: the same ink-blue, turned down. It follows the device unless the person picked Light or Dark in Account. */
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){${DARK}}}:root[data-theme=dark]{${DARK}}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%;scrollbar-gutter:stable}
-a,button,summary,label,select,[role=tab],[role=button]{touch-action:manipulation}
-button,summary,[role=tab],.btn,.seg{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+a,button,summary,label,input,select,textarea,[role=tab],[role=button],[role=treeitem],[role^=menuitem]{touch-action:manipulation}
+button,summary,[role=tab],.btn,.seg,.tabs__item,.crumb,.chip,.bchip,.rate__opt,.pfp__opt,.switch,.gpick__opt{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 body{margin:0;background:var(--background);color:var(--foreground);font:400 var(--text-sm)/var(--leading-body) var(--font-body);letter-spacing:var(--tracking-body);-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent}
 a{color:inherit}p{margin:0 0 12px}b,strong{font-weight:500}
 h1{margin:0;font:500 var(--text-2xl)/1.1 var(--font-display);letter-spacing:var(--tracking-display)}
@@ -4352,7 +4383,7 @@ h2{margin:0 0 8px;font-size:var(--text-base);font-weight:500;letter-spacing:-.01
 
 /* ── Top bar: the brand, the sections as tabs, and you ── */
 .top{position:sticky;top:0;z-index:40;background:color-mix(in oklab,var(--background) 86%,transparent);-webkit-backdrop-filter:saturate(1.4) blur(14px);backdrop-filter:saturate(1.4) blur(14px);border-bottom:1px solid color-mix(in oklab,var(--border) 70%,transparent)}
-.top__in{display:flex;align-items:center;gap:20px;max-width:760px;margin:0 auto;padding:12px 20px;padding-top:max(12px,env(safe-area-inset-top))}
+.top__in{display:flex;align-items:center;gap:20px;max-width:760px;margin:0 auto;padding:max(12px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) 12px max(20px,env(safe-area-inset-left))}
 .brand{display:inline-flex;align-items:center;gap:9px;font:500 var(--text-lg)/1 var(--font-display);letter-spacing:var(--tracking-display);text-decoration:none}.brand svg{width:22px;height:22px}
 /* Tabs (Arc segmented control, as navigation): the highlight glides from the section you left. */
 .tabs{position:relative;isolation:isolate;display:flex;gap:2px;margin-right:auto;padding:3px;border-radius:999px;background:color-mix(in oklab,var(--foreground) 5%,transparent)}
@@ -4365,7 +4396,7 @@ h2{margin:0 0 8px;font-size:var(--text-base);font-weight:500;letter-spacing:-.01
 .dot--live{background:var(--accent);animation:pulse 1.4s ease-in-out infinite}@keyframes pulse{50%{opacity:.3}}
 
 /* ── Page: one centred column that settles in on arrival ── */
-.page{min-width:0;padding:36px 20px 40px}
+.page{min-width:0;padding:36px max(20px,env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom,0px)) max(20px,env(safe-area-inset-left))}
 .col{width:100%;max-width:720px;margin:0 auto;display:grid;gap:28px;align-content:start;animation:page-in 240ms var(--ease-standard) both}.col>*{min-width:0}
 .col--narrow{max-width:480px}.col--wide{max-width:none}
 /* The overview: Arc tabs down the left (All, Friends, Groups, Your bots, Chat apps), the picked section on the right.
@@ -4413,8 +4444,8 @@ body.in .legal{max-width:720px;margin:48px auto 0}
 .crumb{display:inline-flex;align-items:center;gap:4px;margin-left:-4px;color:var(--text-secondary);text-decoration:none;font-weight:500;font-size:var(--text-sm)}.crumb svg{width:16px;height:16px}@media (hover:hover) and (pointer:fine){.crumb:hover{color:var(--foreground)}}
 .note{display:flex;align-items:center;gap:6px;margin:0;color:var(--text-muted);font-size:var(--text-xs)}.note svg{width:13px;height:13px}
 .legal{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:40px;font-size:var(--text-xs)}.legal a{color:var(--text-muted);text-decoration:none}@media (hover:hover) and (pointer:fine){.legal a:hover{color:var(--foreground);text-decoration:underline}}
-body.out{min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}body.out .topbar{padding:20px clamp(16px,3vw,40px)}
-body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px 48px}body.out .legal{justify-content:center;margin:0 auto 28px}
+body.out{min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}body.out .topbar{padding:max(20px,env(safe-area-inset-top)) max(clamp(16px,3vw,40px),env(safe-area-inset-right)) 20px max(clamp(16px,3vw,40px),env(safe-area-inset-left))}
+body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px max(16px,env(safe-area-inset-right)) 48px max(16px,env(safe-area-inset-left))}body.out .legal{justify-content:center;margin:0 auto calc(28px + env(safe-area-inset-bottom,0px))}
 .sim{margin:0 0 16px;padding:8px 14px;border-radius:var(--radius-control);background:color-mix(in oklab,var(--warning) 16%,var(--surface));color:var(--foreground);font-weight:500;text-align:center}
 
 /* ── Cards (Arc surface): a border, no shadow ── */
@@ -4473,7 +4504,7 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .avatar--cut{border:0;background:none;box-shadow:none;filter:drop-shadow(0 1px 1px rgb(0 0 0 / .1)) drop-shadow(0 3px 5px rgb(0 0 0 / .12))}.avatar--cut img{border-radius:0;object-fit:contain}
 .me{display:flex;align-items:center;gap:14px;min-width:0}
 /* Picture picker: the chosen robot lands in the preview on a spring and blinks once. */
-.dlg{width:min(420px,calc(100vw - 32px));padding:0;border:0;border-radius:var(--radius-surface);background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-floating),0 0 0 1px var(--hairline)}
+.dlg{width:min(420px,calc(100vw - 32px));overscroll-behavior:contain;padding:0;border:0;border-radius:var(--radius-surface);background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-floating),0 0 0 1px var(--hairline)}
 .dlg[open]{animation:dlg-in 420ms var(--ease-spring) both}.dlg::backdrop{background:var(--scrim);animation:dlg-fade 200ms ease-out both}
 .dlg__in{display:grid;gap:14px;padding:24px}
 /* A big update: three robots passing a message along (the dot travels, unless motion is reduced), then the title and points. */
@@ -4556,7 +4587,7 @@ body.out main{flex:1;display:grid;gap:16px;align-content:start;padding:24px 16px
 .pdot[data-status="away"]::before,.pdot[data-status="offline"]::before{transform:scale(1)}
 /* A bot's row: the mark of the assistant it runs on, its presence dot on the corner, and its doorbell as a bell. */
 .botmark{--mark-bg:var(--surface-muted);position:relative;display:grid;place-items:center;width:40px;height:40px;flex:none;border-radius:12px;background:var(--mark-bg);color:var(--foreground)}
-.botmark>svg{width:20px;height:20px}.botmark[data-origin="openclaw"]>svg{width:23px;height:23px}
+.botmark>svg{width:20px;height:20px}.botmark--lg{width:64px;height:64px;margin:0 auto 16px;border-radius:18px}.botmark--lg>svg{width:32px;height:32px}.clink__badge{margin:4px 0 0;line-height:0}.botmark[data-origin="openclaw"]>svg{width:23px;height:23px}
 .botmark>.pdot{position:absolute;right:-3px;bottom:-3px;box-shadow:0 0 0 2.5px var(--presence-surface,var(--surface))}
 .bell{position:relative;display:grid;place-items:center;width:32px;height:32px;flex:none;border-radius:999px;color:var(--text-muted)}
 .bell>svg{width:18px;height:18px}
@@ -4685,8 +4716,8 @@ transition:color var(--duration-fast) var(--ease-standard),background-color var(
 .switch__thumb{width:18px;height:18px;border-radius:50%;background:var(--control-thumb);box-shadow:var(--control-thumb-shadow);transition:transform var(--duration-spring) var(--ease-spring)}
 .switch input:checked+.switch__track::before{opacity:1}.switch input:checked+.switch__track .switch__thumb{transform:translateX(18px)}
 .switch input:focus-visible+.switch__track{outline:2px solid color-mix(in oklab,var(--accent) 72%,transparent);outline-offset:2px}
-@media (hover:hover) and (pointer:fine){.switch:has(input:disabled){cursor:default}.switch input:disabled{cursor:default}.switch input:disabled+.switch__track{opacity:.45}
-.switch:hover input:not(:checked)+.switch__track{background:var(--control-track-hover)}}
+.switch:has(input:disabled){cursor:default}.switch input:disabled{cursor:default}.switch input:disabled+.switch__track{opacity:.45}
+@media (hover:hover) and (pointer:fine){.switch:hover input:not(:checked):not(:disabled)+.switch__track{background:var(--control-track-hover)}}
 /* Nightly updates: when it's on, the card turns to night (a starry sky, like the T3 Code title bar). It flips the
    moment the switch does, before the save comes back. Dark in both themes on purpose. */
 .card--night{position:relative;overflow:hidden;isolation:isolate;transition:border-color 520ms var(--ease-standard),color 520ms var(--ease-standard)}
@@ -4735,6 +4766,38 @@ transition:color var(--duration-fast) var(--ease-standard),background-color var(
 .card--files,.filesart,.filesart__bot,.filesart__route path,.filesart__lock{transition:none}
 :is(.card--files:has(input:checked),.filesart--live) :is(.filesart__chip,.filesart__lock,.filesart__bot,.filesart__route path){animation:none}
 :is(.card--files:has(input:checked),.filesart--live) .filesart__chip--photo{offset-distance:15%;rotate:-6deg}:is(.card--files:has(input:checked),.filesart--live) .filesart__chip--pdf{offset-distance:34%;rotate:3deg}:is(.card--files:has(input:checked),.filesart--live) .filesart__chip--note{offset-distance:78%;rotate:-3deg}}
+/* Tab: a till receipt with a torn edge, hanging into the panel. Friends write their initial next to what they had, in
+   ballpoint, and their robot hops; the lock stamps the slip. Paper and ink are fixed like airmail, the panel follows the theme. */
+.tabart{--paper:color-mix(in oklab,#fffdf8 92%,var(--surface));--ink:#3d4454;--ballpoint:#2945c4;display:grid;place-items:center;height:172px;overflow:hidden;background:color-mix(in oklab,var(--accent) 5%,var(--surface))}
+.tabart__stage{position:relative;width:320px;height:172px;flex:none}
+.dlg--big .tabart{margin:-24px -24px 4px;border-radius:var(--radius-surface) var(--radius-surface) 0 0;border-bottom:1px solid var(--border-subtle)}
+.tabart__paper{position:absolute;left:50%;top:-14px;width:140px;translate:-50% 0;rotate:-2deg;filter:drop-shadow(0 1px 1px rgb(20 30 60/.08)) drop-shadow(0 6px 12px rgb(20 30 60/.12))}
+.tabart__slip{display:grid;gap:5px;padding:26px 13px 20px;background:var(--paper);color:var(--ink);font:500 8.5px/1 var(--font-mono);font-variant-numeric:tabular-nums;
+  mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/7px 100%}
+.tabart__head{display:block;justify-self:center;width:58%;height:4px;border-radius:1px;background:var(--ink)}
+.tabart__head--sub{width:38%;height:2.5px;margin-top:-1px;opacity:.4}
+.tabart__rule{display:block;height:0;margin:3px 0 2px;border-top:1px dashed color-mix(in oklab,var(--ink) 35%,transparent)}
+.tabart__row{position:relative;display:flex;justify-content:space-between;align-items:center;height:11px}
+.tabart__row>i{display:block;width:var(--w);height:2.5px;border-radius:1px;background:color-mix(in oklab,var(--ink) 38%,transparent)}
+.tabart__row em{font-style:normal;opacity:.82}
+.tabart__row--total{--w:30%}.tabart__row--total>i{height:3.5px;background:var(--ink)}.tabart__row--total em{font-weight:700;font-size:9.5px;opacity:1}
+.tabart__who{position:absolute;left:calc(var(--w) + 5px);top:50%;translate:0 -54%;rotate:-6deg;font:600 17px/1 var(--font-hand);letter-spacing:0;color:var(--ballpoint);white-space:nowrap;clip-path:inset(-6px 100% -6px -6px)}
+.tabart__who--4{font-size:16px}
+.tabart__lock{position:absolute;z-index:1;left:162px;top:145px;translate:-50% -50%;display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--ballpoint);color:#fff;box-shadow:0 0 0 2px var(--paper),0 2px 5px rgb(20 30 60/.2)}
+.tabart__bot{position:absolute;width:56px;height:56px;filter:drop-shadow(0 2px 3px rgb(20 30 60/.14)) saturate(.35);opacity:.8}
+.tabart__bot--a{left:24px;top:62px}.tabart__bot--t{left:244px;top:24px;width:52px;height:52px}.tabart__bot--m{left:250px;top:98px;width:52px;height:52px}
+.tabart--live .tabart__bot{filter:drop-shadow(0 2px 3px rgb(20 30 60/.14));opacity:1}
+.tabart--live .tabart__who{animation:8s cubic-bezier(.45,0,.3,1) infinite both}
+.tabart--live .tabart__who--1{animation-name:tabart-w1}.tabart--live .tabart__who--2{animation-name:tabart-w2}.tabart--live .tabart__who--3{animation-name:tabart-w3}.tabart--live .tabart__who--4{animation-name:tabart-w4}
+.tabart--live .tabart__bot{animation:8s var(--ease-standard) infinite both}
+.tabart--live .tabart__bot--a{animation-name:tabart-hop-a}.tabart--live .tabart__bot--t{animation-name:tabart-hop-t}.tabart--live .tabart__bot--m{animation-name:tabart-hop-m}
+.tabart--live .tabart__lock{animation:tabart-stamp 8s var(--ease-standard) infinite both}
+${[8, 20, 32, 44].map((s, i) => `@keyframes tabart-w${i + 1}{0%,${s}%{clip-path:inset(-6px 100% -6px -6px);opacity:1}${s + 6}%,90%{clip-path:inset(-6px);opacity:1}96%,100%{clip-path:inset(-6px);opacity:0}}`).join('')}
+${[['a', 8], ['t', 20], ['m', 32]].map(([k, s]) => `@keyframes tabart-hop-${k}{0%,${s}%,${s + 5}%,44%,49%,100%{translate:0 0}${s + 2}%,46%{translate:0 -6px}}`).join('')}
+@keyframes tabart-stamp{0%,54%,64%,100%{scale:1}58%{scale:1.22}}
+@media (prefers-reduced-motion:reduce){
+.tabart--live :is(.tabart__who,.tabart__bot,.tabart__lock){animation:none}
+.tabart--live .tabart__who{clip-path:inset(-6px)}}
 
 /* ── Stepper (Arc): markers on one track; the fill grows from each finished step ── */
 .stepper{--marker:28px;--halo:4px;display:grid;margin:0;padding:0;list-style:none}
@@ -4872,7 +4935,7 @@ details summary{cursor:pointer}
 /* Group tabs (Arc tabs): a pill track like the segmented control, its pill gliding between tabs and each panel sliding
    in from the side you went. It scrolls sideways on a phone. Without JavaScript the bar stays hidden and all panels show. */
 .gtabs{display:grid;gap:28px}.gtabs[data-tab]{gap:16px}
-.gtabs__bar{position:relative;isolation:isolate;display:flex;gap:2px;justify-self:start;max-width:100%;padding:3px;overflow-x:auto;scrollbar-width:none;border:1px solid var(--border);border-radius:var(--radius-pill);background:var(--surface-muted)}
+.gtabs__bar{position:relative;isolation:isolate;display:flex;gap:2px;justify-self:start;max-width:100%;padding:3px;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;border:1px solid var(--border);border-radius:var(--radius-pill);background:var(--surface-muted)}
 .gtabs__bar::-webkit-scrollbar{display:none}.gtabs__bar[hidden]{display:none}
 .gtabs__tab{position:relative;z-index:1;display:inline-flex;flex:none;align-items:center;gap:7px;min-height:32px;padding:0 14px;border:0;border-radius:var(--radius-pill);background:transparent;color:var(--text-muted);font:inherit;font-weight:500;white-space:nowrap;cursor:pointer;transition:color var(--duration-fast) var(--ease-standard)}
 .gtabs__tab[aria-selected="true"]{color:var(--foreground)}.gtabs__tab:focus-visible{outline-offset:-2px}@media (hover:hover) and (pointer:fine){.gtabs__tab:hover{color:var(--foreground)}}
@@ -4926,9 +4989,9 @@ details summary{cursor:pointer}
 
 /* ── Phones: the tabs move under the brand and can scroll ── */
 @media (max-width:640px){
-.top__in{flex-wrap:wrap;gap:10px 12px;padding:10px 16px 10px}.brand{margin-right:auto}
-.tabs{order:3;flex:1 0 100%;margin:0;overflow-x:auto;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.tabs__item{flex:1;justify-content:center;padding:0 10px}
-.page{padding:24px 16px 36px}
+.top__in{flex-wrap:wrap;gap:10px 12px;padding:max(10px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 10px max(16px,env(safe-area-inset-left))}.brand{margin-right:auto}
+.tabs{order:3;flex:1 0 100%;margin:0;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.tabs__item{flex:1;justify-content:center;padding:0 10px}
+.page{padding:24px max(16px,env(safe-area-inset-right)) calc(36px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left))}
 .ovtabs__list{margin:0 -16px;padding:0 16px;scroll-padding-inline:16px}
 .pagehead__actions{width:100%}.pagehead__actions form,.pagehead__actions .btn{flex:1}.pagehead__actions .btn{width:100%}
 h1{font-size:24px}}
@@ -4966,12 +5029,13 @@ a.stk{touch-action:none;cursor:grab}
 .stk__disc{display:grid;place-items:center;overflow:hidden;border:calc(var(--s) * .055) solid var(--sticker-edge);border-radius:50%;background:var(--surface-muted)}
 .stk__disc img{display:block;width:100%;height:100%;object-fit:cover}
 .stk__initial{font:500 calc(var(--s) * .38)/1 var(--font-display);color:var(--text-secondary)}
-a.stk:hover,a.stk:focus-visible,.stk.is-named{z-index:5}
-a.stk:hover .stk__img,a.stk:focus-visible .stk__img{--lift:-5px;--scale:1.05;filter:var(--lift-shadow)}
+a.stk:focus-visible,.stk.is-named{z-index:5}
+a.stk:focus-visible .stk__img{--lift:-5px;--scale:1.05;filter:var(--lift-shadow)}
+@media (hover:hover) and (pointer:fine){a.stk:hover{z-index:5}a.stk:hover .stk__img{--lift:-5px;--scale:1.05;filter:var(--lift-shadow)}a.stk:hover .stk__name{clip-path:inset(-10px -10px -10px -10px)}}
 a.stk:focus-visible{outline:none}a.stk:focus-visible::before{content:"";position:absolute;inset:-6px;border:2px dashed var(--pen);border-radius:50%;opacity:.55}
 .stk.is-peeled .stk__img{filter:brightness(0);opacity:.06;transform:rotate(var(--tilt));transition:none}
 .stk__name{position:absolute;left:50%;top:calc(100% - 6px);z-index:2;translate:-50% 0;rotate:-4deg;white-space:nowrap;pointer-events:none;font:500 24px/1 var(--font-hand);color:var(--pen);clip-path:inset(0 100% 0 0);transition:clip-path 360ms var(--ease-standard)}
-a.stk:hover .stk__name,a.stk:focus-visible .stk__name,.stk.is-named .stk__name{clip-path:inset(-10px -10px -10px -10px)}
+a.stk:focus-visible .stk__name,.stk.is-named .stk__name{clip-path:inset(-10px -10px -10px -10px)}
 .stk.is-peeled .stk__name{display:none}
 .drag-ghost{position:fixed;left:0;top:0;z-index:100;pointer-events:none;will-change:transform}
 .drag-ghost>.stk__img{transform:none;filter:var(--lift-shadow)}
@@ -5003,7 +5067,7 @@ a.stk[data-held]{cursor:pointer;touch-action:auto}
 .basket--new{grid-column:var(--span3,auto);min-height:64px;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px;padding:10px 14px;background:none;border:1.5px dashed var(--border-strong);text-align:center}
 .basket--new input{width:100%;max-width:220px;height:auto;padding:2px 4px;border:0;border-bottom:1.5px solid transparent;border-radius:0;background:none;color:var(--pen);font:500 26px/1.2 var(--font-hand);letter-spacing:0;text-align:center}
 .basket--new input::placeholder{color:var(--text-secondary)}.basket--new input:focus::placeholder{color:var(--border-strong)}
-.basket--new input:hover:not(:disabled),.basket--new input:focus-visible{border-color:transparent;border-bottom-color:var(--pen)}
+.basket--new input:focus-visible{border-color:transparent;border-bottom-color:var(--pen)}@media (hover:hover) and (pointer:fine){.basket--new input:hover:not(:disabled){border-color:transparent;border-bottom-color:var(--pen)}}
 .nb__add{display:none}.basket--new:focus-within .nb__add{display:inline-flex}
 .nb__add{align-items:center;min-height:32px;padding:0 14px;border:0;border-radius:999px;background:var(--foreground);color:var(--background);font:inherit;font-weight:500;cursor:pointer}
 .people__how{margin:16px 4px 0;color:var(--text-secondary);font-size:var(--text-sm)}
@@ -5015,7 +5079,7 @@ a.stk[data-held]{cursor:pointer;touch-action:auto}
 .mv[hidden]{display:none}.mv__title{padding:8px 10px 6px;color:var(--text-secondary);font-size:13px}
 .mv [role^="menuitem"]{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:7px 10px;border:0;border-radius:10px;background:none;color:inherit;font:inherit;font-size:15px;text-align:left;text-decoration:none;cursor:pointer}
 .mv [role="menuitemradio"] .hand{margin-right:auto;font-size:22px;line-height:1.1}
-.mv [role^="menuitem"]:hover,.mv [role^="menuitem"]:focus-visible{outline:none;background:var(--surface-muted)}
+.mv [role^="menuitem"]:focus-visible,.mv [role^="menuitem"]:active{outline:none;background:var(--surface-muted)}@media (hover:hover) and (pointer:fine){.mv [role^="menuitem"]:hover{background:var(--surface-muted)}}
 .mv [aria-checked="true"]::after{content:"";flex:none;width:7px;height:7px;border-radius:50%;background:var(--pen)}
 .mv hr{height:1px;margin:6px 4px;border:0;background:var(--border-subtle)}.mv__mode{color:var(--text-secondary);font-size:12px}
 
@@ -5087,7 +5151,6 @@ a.stk[data-held]{cursor:pointer;touch-action:auto}
 .rule-add{flex-direction:column}.rule-add input{flex:none}.rule-add .btn{align-self:flex-start}
 .ask{padding:18px 16px}.ask__q{font-size:18px}
 .ask__actions>*{flex:1 1 100%}.ask__actions .btn{width:100%}.ask__own .btn{justify-self:stretch}}
-@media (hover:none){a.stk:hover .stk__img{--lift:0px;--scale:1;filter:var(--stick-shadow)}a.stk:hover .stk__name{clip-path:inset(0 100% 0 0)}.stk.is-named .stk__name{clip-path:inset(-10px -10px -10px -10px)}}
 @media (prefers-reduced-motion:reduce){.stk__img{--rx:0deg!important;--ry:0deg!important}.settle,.rule.is-new,.ask__stamp{animation:none}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:1ms!important;animation-iteration-count:1!important;transition-duration:1ms!important}.btn:active{transform:none!important}.btn__spin{transform:none}.avatar img[data-loading]{filter:none}.pfp__face.go>*,.pfp__face.go .e{animation:none}}
 /* Signed out: the other language, at the top right. */
@@ -5164,7 +5227,7 @@ body.out .topbar{display:flex;align-items:center;justify-content:space-between;g
 .fperm{gap:12px}.fperm__who{flex:1;min-width:0}.fperm__who p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fperm__h{margin:0;padding:16px 0 2px;border-top:1px solid var(--border-subtle);color:var(--text-secondary);font-size:var(--text-xs)}.fperm__none{color:var(--text-muted);font-size:var(--text-xs)}
 @media (max-width:560px){.fperm{flex-wrap:wrap}.fperm .seg{width:100%}.fperm .seg__track{flex:1}.fperm .seg button{flex:1}.frow__main{flex-direction:column;align-items:stretch;gap:1px}.frow__meta{overflow:hidden;text-overflow:ellipsis}.ftree__item[data-dir]>.frow .frow__meta{display:none}.frow{min-height:52px}}
-.fview{width:min(880px,calc(100vw - 32px));height:min(86vh,920px);max-width:none;max-height:none;padding:0;border:0;border-radius:var(--radius-surface);background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-floating),0 0 0 1px var(--hairline);overflow:hidden}
+.fview{width:min(880px,calc(100vw - 32px));height:min(86vh,920px);height:min(86dvh,920px);max-width:none;max-height:none;padding:0;border:0;border-radius:var(--radius-surface);background:var(--surface);color:var(--foreground);box-shadow:var(--shadow-floating),0 0 0 1px var(--hairline);overflow:hidden}
 .fview[open]{animation:dlg-in 420ms var(--ease-spring) both}.fview::backdrop{background:var(--scrim);animation:dlg-fade 200ms ease-out both}
 .fview__in{display:flex;flex-direction:column;height:100%;min-height:0}
 .fview__head{display:flex;align-items:flex-start;gap:12px;padding:20px 16px 12px 24px}
@@ -5191,13 +5254,13 @@ body.out .topbar{display:flex;align-items:center;justify-content:space-between;g
 .fdiff__row--add{background:color-mix(in oklab,var(--success) 12%,var(--surface))}.fdiff__row--add .fdiff__sign{color:var(--success)}
 .fdiff__row--del{background:color-mix(in oklab,var(--danger) 10%,var(--surface))}.fdiff__row--del .fdiff__sign{color:var(--danger)}.fdiff__row--del .fdiff__text{text-decoration:line-through;text-decoration-color:color-mix(in oklab,var(--danger) 45%,transparent)}
 .fdiff__skip{padding:4px 12px 4px 2em;color:var(--text-muted);font:var(--text-xs)/1.6 var(--font-body);background:var(--surface-muted)}
-.fview__body{flex:1;min-height:0;overflow:auto;padding:0 24px 20px;border-top:1px solid var(--border-subtle)}
+.fview__body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:0 24px 20px;border-top:1px solid var(--border-subtle)}
 .fview__foot{display:flex;align-items:center;gap:8px;padding:12px 16px 12px 24px;border-top:1px solid var(--border-subtle)}.fview__gap{flex:1}.fview__foot .btn svg{width:16px;height:16px}
 .btn.ghost.fview__del{color:var(--danger)}
 .fview__wait,.fview__bad{margin:20px 0 0}.fview__bad{color:var(--danger)}
 .fview__text{margin:16px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.65 var(--font-mono)}
 .fview__none{display:grid;place-items:center;min-height:200px}
-.fview__edit{display:block;width:100%;height:100%;min-height:40vh;margin:0;padding:16px 0;border:0;resize:none;background:transparent;color:var(--foreground);font:14px/1.65 var(--font-mono);outline:none}
+.fview__edit{display:block;width:100%;height:100%;min-height:40vh;margin:0;padding:16px 0;border:0;resize:none;background:transparent;color:var(--foreground);font:14px/1.65 var(--font-mono);outline:none}@media (pointer:coarse){.fview__edit{font-size:16px}}
 .fview__name{width:100%;min-height:40px;padding:0 12px;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--surface);color:var(--foreground);font:500 var(--text-lg)/1 var(--font-display);letter-spacing:var(--tracking-display)}
 @media (max-width:640px){.fview{width:100vw;height:100dvh;margin:0;border-radius:0}.fview__head{padding:max(14px,env(safe-area-inset-top)) 12px 10px 16px}.fview__bar{padding:0 16px}.fsug__act{margin:0 -16px -16px;padding:10px 16px;bottom:-16px}.fview__body{padding:0 16px 16px}.fview__foot{flex-wrap:wrap;padding:10px 12px max(10px,env(safe-area-inset-bottom)) 16px}}
 .fhist{list-style:none;margin:8px 0 0;padding:0}.fhist__row{display:flex;align-items:center;gap:12px;min-height:56px;padding:8px 0}.fhist__row+.fhist__row{border-top:1px solid var(--border-subtle)}
@@ -5218,5 +5281,15 @@ body.out .topbar{display:flex;align-items:center;justify-content:space-between;g
 .md__table{max-width:100%;overflow-x:auto;margin:0 0 1em}.md table{border-collapse:collapse;font-size:var(--text-sm)}
 .md th,.md td{padding:6px 12px;border:1px solid var(--border);text-align:left;vertical-align:top}.md th{background:var(--surface-muted);font-weight:500}.md td>p:last-child{margin:0}
 .md__img{color:var(--text-muted);font-style:italic}
+/* ── Press states: a finger gets what a pointer gets on hover, the moment it lands (hover above is mouse-only) ── */
+.tabs__item:active,.gtabs__tab:active,.seg button:active,.crumb:active,.link:active,.langswitch:active,.rate__opt:active span{color:var(--foreground)}
+.line--link:active,.acc__head:active{background:color-mix(in oklab,var(--foreground) 4%,var(--surface));--presence-surface:color-mix(in oklab,var(--foreground) 4%,var(--surface))}
+.more .menu a:active,.more .menu button:active,.umenu__trigger:active,button.chip:active,.video:active{background:var(--surface-muted)}.more .menu .danger:active{background:color-mix(in oklab,var(--danger) 8%,var(--surface))}
+.umenu__item:active{background:color-mix(in oklab,var(--foreground) 6%,transparent)}
+.iconbtn:active,.tchip button:active{background:var(--surface-muted);color:var(--foreground)}
+.bchip:active{background:var(--surface)}.card--meter:active{border-color:var(--border-strong)}
+.cm__trigger:active{background:color-mix(in oklab,var(--foreground) 5%,transparent)}.cm__secondary:active{background:color-mix(in oklab,var(--foreground) 7%,transparent);color:var(--foreground)}
+.cm__confirm:active{background:color-mix(in oklab,var(--danger) 18%,transparent)}.cm[data-tone="neutral"] .cm__confirm:active{background:var(--accent-strong)}
+.toast__undo:active{background:color-mix(in oklab,var(--background) 26%,transparent)}
 @media (prefers-reduced-motion:reduce){.is-fresh>.frow{animation:none;background:var(--accent-subtle)}.frow__chev svg,.fprog .meter__fill,.frow{transition:none}.fview[open],.fview::backdrop{animation:none}}
 `;

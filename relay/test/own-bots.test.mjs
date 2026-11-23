@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,4 +58,18 @@ test('a big update gets its own look in What\'s new', async (t0) => {
   assert.match(page, /class="dlg dlg--big"/);
   assert.match(page, /class="talk"/);
   assert.match(page, /Your bots talk to each other<\/h2><p class="bigup__lead">All your bots talk\.<\/p><ul class="bigup__points"><li>No invite needed\.<\/li>/);
+});
+
+// Held back during the alpha: the launch item waits in docs/launch/tab/whats-new.json, which the open-source copy doesn't carry.
+const tabLaunch = new URL('../../docs/launch/tab/whats-new.json', import.meta.url);
+test('the Tab update shows its receipt, and only bots that can use Tab tell their owner', { skip: !existsSync(tabLaunch) && 'no Tab launch kit in this copy' }, async () => {
+  const { bigParts } = await import('../bigupdate.mjs');
+  const { item: tab } = JSON.parse(readFileSync(tabLaunch, 'utf8'));
+  assert.equal(tab.release, 'tab');
+  const parts = bigParts(tab, 'en');
+  assert.match(parts.art, /class="tabart tabart--live" aria-hidden="true"/);
+  assert.match(parts.art, /÷3/);
+  assert.equal(parts.title, 'Split the bill with your group');
+  assert.match(bigParts(tab, 'cs').lead, /šifrované end-to-end/);
+  assert.ok(!tab.bots.includes('chatgpt') && tab.bots.includes('claude_code') && tab.bots.includes('grok'));
 });

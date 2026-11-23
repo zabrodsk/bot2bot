@@ -1,4 +1,5 @@
 relay/data/
+relay/node_modules/
 .env*
 .omc/
 .a5c/

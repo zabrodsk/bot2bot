@@ -399,8 +399,30 @@ test('watch syncs both homes without launching the configured agent', async (t) 
   await waitFor(() => readFileSync(file(a, 'live.md'), 'utf8') === 'B', 30000);
   assert.equal(existsSync(marker), false);
 });
-test('hosted: shared folders are an alpha for Infinite accounts, marked as alpha', async (t) => {
+test('hosted: shared folders are open to every account, without an alpha mark', async (t) => {
   const env = await setup(t, { hosted: true, autoTick: false });
+  const db = env.relay.db;
+  const ben = await owner(env, t, 'ben@example.com', 'ben');
+  const anna = await owner(env, t, 'anna@example.com', 'anna');
+  await connect(ben, anna, 'Ben');
+  const group = Number((await ben.cli('group', 'new', 'Research', 'anna')).match(/number (\d+)/)[1]);
+  env.relay.groups.join(db.prepare('SELECT * FROM bots WHERE id=?').get(anna.botId), group, { byOwner: true });
+  const args = (action, ...rest) => ['folder', action, String(group), ...rest];
+  assert.equal(db.prepare('SELECT count(*) n FROM users WHERE infinite_at IS NOT NULL').get().n, 0);
+
+  assert.match(await ben.cli(...args('on')), /^The shared folder is on for group \d+\.$/m);
+  const root = '/v1/team-folders/' + group;
+  const page = await ben.api('GET', root);
+  assert.equal(page.json.role, 'write');
+  assert.equal(page.json.alpha, false);
+  assert.equal((await anna.api('GET', root)).json.role, 'write');
+  assert.match(await anna.cli(...args('list')), /^Shared folder\. Access: @ben \(write\), @anna \(write\)/);
+  const html = (await ben.b(`/app/groups/${group}?bot=${ben.botId}`)).text;
+  assert.match(html, /<h2 id="folder-h">Shared folder<\/h2>/);
+  assert.doesNotMatch((await ben.b('/app/billing')).text, /Shared folders are yours to try/);
+});
+test('hosted with FOLDERS_OPEN=0: shared folders are an alpha for Infinite accounts, marked as alpha', async (t) => {
+  const env = await setup(t, { hosted: true, foldersOpen: false, autoTick: false });
   const db = env.relay.db;
   const ben = await owner(env, t, 'ben@example.com', 'ben');
   const anna = await owner(env, t, 'anna@example.com', 'anna');
@@ -425,14 +447,14 @@ test('hosted: shared folders are an alpha for Infinite accounts, marked as alpha
   assert.equal((await infinite('ben@example.com')).status, 200);
   assert.match((await ben.b('/app/billing')).text, /badge--info">Alpha<\/span> Shared folders are yours to try/);
   await assert.rejects(anna.cli(...args('on')), /in alpha, for Infinite accounts only/);
-  assert.match(await ben.cli(...args('on')), /The shared folder \(alpha\) is on for group/);
-  assert.match(await ben.cli(...args('grant', '@ben', 'write')), /read and write the shared folder \(alpha\)/);
+  assert.match(await ben.cli(...args('on')), /The shared folder is on for group/);
+  assert.match(await ben.cli(...args('grant', '@ben', 'write')), /read and write the shared folder\./);
   await assert.rejects(ben.cli(...args('grant', '@anna', 'read')), /@anna isn't on an Infinite account/);
   assert.equal((await infinite('anna@example.com')).status, 200);
   assert.equal((await anna.api('GET', root)).json.role, 'write');
   await assert.rejects(anna.cli(...args('off')), /only group admins can turn the shared folder on or off/);
   await ben.cli(...args('grant', '@anna', 'read'));
-  assert.match(await anna.cli(...args('list')), /^Shared folder \(alpha\)\. Access: @ben \(write\), @anna \(read\)/);
+  assert.match(await anna.cli(...args('list')), /^Shared folder\. Access: @ben \(write\), @anna \(read\)/);
 
   // Losing Infinite closes the folder to that bot but never blocks the others; it reads again once it's back.
   assert.equal((await infinite('anna@example.com', true)).status, 200);

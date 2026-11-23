@@ -30,6 +30,18 @@ import { createSafePost, checkCallbackUrl, ringRefused, doorbellRefused, webhook
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+// tab: Direct payment messages have no group routing metadata and never ring an agent.
+const TAB_PAY_KINDS = "('tab_payto', 'tab_payto_reply')";
+const TAB_GROUP_KINDS = "('tab', 'tab_bill')";
+const TAB_PAY_TTL = 10 * 60_000;
+// Apply the original recipient and mute checks when a Tab delivery is retried.
+const TAB_GROUP_SILENT = `kind IN ${TAB_GROUP_KINDS} AND (mentioned = 0 OR NOT EXISTS (
+  SELECT 1 FROM group_members gm WHERE gm.group_id = messages.group_id AND gm.bot_id = messages.to_bot
+    AND gm.state = 'joined' AND gm.wake != 'muted'))`;
+const TAB_PAY_LEASE = 30_000;
+const TAB_PAY_DEVICE = "coalesce((SELECT orig.tab_pay_sender_device FROM messages orig WHERE orig.id = m.reply_to), 'primary') = ?";
+
+
 // The hosted service (bot2bot.link) adds a few parts that aren't in the open-source relay: Stripe billing, the
 // service dashboard, usage analytics and invite links, in hosted-*.mjs files. Each is optional: when its file isn't there,
 // its hooks do nothing (no tracking, no admin page, no payments) and the relay works the same otherwise.
@@ -95,6 +107,8 @@ export const LIMITS = {
   groupPostsPerDay: 100,
   groupCatchupMs: 3 * 3_600_000, // a group message that doesn't need you rides along, or wakes you at most this much later
   groupReinviteMs: 24 * 3_600_000, // someone who left or said no isn't invited to the same group again sooner
+  contactLinkAsksPerDay: 10,     // requests one account can make through public contact links (/to/<name>) in a day
+  contactLinkWaitingMax: 25,     // requests waiting for an owner's yes on one public link; past that the link is busy
   newsMaxAgeMs: 14 * 86_400_000,  // a bot tells its owner what's new on bot2bot only for updates this recent...
   newsGapMs: 3 * 86_400_000,      // ...and at most this often, unless it's a big update
   ...FILE_LIMITS,                // files, see files.mjs
@@ -238,6 +252,7 @@ export function openDb(path) {
   addColumn('bots', 'wake_count', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('enroll_codes', 'reissue', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('messages', 'lease_token', 'TEXT');
+  addColumn('messages', 'tab_pay_sender_device', 'TEXT'); // tab: Replies return to the requesting device.
   addColumn('bots', 'doorbell_gen', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('messages', 'probe_gen', 'INTEGER');
   addColumn('contacts', 'privacy_on', 'INTEGER NOT NULL DEFAULT 0');
@@ -263,7 +278,7 @@ export function openDb(path) {
   return db;
 }
 
-export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, invites: invitesOn = true, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', analyticsKey = '', stickersDir, redirectHosts = [], aliasUrls = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', changelog = null, feedbackTo = '', adminEmails = [], internalEmails = [], founderBot = '', dbPath = ':memory:', adminToken, publicUrl = '', files: filesCfg = {}, webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, domainProofs = {}, probeToken = '', reviewLogin = null, fetchImpl = fetch, clock = now } = {}) {
+export function createRelay({ mailer = async () => {}, devLogin = false, adminEnroll = false, banner = '', hosted = false, billing = {}, invites: invitesOn = true, trustProxy = false, productName = 'bot2bot', setupBotUrl = 'https://x.ai/bot/d_op9BSVjlxk2eYrCmAVL', webInbox = false, privacyPilot = false, siteDir = '', analyticsKey = '', stickersDir, redirectHosts = [], aliasUrls = [], keySecret, limits = {}, cliDir = join(here, 'cli'), minTool = '0.10.0', changelog = null, feedbackTo = '', adminEmails = [], internalEmails = [], founderBot = '', dbPath = ':memory:', adminToken, publicUrl = '', files: filesCfg = {}, webhookHosts = ['api2.cursor.sh'], allowLocalWebhooks = false, domainProofs = {}, probeToken = '', reviewLogin = null, tabOpen = true, foldersOpen = true, fetchImpl = fetch, clock = now } = {}) {
   if (!adminToken || adminToken.length < 16) throw new Error('ADMIN_TOKEN (16+ chars) is required');
   const L = { ...LIMITS, ...limits };
   // What an owner sends a friend: the invite link first. The invite page signs in people who already have
@@ -328,9 +343,15 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     const start = daily ? Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) : Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
     const resets = daily ? start + 86_400_000 : Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
     const free = founder()?.id ?? 0;
-    const used = user
-      ? q("SELECT count(*) - count(m.group_post) + count(DISTINCT m.group_post) AS n FROM messages m JOIN bots b ON b.id = m.from_bot WHERE b.user_id = ? AND m.via = 'bot' AND m.kind NOT IN ('probe', 'group_event') AND m.to_bot != ? AND m.created_at >= ?").get(user.id, free, start).n
-      : q("SELECT count(*) - count(group_post) + count(DISTINCT group_post) AS n FROM messages WHERE from_bot = ? AND via = 'bot' AND kind NOT IN ('probe', 'group_event') AND to_bot != ? AND created_at >= ?").get(bot?.id ?? 0, free, start).n;
+    // tab: Bills count once (below); other Tab events and quiet payment traffic use no allowance.
+    const messages = user
+      ? q(`SELECT count(*) - count(m.group_post) + count(DISTINCT m.group_post) AS n FROM messages m JOIN bots b ON b.id = m.from_bot WHERE b.user_id = ? AND m.via = 'bot' AND m.kind NOT IN ('probe', 'group_event', 'tab', 'tab_bill') AND m.kind NOT IN ${TAB_PAY_KINDS} AND m.to_bot != ? AND m.created_at >= ?`).get(user.id, free, start).n
+      : q(`SELECT count(*) - count(group_post) + count(DISTINCT group_post) AS n FROM messages WHERE from_bot = ? AND via = 'bot' AND kind NOT IN ('probe', 'group_event', 'tab', 'tab_bill') AND kind NOT IN ${TAB_PAY_KINDS} AND to_bot != ? AND created_at >= ?`).get(bot?.id ?? 0, free, start).n;
+    // tab: Count the bill itself, even in a group with no other recipient.
+    const billPosts = user
+      ? q("SELECT count(*) AS n FROM group_posts p JOIN bots b ON b.id = p.from_bot WHERE b.user_id = ? AND p.via = 'bot' AND p.kind = 'tab_bill' AND p.created_at >= ?").get(user.id, start).n
+      : q("SELECT count(*) AS n FROM group_posts WHERE from_bot = ? AND via = 'bot' AND kind = 'tab_bill' AND created_at >= ?").get(bot?.id ?? 0, start).n;
+    const used = messages + billPosts;
     return { ...c, limited: true, limit, used, left: Math.max(0, limit - used), resets, boost };
   }
   const db = openDb(dbPath);
@@ -416,7 +437,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   function lostFor(me) {
     const rows = q(`SELECT m.id, m.created_at, b.handle, c.alias FROM messages m JOIN bots b ON b.id = m.to_bot
                     LEFT JOIN contacts c ON c.owner_bot = m.from_bot AND c.peer_bot = m.to_bot
-                    WHERE m.from_bot = ? AND m.note = 'lost_keys' ORDER BY m.created_at LIMIT 20`).all(me.id);
+                    WHERE m.from_bot = ? AND m.note = 'lost_keys' AND m.kind NOT IN ${TAB_PAY_KINDS} ORDER BY m.created_at LIMIT 20`).all(me.id);
     for (const m of rows) q("UPDATE messages SET note = 'lost_keys_told' WHERE id = ?").run(m.id);
     return rows.map((m) => ({ id: m.id, to: `@${m.handle}`, name: m.alias ?? `@${m.handle}`, sent_at: iso(m.created_at) }));
   }
@@ -493,7 +514,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       return { skipped: 'wake budget for today is used up' };
     }
     inflight.add(bot.id);
-    const pending = q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status = 'pending'").get(bot.id).n;
+    // tab: The doorbell only reports messages meant for the agent.
+    const pending = q(`SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status = 'pending' AND kind NOT IN ${TAB_PAY_KINDS}`).get(bot.id).n;
     const urgent = q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status = 'pending' AND urgent = 1").get(bot.id).n > 0;
     const ringId = token('ring_', 6);
     const started = clock();
@@ -535,7 +557,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         // A refused ring (e.g. paused routine) costs nothing, so retry every minute for the first hour
         // instead of waiting for the backoff schedule; the message arrives soon after the owner resumes.
         if (reason === 'pending') q(`UPDATE messages SET ring_count = max(ring_count - 1, 0), next_ring_at = ?
-                                     WHERE to_bot = ? AND status = 'pending' AND created_at > ? AND coalesce(note, '') != 'watch_deferred'`).run(clock() + L.refusedRetryMs, bot.id, clock() - 3_600_000);
+                                     WHERE to_bot = ? AND status = 'pending' AND NOT (${TAB_GROUP_SILENT}) AND kind NOT IN ${TAB_PAY_KINDS} AND created_at > ? AND coalesce(note, '') != 'watch_deferred'`).run(clock() + L.refusedRetryMs, bot.id, clock() - 3_600_000);
       }
       log(bot.id, 'ring', { reason, pending, status: res.status, ms: clock() - started, ring_id: ringId });
       status.rang(bot, res.status);
@@ -590,7 +612,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     if (t - lastOwnLink >= 10_000) { lastOwnLink = t; linkOwnBots(); }
     const expired = q("SELECT id, to_bot FROM messages WHERE status = 'claimed' AND lease_until <= ?").all(t);
     for (const m of expired) {
-      q("UPDATE messages SET status = 'pending', lease_until = NULL, next_ring_at = CASE WHEN note = 'watch_deferred' THEN NULL ELSE ? END WHERE id = ? AND status = 'claimed'").run(t, m.id);
+      // tab: Retrying a silent claim must not turn it into a wake.
+      q(`UPDATE messages SET status = 'pending', lease_until = NULL, next_ring_at = CASE WHEN (${TAB_GROUP_SILENT}) OR note = 'watch_deferred' OR kind IN ${TAB_PAY_KINDS} THEN NULL ELSE ? END WHERE id = ? AND status = 'claimed'`).run(t, m.id);
       log(m.to_bot, 'lease_expired', { message: m.id });
     }
     const due = q(`SELECT to_bot, max(urgent) AS urgent FROM messages
@@ -683,7 +706,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     if (t - approveCheckedAt < 60_000) return;
     approveCheckedAt = t;
     const due = q(`SELECT c.owner_bot, c.peer_bot, b.handle AS mine, p.handle AS theirs, coalesce(nullif(trim(pu.name), ''), p.display_name, '@' || p.handle) AS who, u.email, u.lang,
-                     EXISTS (SELECT 1 FROM invites i WHERE i.from_bot = c.owner_bot AND i.used_by = c.peer_bot) AS invited
+                     EXISTS (SELECT 1 FROM invites i WHERE i.from_bot = c.owner_bot AND i.used_by = c.peer_bot) AS invited,
+                     EXISTS (SELECT 1 FROM contact_link_asks a WHERE a.owner_bot = c.owner_bot AND a.from_bot = c.peer_bot) AS via_link
                    FROM contacts c JOIN bots b ON b.id = c.owner_bot JOIN users u ON u.id = b.user_id JOIN bots p ON p.id = c.peer_bot LEFT JOIN users pu ON pu.id = p.user_id
                    WHERE c.approved_at IS NULL AND c.blocked = 0 AND c.approve_nudged_at IS NULL AND c.approve_nudge_fails < 3
                      AND b.removed_at IS NULL AND b.disconnected_at IS NULL AND u.email_verified_at IS NOT NULL
@@ -692,7 +716,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       // Marked first, so a slow send is never sent twice; a failed one is unmarked to try again.
       q('UPDATE contacts SET approve_nudged_at = ? WHERE owner_bot = ? AND peer_bot = ?').run(t, c.owner_bot, c.peer_bot);
       try {
-        await mailer({ to: c.email, ...approveEmail({ product: productName, who: c.who, mine: c.mine, invited: !!c.invited, url: `${publicUrl}/app`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', art: publicUrl ? `${publicUrl}/stickers/robot-wave.png` : '', lang: c.lang }) });
+        await mailer({ to: c.email, ...approveEmail({ product: productName, who: c.who, mine: c.mine, invited: !!c.invited, link: !!c.via_link, url: `${publicUrl}/app`, home: publicUrl, logo: siteDir ? `${publicUrl}/icon-192.png` : '', art: publicUrl ? `${publicUrl}/stickers/robot-wave.png` : '', lang: c.lang }) });
         log(c.owner_bot, 'approve_nudged', { peer: c.peer_bot });
       } catch {
         q('UPDATE contacts SET approve_nudged_at = NULL, approve_nudge_fails = approve_nudge_fails + 1 WHERE owner_bot = ? AND peer_bot = ?').run(c.owner_bot, c.peer_bot);
@@ -712,7 +736,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     waitingCheckedAt = t;
     const due = q(`SELECT b.id, b.handle, b.waiting_notified_at, b.webhook_url IS NULL AS no_doorbell, min(m.created_at) AS oldest, u.id AS user_id, u.email, u.lang, u.nudged_at, count(*) AS n FROM messages m
                    JOIN bots b ON b.id = m.to_bot JOIN users u ON u.id = b.user_id
-                   WHERE m.status = 'pending' AND m.kind != 'probe' AND m.group_id IS NULL AND coalesce(m.note, '') != 'key_check'
+                   WHERE m.status = 'pending' AND m.kind != 'probe' AND m.kind NOT IN ${TAB_PAY_KINDS} AND m.group_id IS NULL AND coalesce(m.note, '') != 'key_check'
                      AND m.created_at >= ? AND m.created_at <= CASE WHEN b.webhook_url IS NULL THEN ? ELSE ? END AND m.created_at > coalesce(b.waiting_notified_at, 0)
                      AND b.disconnected_at IS NULL AND b.removed_at IS NULL AND b.paused_at IS NULL AND b.vendor != 'web'
                      AND coalesce(b.platform, '') != 't3code'
@@ -724,7 +748,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       mailed.add(b.user_id);
       const names = [...new Set(q(`SELECT coalesce(nullif(trim(c.alias), ''), nullif(trim(fu.name), ''), f.display_name, '@' || f.handle) AS who FROM messages m
                    JOIN bots f ON f.id = m.from_bot LEFT JOIN users fu ON fu.id = f.user_id LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot
-                   WHERE m.to_bot = ? AND m.status = 'pending' AND m.kind != 'probe' AND m.group_id IS NULL AND m.created_at > ? ORDER BY m.created_at`).all(b.id, t - L.undeliveredExpiryMs).map((r) => r.who))];
+                   WHERE m.to_bot = ? AND m.status = 'pending' AND m.kind != 'probe' AND m.kind NOT IN ${TAB_PAY_KINDS} AND m.group_id IS NULL AND m.created_at > ? ORDER BY m.created_at`).all(b.id, t - L.undeliveredExpiryMs).map((r) => r.who))];
       const cs = b.lang === 'cs';
       const who = names.length <= 1 ? (names[0] ?? '') : names.length <= 3 ? `${names.slice(0, -1).join(', ')} ${cs ? 'a' : 'and'} ${names.at(-1)}` : `${names.slice(0, 2).join(', ')} ${cs ? `a ${names.length - 2} další` : `and ${names.length - 2} more`}`;
       // Marked first, so a slow send is never sent twice.
@@ -753,7 +777,11 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     const w = watchers.get(bot.id);
     if (!w) { const e = new Error('no watcher connected'); e.code = 'never_arrived'; throw e; }
     watchers.delete(bot.id);
-    w({ ring: true, ...ring });
+    // tab: Non-coding watchers only scan locally when a Tab message is waiting.
+    const tabPending = watchTabReady(bot.id);
+    const otherPending = tabPending && !!q(`SELECT 1 FROM messages WHERE to_bot = ? AND status = 'pending'
+      AND kind NOT IN ${TAB_GROUP_KINDS} AND kind NOT IN ${TAB_PAY_KINDS} AND coalesce(note, '') != 'key_check' LIMIT 1`).get(bot.id);
+    w({ ring: true, ...ring, ...(tabPending && { tab_pending: true, other_pending: otherPending }) });
     return { status: 200 };
   }
   const watching = (b) => watchers.has(b.id) || (!!b.watch_seen_at && clock() - b.watch_seen_at < L.watchHoldMs * 2 + 10_000);
@@ -795,6 +823,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     governance.retention(t);
     events.retention(t);
     groups.retention(t);
+    // tab: Discard expired payment envelopes even if neither bot reads its inbox.
+    erase(`kind IN ${TAB_PAY_KINDS} AND created_at <= ? AND body_purged_at IS NULL`, t - TAB_PAY_TTL);
     groupRuns.retention(t);
     groupBrowser.sweep();
     phone.sweep();
@@ -833,8 +863,59 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   // Called after an owner approves, unblocks or resumes, so held messages go out now.
   // A group message for a member who muted the group never rings (next_ring_at stays empty until it was rung once).
   function release(botId) {
-    q("UPDATE messages SET next_ring_at = ? WHERE to_bot = ? AND status = 'pending' AND NOT (group_id IS NOT NULL AND next_ring_at IS NULL AND first_rung_at IS NULL)").run(clock(), botId);
+    // tab: Unpausing or unblocking must not schedule a wake for payment traffic.
+    q(`UPDATE messages SET next_ring_at = ? WHERE to_bot = ? AND status = 'pending' AND kind NOT IN ${TAB_PAY_KINDS} AND NOT (${TAB_GROUP_SILENT}) AND NOT (group_id IS NOT NULL AND next_ring_at IS NULL AND first_rung_at IS NULL)`).run(clock(), botId);
     setImmediate(() => { void tick(); });
+  }
+
+  // tab: Payment requests can reach a current co-member without making them a direct contact.
+  // The recipient checks the specific group's current membership and its signed Tab history locally.
+  function enqueueTabPay(me, body) {
+    const { kind, sealed, content_tag: tag, client_id: clientId, reply_to: replyTo = null } = body;
+    const recipient = typeof body.to === 'string' && body.to.startsWith('@')
+      ? q('SELECT * FROM bots WHERE handle = ? AND removed_at IS NULL AND disconnected_at IS NULL').get(body.to.slice(1).toLowerCase()) : null;
+    if (!recipient || recipient.id === me.id || me.paused_at) throw new HttpError(403, 'payment details are not reachable');
+    const to = contact(me.id, recipient.id), from = contact(recipient.id, me.id);
+    if (to?.blocked || from?.blocked) throw new HttpError(403, 'payment details are not reachable');
+    if (Object.keys(body).some((key) => !['to', 'kind', 'sealed', 'content_tag', 'client_id', 'reply_to'].includes(key))
+      || !me.box_pub || !recipient.box_pub || !TAG_RE.test(String(tag ?? '')) || typeof sealed !== 'string'
+      || !linkedDevices.validate(sealed, me, recipient.id)) throw new HttpError(400, 'payment messages must be sealed');
+    const t = clock();
+    let existing;
+    if (kind === 'tab_payto_reply') {
+      const original = q(`SELECT id FROM messages WHERE id = ? AND kind = 'tab_payto'
+        AND from_bot = ? AND to_bot = ? AND status IN ('claimed','delivered') AND created_at > ?`).get(replyTo, recipient.id, me.id, t - TAB_PAY_TTL);
+      if (!original || clientId !== `tab-reply-${original.id}`) throw new HttpError(400, 'reply to a payment request you received');
+      existing = q("SELECT * FROM messages WHERE from_bot = ? AND kind = 'tab_payto_reply' AND reply_to = ?").get(me.id, original.id);
+    } else {
+      if (replyTo !== null || !/^tab-request-[a-f0-9]{32}$/.test(String(clientId ?? ''))) throw new HttpError(400, 'invalid payment request');
+      const shared = q(`SELECT 1 FROM group_members mine JOIN group_members theirs USING (group_id) JOIN chat_groups g ON g.id = mine.group_id
+        WHERE mine.bot_id = ? AND theirs.bot_id = ? AND mine.state = 'joined' AND theirs.state = 'joined' AND g.ended_at IS NULL`).get(me.id, recipient.id);
+      if (!shared && !(to?.approved_at && from?.approved_at)) throw new HttpError(403, 'payment details are not reachable');
+      existing = q("SELECT * FROM messages WHERE from_bot = ? AND kind = 'tab_payto' AND client_id = ?").get(me.id, clientId);
+      if (existing && (existing.to_bot !== recipient.id || existing.tab_pay_sender_device !== (me.device_id ?? 'primary')
+        || (existing.content_tag && existing.content_tag !== tag))) throw new HttpError(409, 'payment request already used');
+    }
+    if (existing) return { id: existing.id, status: existing.status, duplicate: true };
+    if (q(`SELECT count(*) AS n FROM messages WHERE from_bot = ? AND group_id IS NULL AND created_at > ?`).get(me.id, t - 3_600_000).n >= L.sendPerHour
+      || q(`SELECT count(*) AS n FROM messages WHERE from_bot = ? AND to_bot = ? AND created_at > ?`).get(me.id, recipient.id, t - TAB_PAY_TTL).n >= L.sendPerContactPer10Min) {
+      throw new HttpError(429, 'too many messages. Try again in a few minutes');
+    }
+    const id = token('msg_', 9);
+    q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, reply_to, client_id, created_at, status, via, sealed, content_tag, tab_pay_sender_device)
+      VALUES (?, ?, ?, ?, '', ?, ?, ?, 'pending', 'bot', ?, ?, ?)`).run(id, me.id, recipient.id, kind, replyTo, clientId, t, sealed, tag, me.device_id ?? 'primary');
+    return { id, status: 'queued' };
+  }
+
+  function tabPayReady(botId, device) {
+    return !!q(`SELECT 1 FROM messages m WHERE m.to_bot = ? AND m.status = 'pending' AND m.kind IN ${TAB_PAY_KINDS}
+      AND m.created_at > ? AND coalesce(m.note, '') != 'key_check' AND ${TAB_PAY_DEVICE} AND b2b_device_can_open(m.sealed, ?) LIMIT 1`).get(botId, clock() - TAB_PAY_TTL, device, device);
+  }
+  function watchTabReady(botId) {
+    const t = clock();
+    return !!q(`SELECT 1 FROM messages m JOIN group_members gm ON gm.group_id = m.group_id AND gm.bot_id = m.to_bot
+      WHERE m.to_bot = ? AND (m.status = 'pending' OR (m.status = 'claimed' AND m.lease_until <= ?)) AND m.kind IN ${TAB_GROUP_KINDS}
+      AND m.created_at > ? AND coalesce(m.note, '') != 'key_check' AND gm.state = 'joined' AND gm.wake != 'muted' LIMIT 1`).get(botId, t, t - L.undeliveredExpiryMs);
   }
 
   // ───── route handlers ─────
@@ -1017,6 +1098,14 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       q('UPDATE tool_releases SET stable_at = ? WHERE version = ?').run(clock(), top.version);
       log(null, 'tool_stable', { version: top.version, from: was, by: 'admin' });
       return { ok: true, stable: top.version, was };
+    },
+    'POST /admin/tab-alpha': ({ body, admin }) => {
+      if (!admin) throw new HttpError(401, 'admin token required');
+      const u = q('SELECT id FROM users WHERE email = ?').get(String(body.email || '').trim().toLowerCase());
+      if (!u) throw new HttpError(404, 'no account with that email');
+      q('UPDATE users SET tab_alpha_at = ? WHERE id = ?').run(body.off ? null : clock(), u.id);
+      log(null, body.off ? 'tab_alpha_off' : 'tab_alpha_on', { user: u.id });
+      return { ok: true, tab_alpha: !body.off };
     },
     'POST /admin/infinite': ({ body, admin }) => {
       if (!admin) throw new HttpError(401, 'admin token required');
@@ -1205,10 +1294,10 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       // What this bot can do with a handoff package, as its contacts' tools see it.
       profile: capabilityProfile(me),
       doorbell: { configured: !!me.webhook_url, kind: me.doorbell_kind ?? null, needs_routine: needsRoutine(me), needs_watcher: needsWatcher(me), needs_hook: needsHook(me), watching: me.doorbell_kind === 'watch' ? watching(me) : undefined, verified: !!me.doorbell_verified_at, refused: doorbellRefused(me) || undefined, page: publicUrl ? `${publicUrl}/app/bots/${me.id}` : null, verified_at: iso(me.doorbell_verified_at), last_ring_at: iso(me.last_ring_at), last_ring_status: me.last_ring_status },
-      inbox_pending: q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status IN ('pending','claimed') AND kind != 'probe'").get(me.id).n,
+      inbox_pending: q(`SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status IN ('pending','claimed') AND kind != 'probe' AND kind NOT IN ${TAB_PAY_KINDS}`).get(me.id).n, // tab: Payment traffic is quiet.
       // What an inbox claim would get right now (nothing while paused): "b2b wait" polls this, and the watcher checks
       // it to see whether a live session took what a ring was for.
-      inbox_ready: me.paused_at ? 0 : q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status = 'pending' AND coalesce(note, '') != 'key_check'").get(me.id).n,
+      inbox_ready: me.paused_at ? 0 : q(`SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status = 'pending' AND coalesce(note, '') != 'key_check' AND kind NOT IN ${TAB_PAY_KINDS}`).get(me.id).n, // tab: No agent wake for a payment poll.
       ...(files.isOn(me) && files.host ? { files_host: files.host } : {}),
       wakes_today: me.wake_day === today() ? me.wake_count : 0, wakes_per_day: L.wakesPerDay,
       contacts: q('SELECT count(*) AS n FROM contacts WHERE owner_bot = ?').get(me.id).n,
@@ -1374,7 +1463,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     'POST /v1/contacts/trust': ({ me, body }) => {
       const c = resolveContactLoose(me, body.contact);
       q('UPDATE contacts SET codes_compared_at = NULL WHERE owner_bot = ? AND peer_bot = ?').run(me.id, c.peer_bot);
-      const n = Number(q("UPDATE messages SET note = NULL, next_ring_at = ? WHERE to_bot = ? AND from_bot = ? AND status = 'pending' AND note = 'key_check'").run(clock(), me.id, c.peer_bot).changes);
+      const n = Number(q(`UPDATE messages SET note = NULL, next_ring_at = CASE WHEN (${TAB_GROUP_SILENT}) OR kind IN ${TAB_PAY_KINDS} THEN NULL ELSE ? END WHERE to_bot = ? AND from_bot = ? AND status = 'pending' AND note = 'key_check'`).run(clock(), me.id, c.peer_bot).changes);
       log(me.id, 'key_trusted', { peer: c.peer_bot, released: n });
       if (n) setImmediate(() => { void tick(); });
       return { ok: true, released: n };
@@ -1389,6 +1478,19 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     },
 
     'POST /v1/messages': ({ me, body, viaWeb = false }) => {
+      // tab: Notify a compatible watch connection without calling the doorbell.
+      if (body.kind === 'tab_payto' || body.kind === 'tab_payto_reply') {
+        if (viaWeb || me.vendor === 'service') throw new HttpError(403, 'payment messages need a private bot');
+        const result = tx(() => enqueueTabPay(me, body));
+        if (!result.duplicate) {
+          const { to_bot: to } = q('SELECT to_bot FROM messages WHERE id = ?').get(result.id);
+          const watch = watchers.get(to);
+          if (watch?.tabPay && q('SELECT paused_at FROM bots WHERE id = ?').get(to)?.paused_at == null && tabPayReady(to, 'primary')) {
+            watch({ ring: false, tab_payto: true });
+          }
+        }
+        return result;
+      }
       const result = tx(() => enqueue(me, body, { actor: viaWeb ? 'owner_web' : 'bot' }));
       if (!result.duplicate) setImmediate(() => { void tick(); });
       return result;
@@ -1421,7 +1523,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       const since = days ? clock() - days * 86_400_000 : 0, limit = days ? 100 : 10;
       const rows = q(`SELECT m.id, m.kind, m.text, m.links, m.want, m.sealed, m.thread_id, m.reply_to, m.created_at, m.replied_at, m.group_id, c.alias, b.handle, b.sign_pub, b.box_pub FROM messages m
                       JOIN bots b ON b.id = m.from_bot LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot
-                      WHERE m.to_bot = ? AND m.kind NOT IN ('probe', 'group_event') AND m.status = 'delivered' AND m.created_at >= ? ${peer ? 'AND m.from_bot = ? AND m.group_id IS NULL' : ''}
+                      WHERE m.to_bot = ? AND m.kind NOT IN ('probe', 'group_event', 'tab', 'tab_bill') AND m.kind NOT IN ${TAB_PAY_KINDS} AND m.status = 'delivered' AND m.created_at >= ? ${peer ? 'AND m.from_bot = ? AND m.group_id IS NULL' : ''}
                       ORDER BY m.created_at DESC LIMIT ?`).all(...(peer ? [me.id, since, peer.peer_bot] : [me.id, since]), limit);
       return { messages: rows.map((m) => ({ id: m.id, from: m.alias ?? `@${m.handle}`, from_handle: `@${m.handle}`, kind: m.kind, ...(!m.sealed && m.thread_id ? { thread: m.thread_id } : {}), ...(m.group_id ? { group: m.group_id } : {}), reply_to: m.reply_to, text: m.sealed ? undefined : m.text, links: m.sealed ? undefined : JSON.parse(m.links || '[]'), want: m.sealed ? undefined : m.want ?? undefined, sealed: m.sealed ?? undefined, ...(m.group_id && m.sealed && m.box_pub ? { from_keys: { sign: m.sign_pub, box: m.box_pub } } : {}), files: m.sealed ? undefined : files.chatFor(m.id), at: iso(m.created_at), replied: !!m.replied_at })) };
     },
@@ -1432,6 +1534,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     }),
 
     // Each claim also says which tool is newest, so the doorbell run updates the tool on its own.
+    // tab: A separate endpoint keeps a payment poll from claiming ordinary messages on an older relay.
+    'POST /v1/tab/payto/claim': (ctx) => routes['POST /v1/inbox/claim']({ ...ctx, body: { tab_payto: 'only', devices: 1 } }),
     'POST /v1/inbox/claim': ({ me, body }) => ({ tool: botToolInfo(me), handle: me.handle, needs_doorbell: needsRoutine(me), ...(doorbellRefused(me) ? { doorbell_refused: { status: me.last_ring_status, kind: me.doorbell_kind ?? 'grok_webhook' } } : {}), ...((needsRoutine(me) || doorbellRefused(me)) && publicUrl ? { doorbell_page: `${publicUrl}/app/bots/${me.id}` } : {}), ...tx(() => {
       const t = clock();
       if (me.paused_at) return { lease_seconds: L.leaseMs / 1000, paused: true, messages: [] };
@@ -1444,33 +1548,43 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
       const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 25);
       q("UPDATE messages SET status = 'pending', lease_until = NULL WHERE to_bot = ? AND status = 'claimed' AND lease_until <= ?").run(me.id, t);
       // Messages an earlier run claimed and hasn't acked yet: not offered again until its lease ends, so say when.
-      const held = q("SELECT count(*) AS n, min(lease_until) AS until FROM messages WHERE to_bot = ? AND status = 'claimed' AND kind != 'probe'").get(me.id);
+      const held = q(`SELECT count(*) AS n, min(lease_until) AS until FROM messages WHERE to_bot = ? AND status = 'claimed' AND kind != 'probe' AND kind NOT IN ${TAB_PAY_KINDS}`).get(me.id); // tab: No payment claims in the agent's reserved count.
       // Re-check permission at delivery time: messages from contacts blocked since sending are dropped, and group
       // messages to someone no longer in the group. The relay's own notices about a group (an invite, "an admin
       // removed you", "the group was ended") still reach whoever they're for.
       erase(`to_bot = ? AND status = 'pending' AND kind != 'probe' AND ((created_at <= ? AND (thread_id IS NULL OR thread_id NOT IN (SELECT id FROM task_threads WHERE expires_at > ?)))
          OR from_bot IN (SELECT peer_bot FROM contacts WHERE owner_bot = ? AND blocked = 1)
          OR from_bot IN (SELECT owner_bot FROM contacts WHERE peer_bot = ? AND blocked = 1)
-         OR (group_id IS NULL AND NOT EXISTS (SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = messages.from_bot))
+         OR (group_id IS NULL AND kind NOT IN ${TAB_PAY_KINDS} AND NOT EXISTS (SELECT 1 FROM contacts WHERE owner_bot = ? AND peer_bot = messages.from_bot))
          OR (group_id IS NOT NULL AND kind != 'group_event' AND NOT EXISTS (SELECT 1 FROM group_members g WHERE g.group_id = messages.group_id AND g.bot_id = messages.to_bot AND g.state = 'joined')))`, me.id, t - L.undeliveredExpiryMs, t, me.id, me.id, me.id);
       // Messages held because the sender's key changed stay put until the owner trusts the new key.
       // Coding watchers open mentioned group posts locally to check for sealed task flags.
+      // tab: Only opt-in clients claim payment messages, and replies go back to the initiating device.
+      const device = me.device_id ?? 'primary';
+      const payment = `m.kind IN ${TAB_PAY_KINDS} AND m.created_at > ? AND ${TAB_PAY_DEVICE}`;
+      const paymentOnly = body.tab_payto === 'only';
       const watchScan = body.watch_scan === true;
       const watchGroupTasks = watchScan && body.watch_group_tasks === true;
-      const watchFilter = watchScan
-        ? `AND ((m.group_id IS NULL AND m.kind != 'probe' AND coalesce(m.note, '') != 'watch_deferred')${watchGroupTasks
-          ? " OR (m.group_id IS NOT NULL AND m.kind IN ('note', 'ask') AND m.mentioned = 1 AND m.first_rung_at IS NOT NULL AND coalesce(m.note, '') != 'watch_group_deferred')" : ''})`
-        : body.watch_groups === true ? "AND (m.group_id IS NOT NULL OR m.kind = 'probe')"
-        : body.channel === true ? "AND coalesce(m.note, '') != 'watch_deferred'" : '';
+      const watchTabOnly = watchScan && body.watch_tab_only === true;
+      const watchFilter = watchTabOnly ? `m.kind IN ${TAB_GROUP_KINDS}` : watchScan // tab:
+        ? `((m.group_id IS NULL AND m.kind != 'probe' AND coalesce(m.note, '') != 'watch_deferred')${watchGroupTasks
+          ? " OR m.kind IN ('tab', 'tab_bill') OR (m.group_id IS NOT NULL AND m.kind IN ('note', 'ask') AND m.mentioned = 1 AND m.first_rung_at IS NOT NULL AND coalesce(m.note, '') != 'watch_group_deferred')" : ''})`
+        : body.watch_groups === true ? "(m.group_id IS NOT NULL OR m.kind = 'probe')"
+        : body.channel === true ? "coalesce(m.note, '') != 'watch_deferred'" : '1';
+      const ordinary = `m.kind NOT IN ${TAB_PAY_KINDS} AND (${watchFilter})`;
+      const filter = paymentOnly ? payment : body.tab_payto === true ? `(${ordinary}) OR (${payment})` : ordinary;
+      const paymentParams = paymentOnly || body.tab_payto === true ? [t - TAB_PAY_TTL, device] : [];
       const rows = q(`SELECT m.*, b.handle AS from_handle, b.user_id AS from_user, b.vendor AS from_vendor, b.sign_pub AS from_sign, b.box_pub AS from_box, c.alias AS from_alias, c.can_ask AS allowed_topics, u.name AS from_person, u.email_verified_at AS from_verified, g.name AS group_name FROM messages m
                       JOIN bots b ON b.id = m.from_bot LEFT JOIN contacts c ON c.owner_bot = m.to_bot AND c.peer_bot = m.from_bot LEFT JOIN users u ON u.id = b.user_id LEFT JOIN chat_groups g ON g.id = m.group_id
-                      WHERE m.to_bot = ? AND m.status = 'pending' AND coalesce(m.note, '') != 'key_check' AND b2b_device_can_open(m.sealed, ?) ${watchFilter} ORDER BY m.created_at LIMIT ?`).all(me.id, me.device_id ?? 'primary', limit);
+                      WHERE m.to_bot = ? AND m.status = 'pending' AND coalesce(m.note, '') != 'key_check' AND b2b_device_can_open(m.sealed, ?) AND (${filter}) ORDER BY m.created_at LIMIT ?`).all(me.id, device, ...paymentParams, limit);
       for (const m of rows) {
         m.lease = token('lease_', 6);
-        q("UPDATE messages SET status = 'claimed', lease_until = ?, lease_token = ?, claim_count = claim_count + 1, first_claimed_at = coalesce(first_claimed_at, ?), next_ring_at = NULL WHERE id = ?").run(t + L.leaseMs, m.lease, t, m.id);
+        // tab: A stopped CLI can retry payment messages before their short expiry.
+        const leaseMs = m.kind === 'tab_payto' || m.kind === 'tab_payto_reply' ? Math.min(L.leaseMs, TAB_PAY_LEASE) : L.leaseMs;
+        q("UPDATE messages SET status = 'claimed', lease_until = ?, lease_token = ?, claim_count = claim_count + 1, first_claimed_at = coalesce(first_claimed_at, ?), next_ring_at = NULL WHERE id = ?").run(t + leaseMs, m.lease, t, m.id);
         log(me.id, 'claimed', { message: m.id, since_sent_ms: t - m.created_at, since_first_ring_ms: m.first_rung_at ? t - m.first_rung_at : null, claim_count: m.claim_count + 1, via: VIA.has(body.via) ? body.via : null });
       }
-      q('UPDATE bots SET last_claim_at = ? WHERE id = ?').run(t, me.id);
+      if (!paymentOnly) q('UPDATE bots SET last_claim_at = ? WHERE id = ?').run(t, me.id); // tab: A watcher payment poll is not an agent check-in.
       const probeVerified = rows.some((m) => m.kind === 'probe' && (m.probe_gen ?? 0) === me.doorbell_gen && t - m.created_at <= (me.doorbell_kind === 'schedule' ? L.scheduleProbeTtlMs : L.probeTtlMs) && me.webhook_url);
       if (probeVerified) {
         q('UPDATE bots SET doorbell_verified_at = ? WHERE id = ?').run(t, me.id);
@@ -1484,9 +1598,9 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
           }])).values()],
         } } : {}),
         lease_seconds: L.leaseMs / 1000,
-        ...(watchScan ? { watch_groups: !!q(`SELECT 1 FROM messages
+        ...(watchScan && !watchTabOnly ? { watch_groups: !!q(`SELECT 1 FROM messages
           WHERE to_bot = ? AND status = 'pending' AND first_rung_at IS NOT NULL
-            AND (group_id IS NOT NULL OR kind = 'probe') AND coalesce(note, '') != 'key_check'`).get(me.id) } : {}),
+            AND (group_id IS NOT NULL OR kind = 'probe') AND kind NOT IN ${TAB_GROUP_KINDS} AND coalesce(note, '') != 'key_check'`).get(me.id) } : {}),
         ...(files.isOn(me) ? { files: files.statusFor(me) } : {}),
         ...(news ? { news } : {}),
         ...(lost.length ? { lost } : {}),
@@ -1528,6 +1642,8 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         ? ['failed security check', 'could not be opened by a connected-app bot'].includes(body.note) ? body.note : 'received'
         : body.note ? String(body.note).slice(0, 280) : null;
       q("UPDATE messages SET status = 'delivered', delivered_at = ?, lease_until = NULL, next_ring_at = NULL, note = ? WHERE id = ? AND lease_token = ?").run(t, note, m.id, lease);
+      // tab: Once delivered, discard the sealed payment payload instead of retaining it in chat history.
+      if (m.kind === 'tab_payto' || m.kind === 'tab_payto_reply') erase('id = ?', m.id);
       log(me.id, 'delivered', { message: m.id, since_sent_ms: t - m.created_at });
       return { id: m.id, status: 'delivered' };
     }),
@@ -1591,7 +1707,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
 
     // b2b watch: held open until a ring comes (then the watcher starts the agent) or watchHoldMs passes (it asks again).
     // Messages that waited while no watcher was connected are rung for on the next scheduler pass.
-    'GET /v1/watch': ({ me, res }) => {
+    'GET /v1/watch': ({ me, res, req }) => {
       if (me.doorbell_kind !== 'watch') throw new HttpError(409, 'this bot is not woken by a watcher; run "b2b watch --install"');
       const t = clock();
       q('UPDATE bots SET watch_seen_at = ? WHERE id = ?').run(t, me.id);
@@ -1607,9 +1723,15 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
           q('UPDATE bots SET watch_seen_at = ? WHERE id = ?').run(clock(), me.id);
           resolve(v);
         };
-        const timer = setTimeout(() => finish({ ring: false }), L.watchHoldMs);
+        const tabStatus = () => finish.tabPay && !q('SELECT paused_at FROM bots WHERE id = ?').get(me.id)?.paused_at
+          && watchTabReady(me.id);
+        const timer = setTimeout(() => finish({ ring: false, ...(tabStatus() && { tab_pending: true }) }), L.watchHoldMs);
         timer.unref?.();
+        // tab: Catch a sealed payment message that arrived before the watcher connected.
+        finish.tabPay = req.headers['x-b2b-tab-payto'] === '1';
         watchers.set(me.id, finish);
+        if (finish.tabPay && !me.paused_at && tabPayReady(me.id, 'primary')) finish({ ring: false, tab_payto: true });
+        else if (tabStatus()) finish({ ring: false, tab_pending: true });
         if (q("SELECT 1 FROM messages WHERE to_bot = ? AND status = 'pending' AND next_ring_at <= ?").get(me.id, t)) setImmediate(() => { void tick(); });
         res?.on('close', () => { if (!res.writableEnded) finish({ ring: false, gone: true }); });
       });
@@ -1788,7 +1910,9 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings } = governance;
   const groups = createGroups({ linkedDevices, q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files,
     allowanceLeft: (me, t) => { if (!hosted || me.vendor === 'web') return null; const a = allowance(me.user_id && q('SELECT * FROM users WHERE id = ?').get(me.user_id), me, t); return a.limited ? a.left : null; },
-    kick: () => setImmediate(() => { void tick(); }), needTool: updates.need });
+    kick: () => setImmediate(() => { void tick(); }), needTool: updates.need,
+    // Tab alpha: on the hosted relay only Infinite owners and owners on the list start a bill (anyone in their groups picks and pays back).
+    tabAllowed: (me) => { if (!hosted || tabOpen) return true; const u = me.user_id && q('SELECT tab_alpha_at, infinite_at FROM users WHERE id = ?').get(me.user_id); return !!(u?.tab_alpha_at || u?.infinite_at); } });
   const scheduledJobs = createScheduledJobs({ q, tx, clock, groups, erase, HttpError });
   Object.assign(routes, scheduledJobs.routes);
   const groupBrowser = createGroupBrowserHistory({ q, tx, clock, token, groups, HttpError });
@@ -1799,7 +1923,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
   // Approve from your phone: encrypted cards from a coding agent to its owner's phone page, and signed answers back.
   const phone = createPhone({ q, tx, clock, token, HttpError, publicUrl, fetchImpl, allowLocalWebhooks, log, limits: limits.phone });
   Object.assign(routes, phone.routes);
-  const teamFolders = createTeamFolders({ db, q, tx, clock, HttpError, hosted, dbPath, s3: filesCfg.s3, publicUrl, fetchImpl, linkedDevices });
+  const teamFolders = createTeamFolders({ db, q, tx, clock, HttpError, hosted, foldersOpen, dbPath, s3: filesCfg.s3, publicUrl, fetchImpl, linkedDevices });
   Object.assign(routes, teamFolders.routes);
   Object.assign(routes, groups.routes);
   Object.assign(routes, files.routes);
@@ -1854,7 +1978,7 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
     return missing.length;
   }
   linkOwnBots();
-  const handleApp = createApp({ teamFolders, originFor, aliasUrls: aliases, analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, groupRuns, linkedDevices, groupBrowser, phone, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
+  const handleApp = createApp({ teamFolders, foldersOpen, originFor, aliasUrls: aliases, analyticsKey, reviewLogin, founder, connectFounder, linkOwnBots, events, governance, groups, groupRuns, linkedDevices, groupBrowser, phone, inPilot, effectiveMode, applyOwnerOps, applyOwnerOpsInTx,
     decideProposal, decideProposalInTx, decideRequest, decideRequestInTx, getSettings, getRequest, openRequests, wakeRequest, wakeOwner, wakeSettings, status, files, toolInfo, channelFor, toolTooOld, privateDoorbell, renameBot, latestUpdate, board, feedbackTo, markActive, usage, hostedAdmin, payments, invites, hostedInvites: invites ? hostedInvites : null, adminEmails, stickersDir, setPrivacyInTx, bumpGen, bumpPair, setKeys, validKeys, setupBotUrl, inviteMessage, webInbox, site: !!site, q, tx, log, clock, publicUrl, sha, token, humanCode, HttpError, validWebhook, doorbellTarget, watching, sealKey, routes, L, mailer, devLogin, name: productName, release, iso, banner, quietUntil, hosted, B, coverage, allowance, fetchImpl, erase, dropBetween, trustProxy });
   const adminHash = sha(adminToken);
   const probeHash = probeToken ? sha(probeToken) : null;
@@ -1891,12 +2015,15 @@ If you don't have bot2bot yet, it shows you how to connect your bot first.`;
         return send(200, sig, 'text/plain; charset=utf-8');
       }
       if (req.method === 'GET' && url.pathname === '/cli/texts') return send(200, textsFor(String(req.headers['x-b2b-version'] || '')));
-      if (req.method === 'GET' && url.pathname === '/setup') return send(200, setupGuide(), 'text/markdown; charset=utf-8');
+      if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/setup') {
+        res.setHeader('x-robots-tag', 'noindex');
+        return send(200, setupGuide(), 'text/markdown; charset=utf-8');
+      }
       if (req.method === 'GET' && url.pathname === '/skill') return send(200, skillFile(), 'text/markdown; charset=utf-8');
       // The setup bot's full guide. A Grok Bot template copy can arrive without its skill, so the template's short
       // instruction tells the bot to read this first.
       if (req.method === 'GET' && url.pathname === '/setup-bot') return send(200, readFileSync(join(here, 'setup-bot', 'SKILL.md'), 'utf8').replaceAll('{{RELAY}}', publicUrl), 'text/markdown; charset=utf-8');
-      if (site && site.serve(req, res, url)) return;
+      if (site && site.serve(req, res, url, redirects.has(host) ? publicUrl : '')) return;
       const found = match(req.method, url.pathname);
       if (!found && site && isPageVisit(req, url)) return site.notFound(req, res);
       if (!found) throw new HttpError(404, 'not found');
@@ -1971,14 +2098,33 @@ function makeSite(dir) {
   const sendFile = (req, res, status, f, path, extra = {}) => {
     const ext = extname(f);
     const cache = /^\/(_astro|fonts)\//.test(path) ? 'public, max-age=31536000, immutable' : ext === '.html' || ext === '.md' ? 'no-cache' : 'public, max-age=3600';
+    let file = f;
+    if (ext === '.html' && isFile(f + '.gz')) {
+      extra.vary = extra.vary ? extra.vary + ', Accept-Encoding' : 'Accept-Encoding';
+      const encodings = new Map(String(req.headers['accept-encoding'] || '').toLowerCase().split(',').map((item) => {
+        const [name, weight] = item.trim().split(/\s*;\s*q\s*=\s*/);
+        return [name, Number(weight ?? 1)];
+      }));
+      if ((encodings.get('gzip') ?? encodings.get('*') ?? 0) > 0) {
+        file += '.gz';
+        extra['content-encoding'] = 'gzip';
+      }
+    }
     res.writeHead(status, { 'content-type': SITE_TYPES[ext] || 'application/octet-stream', 'cache-control': cache, 'x-content-type-options': 'nosniff', 'referrer-policy': 'strict-origin-when-cross-origin', ...extra });
-    res.end(req.method === 'HEAD' ? undefined : readFileSync(f));
+    res.end(req.method === 'HEAD' ? undefined : readFileSync(file));
   };
   return {
-    serve(req, res, url) {
+    serve(req, res, url, canonicalOrigin) {
       if (req.method !== 'GET' && req.method !== 'HEAD') return false;
       let p; try { p = decodeURIComponent(url.pathname); } catch { return false; }
       if (p.includes('\0')) return false;
+      const f = resolve(root, '.' + (p.endsWith('/') ? p + 'index.html' : p));
+      if (!f.startsWith(root + sep)) return false;
+      if (canonicalOrigin && (isFile(f) || isFile(join(f, 'index.html')))) {
+        res.writeHead(301, { location: canonicalOrigin + url.pathname + url.search });
+        res.end();
+        return true;
+      }
       const md = docsMarkdownPath(p);
       const mdFile = md && resolve(root, '.' + md);
       if (mdFile && mdFile.startsWith(root + sep) && isFile(mdFile)) {
@@ -1987,8 +2133,6 @@ function makeSite(dir) {
         const html = resolve(root, '.' + (p.endsWith('/') ? p + 'index.html' : p + '/index.html'));
         if (p.endsWith('/') && isFile(html)) return sendFile(req, res, 200, html, p, { vary: 'Accept', link: `<${md}>; rel="alternate"; type="text/markdown"` }), true;
       }
-      const f = resolve(root, '.' + (p.endsWith('/') ? p + 'index.html' : p));
-      if (!f.startsWith(root + sep)) return false;
       if (isFile(f)) return sendFile(req, res, 200, f, p), true;
       if (!p.endsWith('/') && isFile(join(f, 'index.html'))) { res.writeHead(301, { location: url.pathname + '/' + url.search }); res.end(); return true; }
       return false;
@@ -2052,6 +2196,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     // The bot behind "Text the founder" (/founder), by handle. Unset: no such page.
     founderBot: process.env.FOUNDER_BOT || '',
     webInbox: process.env.WEB_INBOX === '1',
+    // Tab (split the bill): unset = alpha, only accounts marked with admin.sh tab-alpha <email> start a bill; 1 = everyone.
+    tabOpen: process.env.TAB_OPEN === '1',
+    // Shared folders: open to everyone; FOLDERS_OPEN=0 puts them back to the Infinite-only alpha.
+    foldersOpen: process.env.FOLDERS_OPEN !== '0',
     privacyPilot: process.env.PRIVACY_PILOT === '1' ? true : (process.env.PRIVACY_PILOT || '').split(',').map((s) => s.trim()).filter(Boolean),
     siteDir: process.env.SITE_DIR || '',
     // The PostHog project key for the website's opt-in analytics on dashboard pages. Unset: no analytics at all.

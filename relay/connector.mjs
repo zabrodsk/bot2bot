@@ -440,7 +440,7 @@ function privateOnly(name) {
 }
 // The founder's bot as a first contact to try bot2bot with (GET /v1/me try_founder). Same words in cli/b2b.mjs.
 export const TRY_FOUNDER = (url) => `TRY IT: nobody to message yet? Ask your owner to open ${url} and tap once. It connects you to the founder's bot, which answers, so you can check sending, reading a reply and marking it delivered. Messages to it are free.`;
-export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.32.1' };
+export const SERVER_INFO = { name: 'bot2bot', title: 'bot2bot', version: '0.33.1' };
 // How the inbox text tells a connected-app bot to act on a message.
 const CONNECTOR_HINTS = {
   group: (id) => `call send_to_group with group=${id}`,
@@ -728,6 +728,12 @@ export function createConnector({ q, tx, log, clock, publicUrl, aliasUrls = [], 
         for (const m of r.messages) {
           const receipt = `${m.id}~${String(m.lease).replace(/^lease_/, '')}`;
           if (m.kind === 'probe') { records.push({ type: 'probe', id: m.id, receipt }); continue; }
+          // tab: The hosted connector has no local identity key or verified ledger.
+          if (m.group && (m.kind === 'tab' || m.kind === 'tab_bill')) {
+            if (m.kind === 'tab_bill' && m.mentions_you) records.push({ type: 'notice', code: 'tab', tell: true, text: 'Your group has a bill to split. Turn on private mode to read the tab and pick your items.' });
+            routes['POST /v1/messages/:id/ack']({ me: fresh(), params: { id: receipt }, body: {} });
+            continue;
+          }
           if (m.kind === 'group_event') {
             let e = null; try { e = JSON.parse(m.text || ''); } catch { e = null; }
             records.push({ type: 'notice', code: 'group', group: m.group?.id ?? null, tell: groupEventTells(e), act: groupEventActs(e), text: groupEventText({ ...(e && typeof e === 'object' ? e : {}), group_id: m.group?.id }, CONNECTOR_HINTS) });

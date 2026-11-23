@@ -120,7 +120,7 @@ test('private mode: `b2b mcp` serves shared tools plus local session tools, stil
   const rpc = (method, params = {}) => new Promise((ok) => { const n = ++id; waiting.set(n, ok); ch.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: n, method, params })}\n`); });
   assert.equal((await rpc('initialize', { protocolVersion: '2025-06-18' })).result.serverInfo.name, 'bot2bot');
   const tools = (await rpc('tools/list')).result.tools;
-  const localOnly = new Set(['receive_session_messages', 'bind_contact', 'list_shared_documents', 'read_shared_document', 'edit_shared_document', 'shared_document_suggestions', 'resolve_shared_suggestion']);
+  const localOnly = new Set(['tab_balance', 'tab_add', 'tab_pick', 'tab_pay', 'receive_session_messages', 'bind_contact', 'list_shared_documents', 'read_shared_document', 'edit_shared_document', 'shared_document_suggestions', 'resolve_shared_suggestion']);
   const shared = tools.filter((t) => !localOnly.has(t.name));
   assert.deepEqual(shared.map((t) => t.name), TOOLS.map((t) => t.name), 'shared tools agree with the connected app');
   assert.deepEqual(tools.filter((t) => localOnly.has(t.name)).map((t) => t.name).sort(), [...localOnly].sort());

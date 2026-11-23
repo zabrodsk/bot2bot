@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { gzipSync } from 'node:zlib';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,6 +65,15 @@ test('old addresses send people to the real domain, but bots keep working there'
   const host = new URL(url).host;
   relay = createRelay({ adminToken: 'admin-token-for-tests-123456', publicUrl: 'https://bot2bot.example', siteDir: fakeSite(), redirectHosts: [host] });
 
+  for (const method of ['GET', 'HEAD']) {
+    const publicPage = await fetch(url + '/pricing/?ref=docs', { method, headers: { accept: '*/*' }, redirect: 'manual' });
+    assert.equal(publicPage.status, 301);
+    assert.equal(publicPage.headers.get('location'), 'https://bot2bot.example/pricing/?ref=docs');
+    const setup = await fetch(url + '/setup', { method, redirect: 'manual' });
+    assert.equal(setup.status, 200);
+    assert.equal(setup.headers.get('x-robots-tag'), 'noindex');
+  }
+
   const page = await fetch(`${url}/app?x=1`, { headers: HTML, redirect: 'manual' });
   assert.equal(page.status, 301);
   assert.equal(page.headers.get('location'), 'https://bot2bot.example/app?x=1');
@@ -89,6 +99,7 @@ test('docs pages come as Markdown to agents that ask for it', async (t0) => {
   writeFileSync(join(dir, 'docs', 'index.html'), '<h1>docs home</h1>');
   writeFileSync(join(dir, 'docs', 'index.md'), '# bot2bot docs');
   writeFileSync(join(dir, 'docs', 'quickstart', 'index.html'), '<h1>Quickstart</h1>');
+  writeFileSync(join(dir, 'docs', 'quickstart', 'index.html.gz'), gzipSync('<h1>Quickstart</h1>'));
   writeFileSync(join(dir, 'docs', 'quickstart.md'), '# Quickstart\n\nRun join.');
   relay = createRelay({ adminToken: 'admin-token-for-tests-123456', publicUrl: url, hosted: true, siteDir: dir });
 
@@ -96,7 +107,14 @@ test('docs pages come as Markdown to agents that ask for it', async (t0) => {
   const page = await fetch(`${url}/docs/quickstart/`, { headers: HTML });
   assert.match(await page.text(), /<h1>Quickstart/);
   assert.equal(page.headers.get('link'), '</docs/quickstart.md>; rel="alternate"; type="text/markdown"');
-  assert.equal(page.headers.get('vary'), 'Accept');
+  assert.equal(page.headers.get('vary'), 'Accept, Accept-Encoding');
+  assert.equal(page.headers.get('content-encoding'), 'gzip');
+  const head = await fetch(url + '/docs/quickstart/', { method: 'HEAD', headers: { 'accept-encoding': 'gzip' } });
+  assert.equal(head.headers.get('content-encoding'), 'gzip');
+  assert.equal(await head.text(), '');
+  const plain = await fetch(url + '/docs/quickstart/', { headers: { 'accept-encoding': 'gzip;q=0, *;q=1' } });
+  assert.equal(plain.headers.get('content-encoding'), null);
+  assert.equal(await plain.text(), '<h1>Quickstart</h1>');
 
   // Agents asking for Markdown get it at the same address, with or without the slash.
   for (const path of ['/docs/quickstart/', '/docs/quickstart']) {

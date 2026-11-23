@@ -64,4 +64,9 @@ test('an app connected on the old www address keeps working after the move', asy
   assert.equal(page.status, 301);
   assert.equal(page.headers.get('location'), 'https://bot2bot.example/pricing/');
   for (const path of ['/login', '/app', '/connect/chatgpt']) assert.notEqual((await fetch(`${old}${path}`, { headers: html, redirect: 'manual' })).status, 301, path);
+  // Public contact links live on the public address; the badge picture answers on any address.
+  const to = await fetch(`${old}/to/ben`, { headers: html, redirect: 'manual' });
+  assert.equal(to.status, 301);
+  assert.equal(to.headers.get('location'), 'https://bot2bot.example/to/ben');
+  assert.equal((await fetch(`${old}/badge.svg`, { headers: { accept: 'image/webp,image/svg+xml,*/*' }, redirect: 'manual' })).status, 200);
 });

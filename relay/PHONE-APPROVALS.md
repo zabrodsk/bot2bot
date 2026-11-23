@@ -33,16 +33,19 @@ On other systems `auto` asks only in runs the watcher started, unless `B2B_IDLE_
 
 Every action on the page shows what it did with an **Undo** for four seconds, and only then goes out.
 
+**Tab cards.** Splitting a bill in a group ([Tab](../docs/TAB-SPEC.md)) uses two more kinds. `tab_pick` shows the group, the payer, the place, the total and the items (with a counter for quantities above 1), and offers **Done**, **Split evenly** and **I wasn't there**. `tab_got` asks "Tom marked 31 € as sent to you. Did it arrive?" with **It arrived** and **Not yet**. They wait as long as the bill stays open (up to a day), whatever the phone mode says about being away; only `off` stops them. A pick can be changed (**Change**) until the bill closes: each change is a new signed answer with a higher `rev`, and the bot waits for it with `GET /v1/phone/cards/:id?wait=<s>&after=<rev>`. The bot's side is the `TAB (phone)` block in `cli/b2b.mjs` (`tabAskPick`, `tabAskGot`, `tabPhoneClose`).
+
 ## Rules, and where each is enforced
 
 - **Only the owner can approve.** The bot accepts an answer only if a pinned phone signed `b2b-phone-answer/1|<request id>|<hash>|<decision>|<hash of the reply>`. The relay has no bot route to answer a card, and the page's route needs the owner's dashboard session; but even an answer the relay writes into its own database is thrown away by the bot, and the owner is told.
+- **A Tab answer binds what was picked.** The decision is `pick`, `even`, `absent`, `got` or `not_yet`, and for a pick the last part of the signed string is the canonical JSON of the picks (`[{"n":1,"units":2},…]`, sorted by item). The picks travel encrypted with a key inside the card, so the relay sees that a pick was made, not what. The bot rejects picks that aren't in that exact form, name an item the bill doesn't have, or take more than its quantity. The relay refuses an answer whose decision isn't of the card's kind (an "allow" on a bill, a "pick" on a permission prompt), and only Tab cards may wait longer than 30 minutes.
 - **One approval, one request.** The request id is random and used once, and the hash covers the tool and its exact arguments. An approval copied onto another request does not verify. A changed command is a new request.
 - **It expires.** The bot waits up to 30 minutes (`phone wait <minutes>`, 1 to 30). With no answer the request counts as a no: the agent is told to go on with what it can and to say at the end what still needs a yes.
 - **Keyboard only.** Deleting data (`rm -r`, `git reset --hard`, `DROP TABLE`…), force pushes, secrets (`.env`, keys, credential stores), production deploys (`railway up`, `terraform apply`, `kubectl apply`…) and `sudo` are never offered on the phone. The owner sees a card with nothing to tap, and the prompt waits on screen; in a run nobody watches the agent is told to go on without it. `phone rule add "<pattern>" [--project NAME]` keeps more for the keyboard, for everything or one project. The relay also refuses an answer to such a card.
 
 ## What the relay can and cannot see
 
-It sees that a bot of this owner asked something, when, of which kind (permission, stopped, info, test), which phones it was sent to, and whether the answer was allow, deny or a reply. It never sees what was asked, the project, the agent's words or the reply's text: the card is encrypted to each phone (ephemeral ECDH P-256, HKDF-SHA-256, AES-256-GCM, bound to the card and the phone), and a reply is encrypted with a key that travels inside the card.
+It sees that a bot of this owner asked something, when, of which kind (permission, stopped, info, test, tab_pick, tab_got), which phones it was sent to, and whether the answer was allow, deny, a reply, a pick, an even split, not there, arrived or not yet. It never sees what was asked, the project, the agent's words or the reply's text: the card is encrypted to each phone (ephemeral ECDH P-256, HKDF-SHA-256, AES-256-GCM, bound to the card and the phone), and a reply is encrypted with a key that travels inside the card.
 
 Notifications are Web Push with no content ("One of your agents needs you"), signed with the relay's VAPID key. A subscription is accepted only for the browsers' own push services. On an iPhone, Web Push works once the page is added to the Home Screen.
 
@@ -63,6 +66,8 @@ b2b phone rule list | add "<pattern>" [--project NAME] | remove "<pattern>"
 Relay API for bots: `GET /v1/phone/devices`, `POST /v1/phone/devices/:id/linked`, `POST /v1/phone/cards`, `GET /v1/phone/cards/:id?wait=<s>` (held open until answered), `POST /v1/phone/cards/:id/close`.
 
 ## Verification
+
+`test/tab-phone.test.mjs` does the same for the Tab cards: picking with the counter, Done, Split evenly, I wasn't there, Undo, changing a pick until the bill closes, the got card, forged answers (picks swapped after signing, a pick in another form, a pick copied onto another bill, a relay-written "arrived", a pick replayed as "arrived") and the relay refusing answers of the wrong kind. `B2B_TAB_SNAPSHOT=<dir>` writes the cards as static HTML to look at.
 
 `test/phone.test.mjs` runs the page's real script (Node's WebCrypto, a stand-in for the page's elements and for IndexedDB) against a local relay, with the real tool as the hook. It covers setting up and linking, approve, deny and reply, the stopped card, the Undo, away and back at the keyboard, no answer, the keyboard-only list, forged answers (a bot's token, another account, the relay's own database, a real approval copied onto another request, a phone the relay added), push, Codex's hooks file next to another tool's, removing a phone and deleting the account.
 

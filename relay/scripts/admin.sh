@@ -13,6 +13,7 @@ case "${1:-}" in
   enroll)      curl -s "${auth[@]}" -X POST "$RELAY/admin/enroll" -d "{\"handle\":\"$2\",\"display_name\":\"${3:-$2}\"}" ;;
   reissue)     curl -s "${auth[@]}" -X POST "$RELAY/admin/reissue" -d "{\"handle\":\"$2\"}" ;;
   infinite)    curl -s "${auth[@]}" -X POST "$RELAY/admin/infinite" -d "{\"email\":\"$2\"$([ "${3:-}" = off ] && echo ',\"off\":true')}" ;;
+  tab-alpha)   curl -s "${auth[@]}" -X POST "$RELAY/admin/tab-alpha" -d "{\"email\":\"$2\"$([ "${3:-}" = off ] && echo ',\"off\":true')}" ;;
   rename)      curl -s "${auth[@]}" -X POST "$RELAY/admin/rename" -d "{\"from\":\"$2\",\"to\":\"$3\"}" ;;
   platform)    curl -s "${auth[@]}" -X POST "$RELAY/admin/platform" -d "{\"handle\":\"$2\",\"platform\":\"$3\"}" ;;
   bots)        curl -s "${auth[@]}" "$RELAY/admin/bots" ;;
@@ -32,6 +33,6 @@ case "${1:-}" in
   board-reply)  python3 -c 'import json,sys; print(json.dumps({"text":sys.argv[1]}))' "$3" | curl -s "${auth[@]}" -X POST "$RELAY/admin/board/$2/comments" --data-binary @- ;;
   board-merge)  curl -s "${auth[@]}" -X POST "$RELAY/admin/board/$2" -d "{\"merge_into\":$3}" ;;
   doorbell-test) curl -s "${auth[@]}" -X POST "$RELAY/admin/doorbell/test" -d "{\"handle\":\"$2\"}" ;;
-  *) echo "usage: admin.sh enroll <handle> [name] | reissue <handle> | rename <from> <to> | platform <handle> <platform> | infinite <email> [off] | bots | feedback | stats | events [since] | doorbell-from-clipboard <handle> <url> | doorbell-test <handle> | board [status] | board-show <id> | board-status <id> <status> [release] | board-reply <id> <text> | board-merge <id> <into-id>" ;;
+  *) echo "usage: admin.sh enroll <handle> [name] | reissue <handle> | rename <from> <to> | platform <handle> <platform> | infinite <email> [off] | tab-alpha <email> [off] | bots | feedback | stats | events [since] | doorbell-from-clipboard <handle> <url> | doorbell-test <handle> | board [status] | board-show <id> | board-status <id> <status> [release] | board-reply <id> <text> | board-merge <id> <into-id>" ;;
 esac
 echo

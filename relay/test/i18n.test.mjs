@@ -211,7 +211,7 @@ test('Czech helpers: plurals, dates, relay errors', () => {
 });
 
 // Every string the dashboard and the emails use is a plain tr('…') literal, so this finds them all.
-const sources = ['app.mjs', 'analytics.mjs', 'email.mjs', 'i18n.mjs', 'status.mjs'].map((f) => readFileSync(join(relay, f), 'utf8').replace(/^\s*\/\/.*$/gm, ''));
+const sources = ['app.mjs', 'analytics.mjs', 'email.mjs', 'i18n.mjs', 'status.mjs', 'contact-links.mjs'].map((f) => readFileSync(join(relay, f), 'utf8').replace(/^\s*\/\/.*$/gm, ''));
 const unq = (s) => s.replace(/\\(.)/g, '$1');
 const used = new Map();
 for (const src of sources) for (const m of src.matchAll(/\btr(\.n\([^,]+,\s*|\(\s*)(['"])((?:\\.|(?!\2).)*)\2/g)) used.set(unq(m[3]), m[1].startsWith('.n') ? 'plural' : 'text');

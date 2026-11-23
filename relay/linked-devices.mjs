@@ -173,8 +173,9 @@ export function createLinkedDevices({ q, tx, clock, HttpError, sha, L }) {
     all['GET /v1/me'] = (ctx) => {
       const result = meRoute(ctx);
       if (ctx.me.device_id) {
-        result.inbox_pending = q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status IN ('pending','claimed') AND kind != 'probe' AND b2b_device_can_open(sealed, ?)").get(ctx.me.id, ctx.me.device_id).n;
-        result.inbox_ready = ctx.me.paused_at ? 0 : q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status = 'pending' AND coalesce(note, '') != 'key_check' AND b2b_device_can_open(sealed, ?)").get(ctx.me.id, ctx.me.device_id).n;
+        // tab: Pending payment details alone do not start the agent.
+        result.inbox_pending = q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status IN ('pending','claimed') AND kind NOT IN ('probe', 'tab_payto', 'tab_payto_reply') AND b2b_device_can_open(sealed, ?)").get(ctx.me.id, ctx.me.device_id).n;
+        result.inbox_ready = ctx.me.paused_at ? 0 : q("SELECT count(*) AS n FROM messages WHERE to_bot = ? AND status = 'pending' AND kind NOT IN ('tab_payto', 'tab_payto_reply') AND coalesce(note, '') != 'key_check' AND b2b_device_can_open(sealed, ?)").get(ctx.me.id, ctx.me.device_id).n;
       }
       if (roster(ctx.me.id)) result.device_handled_pending = handledFor(ctx.me).length;
       return result;

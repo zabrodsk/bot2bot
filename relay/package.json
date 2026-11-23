@@ -1,6 +1,6 @@
 {
   "name": "b2b-relay",
-  "version": "0.32.1",
+  "version": "0.33.1",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
@@ -12,5 +12,8 @@
     "sim": "node scripts/sim.mjs",
     "test": "node --test 'test/*.test.mjs'",
     "sign": "node scripts/sign-cli.mjs"
+  },
+  "devDependencies": {
+    "jsqr": "1.4.0"
   }
 }

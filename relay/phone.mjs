@@ -9,11 +9,16 @@
 import { createPublicKey, createPrivateKey, generateKeyPairSync, createHash, sign } from 'node:crypto';
 import { phonePage, PHONE_SW, phoneManifest } from './phone-page.mjs';
 
-export const PHONE_LIMITS = { devices: 5, openCards: 30, cardsPerHour: 240, boxBytes: 24 * 1024, replyBytes: 4 * 1024, ttlMinMs: 30_000, ttlMaxMs: 30 * 60_000, holdMs: 25_000, keepMs: 24 * 3_600_000, linked: 20 };
+export const PHONE_LIMITS = { devices: 5, openCards: 30, cardsPerHour: 240, boxBytes: 24 * 1024, replyBytes: 4 * 1024, ttlMinMs: 30_000, ttlMaxMs: 30 * 60_000, tabTtlMaxMs: 24 * 3_600_000, holdMs: 25_000, keepMs: 24 * 3_600_000, linked: 20, revisions: 50 };
 const DEV = /^dev_[A-Za-z0-9_-]{16}$/;
 const CARD = /^apr_[A-Za-z0-9_-]{22}$/;
-const KINDS = ['permission', 'done', 'info', 'test'];
-const DECISIONS = ['allow', 'deny', 'reply'];
+// Tab cards (splitting a bill in a group): "what did you have?" and "did the money arrive?". They wait as long as a
+// bill stays open (a day), and each kind takes only its own answers, so a tap on one can't pass for another.
+const TAB_KINDS = ['tab_pick', 'tab_got'];
+const KINDS = ['permission', 'done', 'info', 'test', ...TAB_KINDS];
+const DECISIONS = { permission: ['allow', 'deny', 'reply'], done: ['allow', 'deny', 'reply'], test: ['allow', 'deny', 'reply'], tab_pick: ['pick', 'even', 'absent'], tab_got: ['got', 'not_yet'] };
+// Answers that carry text the relay must not read (a reply, or the items someone picked), encrypted with a key inside the card.
+const SEALED = ['reply', 'pick'];
 const bytes = (s, min, max) => typeof s === 'string' && /^[A-Za-z0-9_-]+$/.test(s) && s.length <= Math.ceil(max * 4 / 3) + 2 && (() => { const b = Buffer.from(s, 'base64url'); return b.length >= min && b.length <= max && b.toString('base64url') === s; })();
 // A P-256 public key as browsers export it ("raw": 0x04, x, y), checked to be a point on the curve.
 function p256(raw) {
@@ -56,7 +61,9 @@ export function createPhone({ q, tx, clock, token, HttpError, publicUrl = '', fe
   const devicesOf = (userId) => q('SELECT * FROM phone_devices WHERE user_id = ? ORDER BY created_at').all(userId);
   const deviceOf = (userId, id) => { const d = typeof id === 'string' && DEV.test(id) && q('SELECT * FROM phone_devices WHERE id = ? AND user_id = ?').get(id, userId); if (!d) throw new HttpError(404, 'That phone is not set up on this account.'); return d; };
   const state = (c, t = clock()) => (c.answered_at ? 'answered' : c.closed_at ? 'closed' : c.expires_at <= t ? 'expired' : 'open');
-  const forBot = (c) => ({ id: c.id, state: state(c), expires_at: c.expires_at, ...(c.answered_at ? { answer: JSON.parse(c.answer) } : {}) });
+  // A pick stays open to changes until its bill closes; the bot is told when that's over.
+  const forBot = (c) => ({ id: c.id, state: state(c), expires_at: c.expires_at, ...(c.answered_at ? { answer: JSON.parse(c.answer) } : {}),
+    ...(c.kind === 'tab_pick' && c.answered_at ? { open: !c.closed_at && c.expires_at > clock() } : {}) });
   const wake = (id) => { for (const fn of waiters.get(id) ?? []) fn(); };
 
   // ───── push: a notification with no content, signed the way browsers' push services ask (VAPID) ─────
@@ -112,7 +119,9 @@ export function createPhone({ q, tx, clock, token, HttpError, publicUrl = '', fe
         sweep();
         if (!body || typeof body.id !== 'string' || !CARD.test(body.id) || !KINDS.includes(body.kind)) throw new HttpError(400, 'a card needs an id (apr_…) and a kind');
         const ttl = Math.round(Number(body.ttl) * 1000);
-        if (!(ttl >= L.ttlMinMs && ttl <= L.ttlMaxMs)) throw new HttpError(400, `ttl is ${L.ttlMinMs / 1000} to ${L.ttlMaxMs / 1000} seconds`);
+        const tab = TAB_KINDS.includes(body.kind);
+        const ttlMax = tab ? L.tabTtlMaxMs : L.ttlMaxMs;
+        if (!(ttl >= L.ttlMinMs && ttl <= ttlMax)) throw new HttpError(400, `ttl is ${L.ttlMinMs / 1000} to ${ttlMax / 1000} seconds`);
         const boxes = body.boxes && typeof body.boxes === 'object' && !Array.isArray(body.boxes) ? Object.entries(body.boxes) : [];
         const mine = new Map(devicesOf(userId).map((d) => [d.id, d]));
         if (!boxes.length || boxes.length > L.devices) throw new HttpError(400, 'a card is encrypted to at least one of the owner\'s phones');
@@ -120,7 +129,8 @@ export function createPhone({ q, tx, clock, token, HttpError, publicUrl = '', fe
           if (!mine.has(id)) throw new HttpError(400, 'a card can only go to its owner\'s own phones');
           if (!b || typeof b !== 'object' || Object.keys(b).some((k) => !['eph', 'iv', 'ct'].includes(k)) || !bytes(b.eph, 65, 65) || !bytes(b.iv, 12, 12) || !bytes(b.ct, 17, L.boxBytes)) throw new HttpError(400, 'expected a bounded encrypted card');
         }
-        if (q('SELECT count(*) AS n FROM phone_cards WHERE bot_id = ? AND answered_at IS NULL AND closed_at IS NULL AND expires_at > ?').get(me.id, t).n >= L.openCards) throw new HttpError(429, 'too many cards are waiting for your owner already');
+        // Tab cards wait a day, so they're counted apart: open bills never crowd out a permission prompt.
+        if (q(`SELECT count(*) AS n FROM phone_cards WHERE bot_id = ? AND answered_at IS NULL AND closed_at IS NULL AND expires_at > ? AND kind ${tab ? '' : 'NOT '}IN (${TAB_KINDS.map(() => '?').join(',')})`).get(me.id, t, ...TAB_KINDS).n >= L.openCards) throw new HttpError(429, 'too many cards are waiting for your owner already');
         if (q('SELECT count(*) AS n FROM phone_cards WHERE bot_id = ? AND created_at > ?').get(me.id, t - 3_600_000).n >= L.cardsPerHour) throw new HttpError(429, 'too many cards in the last hour');
         if (q('SELECT 1 FROM phone_cards WHERE id = ?').get(body.id)) throw new HttpError(409, 'that card id was used already');
         q('INSERT INTO phone_cards (id, user_id, bot_id, kind, boxes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(body.id, userId, me.id, body.kind, JSON.stringify(Object.fromEntries(boxes)), t, t + ttl);
@@ -136,7 +146,10 @@ export function createPhone({ q, tx, clock, token, HttpError, publicUrl = '', fe
       const read = () => { const c = CARD.test(String(params.id)) && q('SELECT * FROM phone_cards WHERE id = ? AND bot_id = ?').get(params.id, me.id); if (!c) throw new HttpError(404, 'no such card'); return c; };
       const c = read();
       const hold = Math.min(Math.max(Number(url?.searchParams.get('wait')) || 0, 0) * 1000, L.holdMs);
-      if (!hold || state(c) !== 'open') return forBot(c);
+      // ?after=<rev>: a pick the owner can still change. Held until a newer answer than that one comes.
+      const after = Number(url?.searchParams.get('after'));
+      const waiting = (x) => state(x) === 'open' || (Number.isInteger(after) && x.kind === 'tab_pick' && x.answered_at && !x.closed_at && x.expires_at > clock() && (JSON.parse(x.answer).rev ?? 1) <= after);
+      if (!hold || !waiting(c)) return forBot(c);
       return new Promise((resolve) => {
         let done = false;
         const finish = () => {
@@ -156,7 +169,8 @@ export function createPhone({ q, tx, clock, token, HttpError, publicUrl = '', fe
     'POST /v1/phone/cards/:id/close': ({ me, params }) => {
       const c = CARD.test(String(params.id)) && q('SELECT * FROM phone_cards WHERE id = ? AND bot_id = ?').get(params.id, me.id);
       if (!c) throw new HttpError(404, 'no such card');
-      if (!c.answered_at && !c.closed_at) q('UPDATE phone_cards SET closed_at = ? WHERE id = ?').run(clock(), c.id);
+      // A pick that was answered still closes when its bill does: then it can't be changed any more and leaves the phone.
+      if (!c.closed_at && (!c.answered_at || c.kind === 'tab_pick')) q('UPDATE phone_cards SET closed_at = ? WHERE id = ?').run(clock(), c.id);
       wake(c.id);
       return { id: c.id, state: state(q('SELECT * FROM phone_cards WHERE id = ?').get(c.id)) };
     },
@@ -187,19 +201,26 @@ export function createPhone({ q, tx, clock, token, HttpError, publicUrl = '', fe
     q('UPDATE phone_devices SET push_endpoint = ? WHERE id = ?').run(String(endpoint), d.id);
     return { push: true };
   }
+  // An answered card as the page shows it. A pick stays changeable while its bill is open, so the page gets back the
+  // sealed picks it sent (only a phone that opened the card can read them) to show and to start from.
+  const answeredView = (c, device) => {
+    const a = JSON.parse(c.answer);
+    return { decision: a.decision, at: c.answered_at, here: a.device === device?.id,
+      ...(c.kind === 'tab_pick' ? { rev: a.rev ?? 1, open: !c.closed_at && c.expires_at > clock(), ...(a.reply ? { sealed: a.reply } : {}) } : {}) };
+  };
   // What the page shows: this account's phones, and the cards waiting (as ciphertext for the phone that asks).
   function view(user, deviceId) {
     const t = clock();
     const device = deviceId ? q('SELECT * FROM phone_devices WHERE id = ? AND user_id = ?').get(String(deviceId), user.id) : null;
     if (device) q('UPDATE phone_devices SET seen_at = ? WHERE id = ?').run(t, device.id);
     const cards = q(`SELECT c.*, b.handle FROM phone_cards c JOIN bots b ON b.id = c.bot_id WHERE c.user_id = ? AND c.closed_at IS NULL
-      AND ((c.answered_at IS NULL AND c.expires_at > ?) OR c.answered_at > ?) ORDER BY c.created_at DESC LIMIT 40`).all(user.id, t, t - 10 * 60_000);
+      AND ((c.answered_at IS NULL AND c.expires_at > ?) OR c.answered_at > ? OR (c.kind = 'tab_pick' AND c.expires_at > ?)) ORDER BY c.created_at DESC LIMIT 40`).all(user.id, t, t - 10 * 60_000, t);
     return {
       now: t, known: !!device,
       devices: devicesOf(user.id).map((d) => ({ id: d.id, name: d.name, code: d.code, created_at: d.created_at, push: !!d.push_endpoint, linked: JSON.parse(d.linked || '[]') })),
       cards: cards.map((c) => ({ id: c.id, kind: c.kind, bot: `@${c.handle}`, created_at: c.created_at, expires_at: c.expires_at,
         box: device ? JSON.parse(c.boxes)[device.id] ?? null : null,
-        ...(c.answered_at ? { answered: { decision: JSON.parse(c.answer).decision, at: c.answered_at, here: JSON.parse(c.answer).device === device?.id } } : {}) })),
+        ...(c.answered_at ? { answered: answeredView(c, device) } : {}) })),
     };
   }
   // The answer is stored as the phone signed it. The relay can't check the signature's meaning (the request it is
@@ -209,13 +230,19 @@ export function createPhone({ q, tx, clock, token, HttpError, publicUrl = '', fe
       const c = typeof id === 'string' && CARD.test(id) && q('SELECT * FROM phone_cards WHERE id = ? AND user_id = ?').get(id, user.id);
       if (!c) throw new HttpError(404, 'This request is gone.');
       const d = deviceOf(user.id, f.device);
-      if (state(c) !== 'open') throw new HttpError(409, state(c) === 'answered' ? 'This was answered already.' : 'This request ended before you answered.');
+      // What someone picked from a bill can be changed until the bill closes: a new signed pick replaces the last one.
+      const change = c.kind === 'tab_pick' && state(c) === 'answered' && !c.closed_at && c.expires_at > clock();
+      if (state(c) !== 'open' && !change) throw new HttpError(409, state(c) === 'answered' ? 'This was answered already.' : 'This request ended before you answered.');
       if (!JSON.parse(c.boxes)[d.id]) throw new HttpError(403, 'This request was not sent to this phone.');
       if (c.kind === 'info') throw new HttpError(400, 'This one can only be answered at the keyboard.');
-      if (!DECISIONS.includes(f.decision) || !bytes(f.sig, 64, 64)) throw new HttpError(400, 'Expected a signed answer.');
-      const reply = f.decision === 'reply';
-      if (reply && (!bytes(f.reply_iv, 12, 12) || !bytes(f.reply_ct, 17, L.replyBytes + 16))) throw new HttpError(400, 'Expected a bounded encrypted reply.');
-      const a = { device: d.id, decision: f.decision, sig: f.sig, ...(reply ? { reply: { iv: f.reply_iv, ct: f.reply_ct } } : {}) };
+      // An answer only of the card's own kind: "allow" on a bill, or "pick" on a permission prompt, is refused here too.
+      if (!(DECISIONS[c.kind] ?? []).includes(f.decision) || !bytes(f.sig, 64, 64)) throw new HttpError(400, 'Expected a signed answer.');
+      const sealed = SEALED.includes(f.decision);
+      if (sealed && (!bytes(f.reply_iv, 12, 12) || !bytes(f.reply_ct, 17, L.replyBytes + 16))) throw new HttpError(400, 'Expected a bounded encrypted reply.');
+      const rev = change ? (JSON.parse(c.answer).rev ?? 1) + 1 : 1;
+      if (c.kind === 'tab_pick' && Number(f.rev) !== rev) throw new HttpError(409, 'The pick changed. Refresh the card and try again.');
+      if (rev > L.revisions) throw new HttpError(429, 'That was changed many times already. Ask in the group instead.');
+      const a = { device: d.id, decision: f.decision, sig: f.sig, ...(sealed ? { reply: { iv: f.reply_iv, ct: f.reply_ct } } : {}), ...(c.kind === 'tab_pick' ? { rev } : {}) };
       q('UPDATE phone_cards SET answer = ?, answered_at = ? WHERE id = ?').run(JSON.stringify(a), clock(), c.id);
       return { id: c.id, bot: c.bot_id, decision: f.decision };
     });

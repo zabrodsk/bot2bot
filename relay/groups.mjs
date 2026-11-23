@@ -16,6 +16,7 @@ import { messagePlatform } from './message-metadata.mjs';
 // - New members see messages from when they joined. Message text follows the usual 7-day retention.
 const SEALED_RE = /^b2b1\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{86}$/;
 const TAG_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const TAB_PROOF_FIELD_RE = /^[A-Za-z0-9_-]{43}$/;
 const NAME_RE = /^[^\u0000-\u001f\u007f]{1,40}$/u;
 // The first tool version that can read group messages (their seal names the group). Older bots update first.
 export const GROUP_TOOL = '0.21.0';
@@ -38,6 +39,18 @@ export function migrateGroups(db) {
       PRIMARY KEY (group_id, bot_id)
     );
     CREATE INDEX IF NOT EXISTS group_members_bot ON group_members (bot_id, state);
+    CREATE TABLE IF NOT EXISTS group_tab_joins (
+      group_id INTEGER NOT NULL, bot_id INTEGER NOT NULL, joined_at INTEGER NOT NULL,
+      PRIMARY KEY (group_id, bot_id, joined_at)
+    );
+    CREATE TRIGGER IF NOT EXISTS group_tab_preserve_join BEFORE UPDATE OF joined_at ON group_members
+      WHEN OLD.joined_at IS NOT NULL AND OLD.joined_at IS NOT NEW.joined_at BEGIN
+        INSERT OR IGNORE INTO group_tab_joins VALUES (OLD.group_id, OLD.bot_id, OLD.joined_at);
+      END;
+    CREATE TABLE IF NOT EXISTS group_tab_device_events (
+      group_id INTEGER NOT NULL, commitment TEXT NOT NULL, root_sign TEXT NOT NULL, proof TEXT NOT NULL,
+      PRIMARY KEY (group_id, commitment, root_sign)
+    );
     CREATE TABLE IF NOT EXISTS group_links (
       code_hash TEXT PRIMARY KEY, plain_code TEXT, group_id INTEGER NOT NULL REFERENCES chat_groups(id), from_bot INTEGER NOT NULL REFERENCES bots(id),
       created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER
@@ -59,7 +72,7 @@ export function migrateGroups(db) {
   if (!cols('circles').includes('hidden')) db.exec('ALTER TABLE circles ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
 }
 
-export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files = null, allowanceLeft, kick, needTool = () => false }) {
+export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sha, HttpError, L, log, publicUrl, erase, governance, files = null, allowanceLeft, kick, needTool = () => false, tabAllowed = () => true }) {
   const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
   const bot = (id) => q('SELECT * FROM bots WHERE id = ?').get(id);
   const group = (id) => q('SELECT * FROM chat_groups WHERE id = ?').get(Number(id));
@@ -103,6 +116,7 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
   function view(me, g) {
     const aliases = new Map(q('SELECT peer_bot, alias FROM contacts WHERE owner_bot = ?').all(me.id).map((c) => [c.peer_bot, c.alias]));
     const ms = members(g.id);
+    const priorJoins = q('SELECT bot_id, joined_at FROM group_tab_joins WHERE group_id = ?').all(g.id);
     const you = ms.find((m) => m.bot_id === me.id);
     const link = you?.state === 'joined' && (!g.only_admins_add || you.role === 'admin') ? openLink(g.id, me.id) : null;
     return {
@@ -110,7 +124,8 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
       you: you ? { role: you.role, state: you.state, wake: you.wake } : null,
       join_page: `${publicUrl}/app/groups/${g.id}`,
       invite_link: link ? `${publicUrl}/g/${link.plain_code}` : null,
-      members: ms.map((m) => ({ handle: `@${m.handle}`, name: nameOf(m), contact: aliases.get(m.bot_id) ?? null, you: m.bot_id === me.id || undefined, role: m.role, state: m.state,
+      members: ms.map((m) => ({ handle: `@${m.handle}`, name: nameOf(m), contact: aliases.get(m.bot_id) ?? null, you: m.bot_id === me.id || undefined, role: m.role, state: m.state, joined_at: m.joined_at,
+        tab_prior_joins: priorJoins.filter(j => j.bot_id === m.bot_id).map(j => j.joined_at),
         uses: m.vendor === 'connector' ? 'connected_app' : 'bot', keys: m.box_pub ? { sign: m.sign_pub, box: m.box_pub } : null })),
     };
   }
@@ -360,6 +375,8 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
   }
   function endInTx(gid) {
     q('DELETE FROM group_browser_views WHERE group_id = ?').run(gid);
+    q('DELETE FROM group_tab_joins WHERE group_id = ?').run(gid);
+    q('DELETE FROM group_tab_device_events WHERE group_id = ?').run(gid);
     q('UPDATE chat_groups SET ended_at = coalesce(ended_at, ?) WHERE id = ?').run(clock(), gid);
     q("UPDATE group_links SET revoked_at = coalesce(revoked_at, ?) WHERE group_id = ?").run(clock(), gid);
     erase("group_id = ? AND status IN ('pending', 'claimed') AND kind != 'group_event'", gid);
@@ -385,7 +402,7 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
         if (!WAKES.includes(s.wake)) throw new HttpError(400, 'wake is mentions, all or muted');
         q('UPDATE group_members SET wake = ? WHERE group_id = ? AND bot_id = ?').run(s.wake, gid, me.id);
         // Muted from now on: what's already waiting from this group doesn't wake the bot later either.
-        if (s.wake === 'muted') q("UPDATE messages SET next_ring_at = NULL WHERE to_bot = ? AND group_id = ? AND status = 'pending' AND kind IN ('note', 'ask')").run(me.id, gid);
+        if (s.wake === 'muted') q("UPDATE messages SET next_ring_at = NULL WHERE to_bot = ? AND group_id = ? AND status = 'pending' AND kind IN ('note', 'ask', 'tab', 'tab_bill')").run(me.id, gid);
         out.wake = s.wake;
       }
       if (s.hidden != null) { q('UPDATE group_members SET hidden = ? WHERE group_id = ? AND bot_id = ?').run(s.hidden ? 1 : 0, gid, me.id); out.hidden = !!s.hidden; }
@@ -424,14 +441,22 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
     if (!g || g.ended_at) throw new HttpError(410, 'this group was ended');
     if (m?.state !== 'joined') throw new HttpError(403, m?.state === 'invited' ? `your owner hasn't joined "${g.name}" yet. They say yes here: ${publicUrl}/app/groups/${gid}` : "you're not in this group");
     const kind = body.kind ?? 'note';
-    if (!['note', 'ask'].includes(kind)) throw new HttpError(400, 'kind must be note or ask');
+    if (!['note', 'ask', 'tab', 'tab_bill'].includes(kind)) throw new HttpError(400, 'unknown group post kind'); // tab:
+    const tab = kind === 'tab' || kind === 'tab_bill';
+    if (kind === 'tab_bill' && !tabAllowed(me)) throw new HttpError(403, "Tab is in early testing, so starting a bill isn't open for your account yet. You can still pick and pay back on bills others start.");
+    if (body.tab_commitment != null && (!tab || !me.device_id || typeof body.tab_commitment !== 'string' || !TAB_PROOF_FIELD_RE.test(body.tab_commitment))) throw new HttpError(400, 'invalid Tab event commitment');
     // A diagnosis may quote a log too: every post in a jobs group must refuse plaintext fallback.
     if (q('SELECT 1 FROM job_senders WHERE group_id = ?').get(gid) && (!encrypted(gid) || body.text || body.links?.length || body.choices?.length)) throw new HttpError(403, 'job logs must stay end-to-end encrypted; plaintext fallback is refused');
     if (me.vendor === 'service') {
       const creator = bot(g.created_by);
       if (!me.user_id || creator?.user_id !== me.user_id || !q('SELECT 1 FROM job_senders WHERE bot_id = ? AND group_id = ?').get(me.id, gid)) throw new HttpError(403, 'service senders post only to their own jobs groups');
     }
-    const recipients = joined(gid).filter((r) => r.bot_id !== me.id && r.vendor !== 'service' && live(r) && !blockedBetween(me.id, r.bot_id));
+    let recipients = joined(gid).filter((r) => r.bot_id !== me.id && r.vendor !== 'service' && live(r) && !blockedBetween(me.id, r.bot_id));
+    // tab: A history reply has one encrypted recipient. Recheck the membership at send time.
+    if (body.tab_recipient != null) {
+      recipients = recipients.filter((r) => kind === 'tab' && r.box_pub && me.box_pub && '@' + r.handle === body.tab_recipient && r.joined_at === body.tab_joined_at);
+      if (recipients.length !== 1) throw new HttpError(403, 'That person is no longer in this group.');
+    }
     if (ownerWeb && recipients.some((r) => r.box_pub) && me.box_pub) throw new HttpError(400, 'this group is end-to-end encrypted, so only your bot can write in it. Tell your bot what to say');
     // The plain part: for members without keys (and the dashboard of a group that isn't encrypted).
     const text = typeof body.text === 'string' ? body.text.trim() : '';
@@ -475,10 +500,10 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
     // Typed on the dashboard: people type slowly, so a burst is a script.
     if (ownerWeb && q("SELECT count(*) AS n FROM group_posts WHERE from_bot = ? AND via = 'web' AND created_at > ?").get(me.id, t - 60_000).n >= 10) throw new HttpError(429, 'slow down a little');
     if (!ownerWeb) {
-      const recentHere = (ms) => q("SELECT count(*) AS n FROM group_posts WHERE group_id = ? AND from_bot = ? AND via = 'bot' AND kind IN ('note', 'ask') AND created_at > ?").get(gid, me.id, t - ms).n;
+      const recentHere = (ms) => q("SELECT count(*) AS n FROM group_posts WHERE group_id = ? AND from_bot = ? AND via = 'bot' AND kind IN ('note', 'ask', 'tab', 'tab_bill') AND created_at > ?").get(gid, me.id, t - ms).n;
       if (recentHere(600_000) >= L.groupPostsPer10Min) throw new HttpError(429, 'too many messages to this group in 10 minutes. Wait a little; only write when your owner asked or someone needs an answer');
       if (recentHere(86_400_000) >= L.groupPostsPerDay) throw new HttpError(429, 'too many messages to this group today');
-      const left = allowanceLeft(me, t);
+      const left = kind === 'tab' ? null : allowanceLeft(me, t); // tab: only bills count
       if (left !== null && left <= 0) throw new HttpError(402, 'your free messages for today are used up. They come back at midnight UTC. Receiving still works.');
     }
     return tx(() => {
@@ -486,10 +511,18 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
       const allSealed = copies.length > 0 && copies.every((c) => c.sealed);
       q('INSERT INTO group_posts (id, group_id, from_bot, kind, text, choices, sealed, mentions, via, created_at, self_sealed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(postId, gid, me.id, kind, allSealed ? null : text, allSealed || !choices.length ? null : JSON.stringify(choices), allSealed ? 1 : 0, JSON.stringify(mentions), ownerWeb ? 'web' : 'bot', t, selfSealed);
+      // Keep only the commitment and the root-signed roster after the encrypted message expires.
+      if (body.tab_commitment) {
+        const proof = { device: me.device_id, manifest: linkedDevices.roster(me.id) };
+        q('INSERT OR IGNORE INTO group_tab_device_events VALUES (?, ?, ?, ?)').run(gid, body.tab_commitment, me.sign_pub, JSON.stringify(proof));
+      }
+      let woken = 0;
       for (const [i, c] of copies.entries()) {
         const mentioned = mentions.includes('@all') || mentions.includes(`@${c.r.handle}`);
         // When it wakes them: muted never; "all" now; "mentions" now for questions and mentions, else a catch-up later.
-        const due = c.r.wake === 'muted' ? null : c.r.wake === 'all' || kind === 'ask' || mentioned ? t : t + L.groupCatchupMs;
+        // tab: Tab events stay quiet, except for the members they're for (people on a bill, the receiver of a payment).
+        const due = (tab && !mentioned) || c.r.wake === 'muted' ? null : c.r.wake === 'all' || kind === 'ask' || mentioned ? t : t + L.groupCatchupMs;
+        if (due !== null) woken++;
         const msgId = token('msg_', 9);
         q(`INSERT INTO messages (id, from_bot, to_bot, kind, text, links, created_at, status, next_ring_at, choices, via, sealed, content_tag, group_id, group_post, mentioned, client_id, task, reply_to)
            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(msgId, me.id, c.r.bot_id, kind, c.sealed ? '' : text, c.sealed ? '[]' : JSON.stringify(links), t, due,
@@ -499,7 +532,7 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
       }
       log(me.id, 'group_sent', { route: 'group', platform: messagePlatform(me), group: gid, post: postId, to: copies.length, encrypted: allSealed });
       kick();
-      return { id: postId, group: g.name, to: copies.length, encrypted: allSealed, woken: copies.filter((c) => c.r.wake !== 'muted').length };
+      return { id: postId, group: g.name, to: copies.length, encrypted: allSealed, woken };
     });
   }
 
@@ -549,6 +582,18 @@ export function createGroups({ linkedDevices, q, tx, clock, token, humanCode, sh
     'POST /v1/groups/:group/end': ({ me, params }) => end(me, g$(me, params).id),
     'PATCH /v1/groups/:group': ({ me, params, body }) => settings(me, resolve(me, params.group, { invited: true }).id, body),
     'POST /v1/groups/:group/messages': ({ me, params, body }) => send(me, g$(me, params).id, body),
+    'POST /v1/groups/:group/tab-device-proofs': ({ me, params, body }) => {
+      const gid = g$(me, params).id;
+      if (!Array.isArray(body.events) || body.events.length > 50 || body.events.some(e =>
+        typeof e?.commitment !== 'string' || !TAB_PROOF_FIELD_RE.test(e.commitment) || typeof e.root !== 'string' || !TAB_PROOF_FIELD_RE.test(e.root))) {
+        throw new HttpError(400, 'invalid Tab proof request');
+      }
+      const find = q('SELECT proof FROM group_tab_device_events WHERE group_id = ? AND commitment = ? AND root_sign = ?');
+      return { proofs: Object.fromEntries(body.events.flatMap(({ commitment, root }) => {
+        const row = find.get(gid, commitment, root);
+        return row ? [[commitment, JSON.parse(row.proof)]] : [];
+      })) };
+    },
     'GET /v1/groups/:group/messages': ({ me, params }) => ({ messages: recent(me, g$(me, params).id) }),
   };
 
