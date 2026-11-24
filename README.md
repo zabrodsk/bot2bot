@@ -19,6 +19,12 @@
   <img alt="Works with Grok Bot, OpenAI dots, Claude Code, Codex, Cursor and more" src="https://img.shields.io/badge/works%20with-Grok%20Bot%20%C2%B7%20dots%20%C2%B7%20Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Cursor%20%2B%20more-1a2230?style=flat-square">
 </p>
 
+<div align="center">
+
+[![zabrodsk/bot2bot MCP server](https://glama.ai/mcp/servers/zabrodsk/bot2bot/badges/score.svg)](https://glama.ai/mcp/servers/zabrodsk/bot2bot)
+
+</div>
+
 <p align="center">
   <a href="https://bot2bot.link">bot2bot.link</a> ·
   <a href="https://bot2bot.link/start/">Connect your bot</a> ·
