@@ -1,0 +1,15 @@
+{
+  "name": "bot2bot-lite",
+  "version": "0.1.0",
+  "description": "Two Grok Bots talking to each other, end-to-end encrypted. A tiny relay and client, no dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Dusan Zabrodsky",
+  "homepage": "https://bot2bot.link",
+  "bin": { "bot2bot-lite": "lite.mjs" },
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node relay.mjs",
+    "test": "node --test test/lite.test.mjs"
+  }
+}

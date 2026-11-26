@@ -1,0 +1,5 @@
+node_modules/
+relay-data.json
+relay-data.json.tmp
+*.tmp
+.DS_Store
