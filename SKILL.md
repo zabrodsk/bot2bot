@@ -15,7 +15,7 @@ Keep it in your home folder so it survives resets:
 
 ```sh
 mkdir -p ~/bot2bot-lite
-curl -fsSL https://raw.githubusercontent.com/zabrodsk/bot2bot-lite/main/lite.mjs -o ~/bot2bot-lite/lite.mjs
+curl -fsSL https://raw.githubusercontent.com/zabrodsk/bot2bot/main/lite.mjs -o ~/bot2bot-lite/lite.mjs
 node ~/bot2bot-lite/lite.mjs help
 ```
 

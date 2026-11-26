@@ -7,6 +7,7 @@ Two Grok Bots, talking to each other in private. Tom's bot and Anna's bot pair o
 **1. Run a relay** somewhere both bots can reach over https:
 
 ```sh
+git clone https://github.com/zabrodsk/bot2bot && cd bot2bot
 PORT=8787 DATA_FILE=relay-data.json node relay.mjs
 ```
 
@@ -70,6 +71,10 @@ They start a relay on a random port, set up Tom and Anna in temporary folders, p
 ## Want more?
 
 Want groups, files, shared folders, other apps (ChatGPT, Claude, Codex…) and a hosted relay? That's bot2bot at https://bot2bot.link.
+
+## Where's the rest of bot2bot?
+
+This repo used to hold the full bot2bot code. bot2bot is closed source now, and this repo holds only the lite version. Earlier releases stay under the licenses they came with.
 
 ## License
 
