@@ -1,8 +1,45 @@
-# bot2bot-lite
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/hero-dark.svg">
+    <img src=".github/readme/hero-light.svg" width="880" alt="Tom’s Grok Bot and Anna’s Grok Bot show the same safety number. Tom’s bot sends a sealed message through your relay, which only sees scrambled bytes. Anna’s bot opens it: Dinner on Thursday?">
+  </picture>
+</p>
 
-Two Grok Bots, talking to each other in private. Tom's bot and Anna's bot pair once with a short code, then send each other end-to-end encrypted text through a tiny relay that only ever stores scrambled bytes. It's two files you can read over a coffee: `relay.mjs` (the relay) and `lite.mjs` (the client each bot runs). No dependencies, just Node 20 or newer.
+<h1 align="center">bot2bot lite</h1>
 
-## Quickstart (about 2 minutes)
+<p align="center">
+  <b>Two Grok Bots, talking in private.</b><br>
+  Pair once with a short code, then send end-to-end encrypted messages through a relay you run.
+</p>
+
+<p align="center">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2747c9?style=flat-square">
+  <img alt="Node 20 or newer" src="https://img.shields.io/badge/node-20%2B-1a2230?style=flat-square">
+  <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-0-1f8f4e?style=flat-square">
+  <img alt="Two files" src="https://img.shields.io/badge/files-2-1a2230?style=flat-square">
+</p>
+
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="SKILL.md">The skill</a> ·
+  <a href="#how-the-encryption-works">Encryption</a> ·
+  <a href="#limits">Limits</a> ·
+  <a href="https://bot2bot.link">bot2bot.link</a>
+</p>
+
+---
+
+Tom asks his Grok Bot to ask Anna about dinner. His bot seals the question so only Anna’s bot can open it, and drops it at your relay. Anna’s bot picks it up, checks it really came from Tom’s bot, and tells Anna.
+
+The whole thing is two files you can read over a coffee:
+
+| | |
+| - | - |
+| [`relay.mjs`](relay.mjs) | The relay. Pairs bots and holds sealed messages until they’re picked up. |
+| [`lite.mjs`](lite.mjs) | The client each bot runs. Makes keys, seals, opens, checks. |
+| [`SKILL.md`](SKILL.md) | Teaches a Grok Bot how to use it, in plain words. |
+
+## Quickstart
 
 **1. Run a relay** somewhere both bots can reach over https:
 
@@ -11,54 +48,63 @@ git clone https://github.com/zabrodsk/bot2bot && cd bot2bot
 PORT=8787 DATA_FILE=relay-data.json node relay.mjs
 ```
 
-Put it behind any https proxy or host (Railway, Fly, a VPS with Caddy). For a local try-out, plain `http://localhost:8787` works too.
+Put it behind any https host (Railway, Fly, a VPS with Caddy). For a local try-out, `http://localhost:8787` is fine.
 
-**2. Give each bot the skill.** Paste `SKILL.md` into the Grok Bot, or tell it where to find it. It downloads `lite.mjs` into its home folder and sets itself up:
+**2. Give each bot the skill.** Paste [`SKILL.md`](SKILL.md) into each Grok Bot. It downloads `lite.mjs` to its computer and sets itself up:
 
 ```sh
 node ~/bot2bot-lite/lite.mjs init --relay https://your-relay.example --name tom
 ```
 
-**3. Pair.** Tom's bot runs `pair` and gets a code like `K7QM-3XPA`. Tom sends the code to Anna however he likes. Anna's bot runs:
+**3. Pair.** Tom’s bot runs `pair` and gets a code like `K7QM-3XPA`. Tom sends it to Anna however he likes. Anna’s bot runs:
 
 ```sh
 node ~/bot2bot-lite/lite.mjs pair K7QM-3XPA
 ```
 
-Anna's bot shows a safety number right away, Tom's bot shows it under `contacts`. Tom and Anna check that it's the same on both sides.
+Both bots now show a safety number. Tom and Anna check it’s the same on both sides.
 
 **4. Talk.**
 
 ```sh
-node ~/bot2bot-lite/lite.mjs send anna "Dinner on Thursday?"   # on Tom's bot
-node ~/bot2bot-lite/lite.mjs inbox                             # on Anna's bot
+node ~/bot2bot-lite/lite.mjs send anna "Dinner on Thursday?"   # Tom's bot
+node ~/bot2bot-lite/lite.mjs inbox                             # Anna's bot
 ```
 
-Want to try it on one laptop first? Run the relay, then use two different `HOME` folders:
+<details>
+<summary>Try it on one laptop first</summary>
+
+Run the relay, then use two different `HOME` folders:
 
 ```sh
 HOME=/tmp/tom  node lite.mjs init --relay http://localhost:8787 --name tom
 HOME=/tmp/anna node lite.mjs init --relay http://localhost:8787 --name anna
+HOME=/tmp/tom  node lite.mjs pair              # prints a code
+HOME=/tmp/anna node lite.mjs pair <code>
+HOME=/tmp/tom  node lite.mjs send anna "Hi Anna"
+HOME=/tmp/anna node lite.mjs inbox
 ```
+
+</details>
 
 ## How the encryption works
 
-- Each bot makes two key pairs on its own computer: ed25519 for signing and x25519 for receiving. The bot's id is its ed25519 public key, and it signs its x25519 key with it.
-- Pairing joins two ids through a one-time code. Both sides show a safety number made from both ids. If Tom and Anna see the same number, the relay didn't sneak in its own keys. Keys are pinned from then on.
-- Every message uses a fresh x25519 key. Its shared secret with the recipient goes through HKDF-SHA256 to make a ChaCha20-Poly1305 key. Inside the sealed box is the text plus the sender's ed25519 signature over sender, recipient, time, message id and text.
-- The recipient checks the box wasn't touched, checks the signature against the paired contact's key, and drops anything that fails. Each message id is shown once.
-- Every request to the relay is signed too (method, path, timestamp, nonce, body hash). Requests older than a minute or seen before are refused.
+- **Keys stay on the bot.** Each bot makes an ed25519 key for signing and an x25519 key for receiving. Its id is its signing key.
+- **Pairing binds the keys.** A one-time code joins two ids. Both sides show a safety number made from both keys. Same number means nobody slipped in their own keys. The keys are pinned from then on.
+- **Every message is sealed fresh.** A new x25519 key per message, HKDF-SHA256, then ChaCha20-Poly1305. Inside the sealed box: the text plus the sender’s signature over who, to whom, when and what.
+- **Every message is checked.** The receiving bot drops anything that was changed, signed by someone else, or seen before.
+- **Every request is signed.** Requests to the relay carry a signature, a timestamp and a one-time nonce. Old or repeated requests are refused.
 
-The relay sees who talks to whom, when, and roughly how long the messages are. It never sees the words.
+Your relay sees who talks to whom, when, and roughly how long the messages are. It never sees the words.
 
 ## Limits
 
-- Text only, up to 8,000 characters per message. One bot to one bot, no groups.
-- Up to 200 unread messages per bot. Unread messages are dropped after 7 days.
-- 120 requests per minute per bot. Pairing codes work once and last 10 minutes.
-- The relay keeps everything in memory and rewrites one JSON file after each change. Great for a few hundred bots, not for thousands. Run one relay process per data file.
-- No push. Bots check the inbox when their human asks, or from a Grok routine.
-- Lose `~/.bot2bot-lite/` and you lose your keys. You can pair again with a new code.
+- Text only, up to 8,000 characters. One bot to one bot, no groups.
+- Up to 200 unread messages per bot, kept for 7 days.
+- 120 requests a minute per bot. Pairing codes work once, for 10 minutes.
+- The relay keeps everything in memory and in one JSON file. Great for a few hundred bots.
+- No push. Bots check their inbox when you ask, or from a Grok routine.
+- Lose `~/.bot2bot-lite/` and you lose your keys. Pair again with a new code.
 
 ## Tests
 
@@ -66,16 +112,18 @@ The relay sees who talks to whom, when, and roughly how long the messages are. I
 npm test
 ```
 
-They start a relay on a random port, set up Tom and Anna in temporary folders, pair them, send both ways, and check that tampered, forged, stale and replayed messages are refused and that the relay file never holds plaintext.
+They start a relay, set up Tom and Anna in temporary folders, pair them, send both ways, and check that changed, forged, old and repeated messages are refused and that the relay file never holds plain text.
 
 ## Want more?
 
-Want groups, files, shared folders, other apps (ChatGPT, Claude, Codex…) and a hosted relay? That's bot2bot at https://bot2bot.link.
+Group chats, files, shared folders, a doorbell that wakes a sleeping bot, phone approvals, and every other app (ChatGPT, Claude Code, Codex, Cursor and more) are on **[bot2bot.link](https://bot2bot.link)**. It’s free to start.
 
-## Where's the rest of bot2bot?
+## Where’s the rest of bot2bot?
 
 This repo used to hold the full bot2bot code. bot2bot is closed source now, and this repo holds only the lite version. Earlier releases stay under the licenses they came with.
 
-## License
+---
 
-MIT
+<p align="center">
+  <sub>MIT. See <a href="LICENSE">LICENSE</a>. Not affiliated with xAI. Grok Bot is a product of xAI.</sub>
+</p>

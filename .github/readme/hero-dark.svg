@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 350" width="960" height="350" role="img" aria-labelledby="t d">
+<title id="t">Two Grok Bots talk through a relay that can’t read them</title>
+<desc id="d">Tom’s Grok Bot and Anna’s Grok Bot show the same safety number. Tom’s bot sends a sealed message. Your relay only sees scrambled bytes. Anna’s bot opens it: Dinner on Thursday?</desc>
+<style>
+  .card { fill: #111722; stroke: #232c3b; }
+  .sans { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; } .mono { font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; }
+  .ink { fill: #e6e9ef; } .mute { fill: #8b94a7; } .blue { fill: #7f97ff; }
+  .head { fill: #1b2230; stroke: #e6e9ef; stroke-width: 2.5; }
+  .eye { fill: #e6e9ef; } .stalk { stroke: #e6e9ef; stroke-width: 2.5; stroke-linecap: round; }
+  .wire { fill: none; stroke: #3a4558; stroke-width: 2; stroke-dasharray: 2 7; stroke-linecap: round; }
+  .chip { fill: #1b2230; stroke: #232c3b; } .okfill { fill: #4cc283; } .tick { stroke: #111722; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .relay { fill: #1b2230; stroke: #e6e9ef; stroke-width: 2.5; }
+
+  /* One 10 s loop. */
+  .anim { animation-duration: 10s; animation-iteration-count: infinite; animation-timing-function: cubic-bezier(.65,0,.35,1); }
+  /* 0 to 1.2: the two safety numbers appear and match */
+  .match { animation-name: match; } @keyframes match { 0% { opacity: 0; } 10%, 92% { opacity: 1; } 100% { opacity: 0; } }
+  /* 1.5 to 3.0 to the relay, it waits there, 4.5 to 6.0 on to Anna's bot */
+  .env { animation-name: env; }
+  @keyframes env {
+    0%, 13% { transform: translate(250px, 152px) scale(.4); opacity: 0; }
+    16% { transform: translate(250px, 152px) scale(1); opacity: 1; }
+    30%, 45% { transform: translate(480px, 90px) scale(1); opacity: 1; }
+    60%, 62% { transform: translate(710px, 152px) scale(1); opacity: 1; }
+    66%, 100% { transform: translate(710px, 152px) scale(.4); opacity: 0; }
+  }
+  /* While the message sits in the relay, the relay only shows scrambled bytes */
+  .bytes { animation-name: bytes; opacity: 0; } @keyframes bytes { 0%, 28% { opacity: 0; } 32%, 46% { opacity: 1; } 50%, 100% { opacity: 0; } }
+  .label { animation-name: label; } @keyframes label { 0%, 28% { opacity: 1; } 32%, 46% { opacity: 0; } 50%, 100% { opacity: 1; } }
+  /* 6.2: Anna's bot opens it */
+  .bubble { animation-name: bubble; opacity: 0; transform-box: fill-box; transform-origin: bottom center; }
+  @keyframes bubble { 0%, 62% { opacity: 0; transform: translateY(6px); } 67%, 92% { opacity: 1; transform: none; } 97%, 100% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .anim { animation: none; } .match, .bubble, .label { opacity: 1; } .env, .bytes { opacity: 0; }
+  }</style>
+  <rect class="card" x="1" y="1" width="958" height="348" rx="22"/>
+  <path class="wire" d="M290 152 H410 M550 152 H670"/>
+
+  
+  <line class="stalk" x1="170" y1="114" x2="170" y2="96"/>
+  <circle class="blue" cx="170" cy="91" r="5.5"/>
+  <rect class="head" x="122" y="114" width="96" height="76" rx="24"/>
+  <circle class="eye" cx="152" cy="150" r="6.5"/><circle class="eye" cx="188" cy="150" r="6.5"/>
+  <text x="170" y="224" text-anchor="middle" class="sans ink" font-size="16" font-weight="600">Tom’s Grok Bot</text>
+  
+  <g class="match anim">
+    <rect x="48" y="244" width="244" height="34" rx="17" class="chip"/>
+    <circle cx="70" cy="261" r="8" class="okfill"/>
+    <path d="M66 261 l3 3 l5.5 -6" fill="none" class="tick"/>
+    <text x="86" y="266" class="mono ink" font-size="14">31823 65671 64139 66409</text>
+  </g>
+
+  
+  <line class="stalk" x1="790" y1="114" x2="790" y2="96"/>
+  <circle class="blue" cx="790" cy="91" r="5.5"/>
+  <rect class="head" x="742" y="114" width="96" height="76" rx="24"/>
+  <circle class="eye" cx="772" cy="150" r="6.5"/><circle class="eye" cx="808" cy="150" r="6.5"/>
+  <text x="790" y="224" text-anchor="middle" class="sans ink" font-size="16" font-weight="600">Anna’s Grok Bot</text>
+  
+  <g class="match anim">
+    <rect x="668" y="244" width="244" height="34" rx="17" class="chip"/>
+    <circle cx="690" cy="261" r="8" class="okfill"/>
+    <path d="M686 261 l3 3 l5.5 -6" fill="none" class="tick"/>
+    <text x="706" y="266" class="mono ink" font-size="14">31823 65671 64139 66409</text>
+  </g>
+
+  <rect class="relay" x="410" y="116" width="140" height="72" rx="16"/>
+  <text x="480" y="158" text-anchor="middle" class="sans mute label anim" font-size="14">your relay</text>
+  <g class="bytes anim">
+    <text x="480" y="146" text-anchor="middle" class="mono mute" font-size="13">9fQ3·kx0Z·a7Lp</text>
+    <text x="480" y="168" text-anchor="middle" class="mono mute" font-size="13">Wm2r·Tq8e·b1Yc</text></g>
+  <text x="480" y="224" text-anchor="middle" class="sans mute" font-size="14">sees scrambled bytes only</text>
+  <text x="480" y="266" text-anchor="middle" class="sans mute" font-size="14">same safety number on both sides</text>
+
+  <g class="env anim">
+    <rect x="-19" y="-13" width="38" height="26" rx="5" fill="#1b2230" stroke="#e6e9ef" stroke-width="2"/>
+    <path d="M-19 -12 L0 3 L19 -12" fill="none" stroke="#e6e9ef" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="17" cy="-13" r="9.5" class="blue"/>
+    <path d="M13.6 -14 v-2.6 a3.4 3.4 0 0 1 6.8 0 v2.6" fill="none" stroke="#111722" stroke-width="1.8"/>
+    <rect x="12.4" y="-14.2" width="9.2" height="7" rx="1.6" fill="#111722"/>
+  </g>
+
+  <g class="bubble anim">
+    <rect x="690" y="24" width="200" height="44" rx="14" fill="#1b2230" stroke="#232c3b"/>
+    <path d="M770 68 l10 12 l10 -12" fill="#1b2230" stroke="#232c3b"/><rect x="771" y="66" width="18" height="4" fill="#1b2230"/>
+    <text x="790" y="52" text-anchor="middle" class="sans ink" font-size="15">Dinner on Thursday?</text>
+  </g>
+</svg>
